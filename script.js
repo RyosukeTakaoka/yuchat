@@ -276,4 +276,3 @@ input.addEventListener(
 
     }
 );
-```
