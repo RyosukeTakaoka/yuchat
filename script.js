@@ -1,6 +1,6 @@
 import {
     initializeApp
-} from "https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js";
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
 
 import {
     getFirestore,
@@ -16,7 +16,7 @@ import {
     orderBy,
     serverTimestamp,
     writeBatch
-} from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
 import {
     getAuth,
@@ -25,7 +25,7 @@ import {
     signInAnonymously,
     onAuthStateChanged,
     signOut
-} from "https://www.gstatic.com/firebasejs/12.1.0/firebase-auth.js";
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 
 
 /* =========================
@@ -33,7 +33,7 @@ import {
 ========================= */
 
 const firebaseConfig = {
-    apiKey: "AIzaSyDJFat47sz6KkaGuvj1dVjfELhRmH_2Tw",
+    apiKey: "AIzaSyDJFat47USz6KKaGuvj1dVjfELhRmH_2Tw",
     authDomain: "yuuchat-be666.firebaseapp.com",
     projectId: "yuuchat-be666",
     storageBucket: "yuuchat-be666.firebasestorage.app",
@@ -47,8 +47,7 @@ const db = getFirestore(app);
 
 const auth = getAuth(app);
 
-const googleProvider =
-    new GoogleAuthProvider();
+const googleProvider = new GoogleAuthProvider();
 
 
 /* =========================
