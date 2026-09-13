@@ -1,1 +1,66 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
+    <title>ゆうChat</title>
+
+    <link rel="stylesheet" href="./style.css">
+    <link rel="manifest" href="./manifest.json">
+
+    <meta name="theme-color" content="#ffffff">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="ゆうChat">
+
+    <link rel="apple-touch-icon" href="./icons/icon-192.png">
+</head>
+
+<body>
+
+    <div class="app">
+
+        <header class="header">
+            <div>
+                <div class="app-name">ゆうChat</div>
+                <div class="status">オンライン</div>
+            </div>
+
+            <button class="call-button">📞</button>
+        </header>
+
+        <main id="messages" class="messages">
+
+            <div class="message other">
+                <div class="bubble">
+                    こんにちは！
+                </div>
+            </div>
+
+            <div class="message mine">
+                <div class="bubble">
+                    こんにちは！
+                </div>
+            </div>
+
+        </main>
+
+        <div class="input-area">
+            <input
+                id="messageInput"
+                type="text"
+                placeholder="メッセージを入力"
+            >
+
+            <button id="sendButton">
+                送信
+            </button>
+        </div>
+
+    </div>
+
+    <script src="./script.js"></script>
+
+</body>
+</html>
