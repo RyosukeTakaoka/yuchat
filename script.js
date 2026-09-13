@@ -1,109 +1,163 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
 
 import {
-    getFirestore,
-    collection,
-    addDoc,
-    onSnapshot,
-    query,
-    orderBy,
-    serverTimestamp
+getFirestore,
+collection,
+addDoc,
+onSnapshot,
+query,
+orderBy,
+serverTimestamp,
+updateDoc,
+doc
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
-
-const firebaseConfig = {
-    apiKey: "AIzaSyDJFat47sz6KkaGuvj1dVjfELhRmH_2Tw",
-    authDomain: "yuuchat-be666.firebaseapp.com",
-    projectId: "yuuchat-be666",
-    storageBucket: "yuuchat-be666.firebasestorage.app",
-    messagingSenderId: "89509274877",
-    appId: "1:89509274877:web:978a6179645ce88c3d4a94"
-};
-
-
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-
-
 /* =========================
-   ユーザー名
+Firebase
 ========================= */
 
-let username = localStorage.getItem("yuuchat_username");
+const firebaseConfig = {
+apiKey: "AIzaSyDJFat47sz6KkaGuvj1dVjfELhRmH_2Tw",
+authDomain: "yuuchat-be666.firebaseapp.com",
+projectId: "yuuchat-be666",
+storageBucket: "yuuchat-be666.firebasestorage.app",
+messagingSenderId: "89509274877",
+appId: "1:89509274877:web:978a6179645ce88c3d4a94"
+};
+
+const app = initializeApp(firebaseConfig);
+
+const db = getFirestore(app);
+
+/* =========================
+ユーザー名
+========================= */
+
+let username =
+localStorage.getItem("yuuchat_username");
 
 if (!username) {
 
-    username = prompt("あなたの名前を入力してください");
+```
+username =
+    prompt("あなたの名前を入力してください");
 
-    if (!username || username.trim() === "") {
-        username = "ゆうた";
-    }
-
-    username = username.trim();
-
-    localStorage.setItem(
-        "yuuchat_username",
-        username
-    );
+if (
+    !username ||
+    username.trim() === ""
+) {
+    username = "ゆうた";
 }
 
+username = username.trim();
+
+localStorage.setItem(
+    "yuuchat_username",
+    username
+);
+```
+
+}
 
 /* =========================
-   HTML
+HTML
 ========================= */
 
 const status =
-    document.getElementById("status");
+document.getElementById("status");
 
 const addFriendButton =
-    document.getElementById("addFriendButton");
+document.getElementById(
+"addFriendButton"
+);
 
 const friendsList =
-    document.getElementById("friendsList");
+document.getElementById(
+"friendsList"
+);
 
 const chatHeader =
-    document.getElementById("chatHeader");
+document.getElementById(
+"chatHeader"
+);
 
 const messages =
-    document.getElementById("messages");
+document.getElementById(
+"messages"
+);
 
 const input =
-    document.getElementById("messageInput");
+document.getElementById(
+"messageInput"
+);
 
 const sendButton =
-    document.getElementById("sendButton");
+document.getElementById(
+"sendButton"
+);
 
+const replyBar =
+document.getElementById(
+"replyBar"
+);
+
+const replyText =
+document.getElementById(
+"replyText"
+);
+
+const cancelReplyButton =
+document.getElementById(
+"cancelReplyButton"
+);
 
 status.textContent =
-    username + "としてオンライン";
-
+username + "としてオンライン";
 
 /* =========================
-   Firestore
+Firestore
 ========================= */
 
 const friendsCollection =
-    collection(db, "friends");
+collection(db, "friends");
 
 const messagesCollection =
-    collection(db, "messages");
-
+collection(db, "messages");
 
 /* =========================
-   現在の相手
+現在の状態
 ========================= */
 
 let selectedFriend = "";
 
+let replyTarget = null;
+
+let stopMessages = null;
 
 /* =========================
-   友達追加
+通知許可
 ========================= */
 
-addFriendButton.onclick = async function () {
+if ("Notification" in window) {
 
+```
+Notification.requestPermission();
+```
+
+}
+
+/* =========================
+友達追加
+========================= */
+
+addFriendButton.onclick =
+async function () {
+
+```
     const friendName =
-        prompt("追加する友達の名前を入力してください");
+        prompt(
+            "追加する友達の名前を入力してください"
+        );
 
     if (!friendName) {
         return;
@@ -116,6 +170,17 @@ addFriendButton.onclick = async function () {
         return;
     }
 
+
+    if (name === username) {
+
+        alert(
+            "自分自身は追加できません。"
+        );
+
+        return;
+    }
+
+
     try {
 
         await addDoc(
@@ -123,65 +188,88 @@ addFriendButton.onclick = async function () {
             {
                 owner: username,
                 friendName: name,
-                createdAt: serverTimestamp()
+                createdAt:
+                    serverTimestamp()
             }
         );
 
         alert(
-            name + "さんを友達に追加しました！"
+            name +
+            "さんを友達に追加しました！"
         );
 
     } catch (error) {
 
-        console.error(error);
+        console.error(
+            "友達追加エラー:",
+            error
+        );
 
         alert(
             "友達を追加できませんでした。"
         );
 
     }
-};
 
+};
+```
 
 /* =========================
-   友達一覧
+友達一覧
 ========================= */
 
-const friendsQuery = query(
-    friendsCollection,
-    orderBy("createdAt", "asc")
+const friendsQuery =
+query(
+friendsCollection,
+orderBy(
+"createdAt",
+"asc"
+)
 );
 
-
 onSnapshot(
-    friendsQuery,
-    function (snapshot) {
+friendsQuery,
+function (snapshot) {
 
-        friendsList.innerHTML = "";
-
-        snapshot.forEach(
-            function (doc) {
-
-                const data = doc.data();
-
-                if (data.owner !== username) {
-                    return;
-                }
-
-                const friend =
-                    document.createElement("button");
-
-                friend.className = "friend";
-
-                friend.type = "button";
-
-                friend.textContent =
-                    "👤 " + data.friendName;
+```
+    friendsList.innerHTML = "";
 
 
-                /* ここが重要 */
+    snapshot.forEach(
+        function (friendDoc) {
 
-                friend.onclick = function () {
+            const data =
+                friendDoc.data();
+
+
+            if (
+                data.owner !== username
+            ) {
+                return;
+            }
+
+
+            const friend =
+                document.createElement(
+                    "button"
+                );
+
+
+            friend.className =
+                "friend";
+
+
+            friend.type =
+                "button";
+
+
+            friend.textContent =
+                "👤 " +
+                data.friendName;
+
+
+            friend.onclick =
+                function () {
 
                     selectFriend(
                         data.friendName
@@ -190,219 +278,797 @@ onSnapshot(
                 };
 
 
-                friendsList.appendChild(friend);
+            friendsList.appendChild(
+                friend
+            );
 
-            }
-        );
+        }
+    );
 
-    }
+}
+```
+
 );
 
-
 /* =========================
-   友達を選択
+友達を選択
 ========================= */
 
 function selectFriend(friendName) {
 
-    selectedFriend = friendName;
+```
+selectedFriend =
+    friendName;
 
-    chatHeader.textContent =
-        "💬 " + friendName;
 
-    input.placeholder =
-        friendName + "にメッセージ";
+chatHeader.textContent =
+    "💬 " +
+    friendName;
 
-    input.disabled = false;
 
-    sendButton.disabled = false;
+input.placeholder =
+    friendName +
+    "にメッセージ";
 
-    messages.innerHTML = "";
 
-    loadMessages();
+input.disabled =
+    false;
 
-    input.focus();
+
+sendButton.disabled =
+    false;
+
+
+cancelReply();
+
+
+loadMessages();
+
+
+input.focus();
+```
+
 }
 
-
 /* =========================
-   メッセージ読み込み
+メッセージ読み込み
 ========================= */
-
-let stopMessages = null;
-
 
 function loadMessages() {
 
-    if (stopMessages) {
-        stopMessages();
-    }
-
-    if (!selectedFriend) {
-        return;
-    }
-
-
-    const messagesQuery = query(
-        messagesCollection,
-        orderBy("createdAt", "asc")
-    );
-
-
-    stopMessages =
-        onSnapshot(
-            messagesQuery,
-            function (snapshot) {
-
-                messages.innerHTML = "";
-
-                snapshot.forEach(
-                    function (doc) {
-
-                        const data =
-                            doc.data();
-
-
-                        const myMessage =
-                            data.username === username &&
-                            data.receiver === selectedFriend;
-
-
-                        const friendMessage =
-                            data.username === selectedFriend &&
-                            data.receiver === username;
-
-
-                        if (
-                            !myMessage &&
-                            !friendMessage
-                        ) {
-                            return;
-                        }
-
-
-                        const message =
-                            document.createElement(
-                                "div"
-                            );
-
-
-                        if (myMessage) {
-
-                            message.className =
-                                "message mine";
-
-                        } else {
-
-                            message.className =
-                                "message other";
-
-                        }
-
-
-                        const bubble =
-                            document.createElement(
-                                "div"
-                            );
-
-                        bubble.className =
-                            "bubble";
-
-
-                        bubble.textContent =
-                            data.username +
-                            "： " +
-                            data.text;
-
-
-                        message.appendChild(
-                            bubble
-                        );
-
-                        messages.appendChild(
-                            message
-                        );
-
-                    }
-                );
-
-
-                messages.scrollTop =
-                    messages.scrollHeight;
-
-            }
-        );
+```
+if (stopMessages) {
+    stopMessages();
 }
 
 
+messages.innerHTML = "";
+
+
+if (!selectedFriend) {
+    return;
+}
+
+
+const messagesQuery =
+    query(
+        messagesCollection,
+        orderBy(
+            "createdAt",
+            "asc"
+        )
+    );
+
+
+stopMessages =
+    onSnapshot(
+        messagesQuery,
+        function (snapshot) {
+
+            messages.innerHTML = "";
+
+
+            snapshot.forEach(
+                function (messageDoc) {
+
+                    const data =
+                        messageDoc.data();
+
+
+                    const myMessage =
+                        data.username ===
+                            username &&
+                        data.receiver ===
+                            selectedFriend;
+
+
+                    const friendMessage =
+                        data.username ===
+                            selectedFriend &&
+                        data.receiver ===
+                            username;
+
+
+                    if (
+                        !myMessage &&
+                        !friendMessage
+                    ) {
+                        return;
+                    }
+
+
+                    createMessageElement(
+                        messageDoc.id,
+                        data,
+                        myMessage
+                    );
+
+                }
+            );
+
+
+            messages.scrollTop =
+                messages.scrollHeight;
+
+
+            /* 新着通知 */
+
+            const lastMessage =
+                snapshot.docs[
+                    snapshot.docs.length - 1
+                ];
+
+
+            if (
+                lastMessage &&
+                lastMessage.data().username !==
+                    username &&
+                document.hidden
+            ) {
+
+                const data =
+                    lastMessage.data();
+
+
+                showNotification(
+                    data.username,
+                    data.text
+                );
+
+            }
+
+        }
+    );
+```
+
+}
+
 /* =========================
-   メッセージ送信
+メッセージ表示
+========================= */
+
+function createMessageElement(
+messageId,
+data,
+isMine
+) {
+
+```
+const message =
+    document.createElement(
+        "div"
+    );
+
+
+message.className =
+    isMine
+        ? "message mine"
+        : "message other";
+
+
+const container =
+    document.createElement(
+        "div"
+    );
+
+
+container.className =
+    "message-container";
+
+
+/* 削除済み */
+
+if (data.deleted) {
+
+    const deleted =
+        document.createElement(
+            "div"
+        );
+
+
+    deleted.className =
+        "deleted-message";
+
+
+    deleted.textContent =
+        "このメッセージは取り消されました";
+
+
+    container.appendChild(
+        deleted
+    );
+
+
+    message.appendChild(
+        container
+    );
+
+
+    messages.appendChild(
+        message
+    );
+
+
+    return;
+}
+
+
+/* 返信元 */
+
+if (data.replyTo) {
+
+    const reply =
+        document.createElement(
+            "div"
+        );
+
+
+    reply.className =
+        "reply-preview";
+
+
+    reply.textContent =
+        data.replyTo.username +
+        "： " +
+        data.replyTo.text;
+
+
+    container.appendChild(
+        reply
+    );
+
+}
+
+
+/* 吹き出し */
+
+const bubble =
+    document.createElement(
+        "div"
+    );
+
+
+bubble.className =
+    "bubble";
+
+
+bubble.textContent =
+    data.text;
+
+
+container.appendChild(
+    bubble
+);
+
+
+/* リアクション */
+
+if (
+    data.reactions &&
+    Object.keys(data.reactions).length > 0
+) {
+
+    const reactions =
+        document.createElement(
+            "div"
+        );
+
+
+    reactions.className =
+        "reactions";
+
+
+    Object.entries(
+        data.reactions
+    ).forEach(
+        function ([emoji, users]) {
+
+            if (
+                users &&
+                users.length > 0
+            ) {
+
+                const reaction =
+                    document.createElement(
+                        "span"
+                    );
+
+
+                reaction.textContent =
+                    emoji +
+                    " " +
+                    users.length;
+
+
+                reactions.appendChild(
+                    reaction
+                );
+
+            }
+
+        }
+    );
+
+
+    container.appendChild(
+        reactions
+    );
+
+}
+
+
+/* 操作ボタン */
+
+const actions =
+    document.createElement(
+        "div"
+    );
+
+
+actions.className =
+    "message-actions";
+
+
+const reactionButton =
+    createActionButton(
+        "😀",
+        function () {
+
+            addReaction(
+                messageId,
+                data
+            );
+
+        }
+    );
+
+
+const replyButton =
+    createActionButton(
+        "↩️",
+        function () {
+
+            startReply(
+                messageId,
+                data
+            );
+
+        }
+    );
+
+
+actions.appendChild(
+    reactionButton
+);
+
+
+actions.appendChild(
+    replyButton
+);
+
+
+if (isMine) {
+
+    const deleteButton =
+        createActionButton(
+            "🗑️",
+            function () {
+
+                deleteMessage(
+                    messageId
+                );
+
+            }
+        );
+
+
+    actions.appendChild(
+        deleteButton
+    );
+
+}
+
+
+container.appendChild(
+    actions
+);
+
+
+message.appendChild(
+    container
+);
+
+
+messages.appendChild(
+    message
+);
+```
+
+}
+
+/* =========================
+操作ボタン
+========================= */
+
+function createActionButton(
+text,
+action
+) {
+
+```
+const button =
+    document.createElement(
+        "button"
+    );
+
+
+button.type =
+    "button";
+
+
+button.className =
+    "action-button";
+
+
+button.textContent =
+    text;
+
+
+button.onclick =
+    action;
+
+
+return button;
+```
+
+}
+
+/* =========================
+リアクション
+========================= */
+
+async function addReaction(
+messageId,
+data
+) {
+
+```
+const reactions =
+    data.reactions
+        ? JSON.parse(
+            JSON.stringify(
+                data.reactions
+            )
+        )
+        : {};
+
+
+const emoji = "❤️";
+
+
+if (!reactions[emoji]) {
+    reactions[emoji] = [];
+}
+
+
+if (
+    reactions[emoji].includes(
+        username
+    )
+) {
+
+    reactions[emoji] =
+        reactions[emoji].filter(
+            function (name) {
+                return name !== username;
+            }
+        );
+
+} else {
+
+    reactions[emoji].push(
+        username
+    );
+
+}
+
+
+try {
+
+    await updateDoc(
+        doc(
+            db,
+            "messages",
+            messageId
+        ),
+        {
+            reactions: reactions
+        }
+    );
+
+} catch (error) {
+
+    console.error(
+        "リアクションエラー:",
+        error
+    );
+
+}
+```
+
+}
+
+/* =========================
+返信
+========================= */
+
+function startReply(
+messageId,
+data
+) {
+
+```
+replyTarget = {
+
+    id: messageId,
+
+    username:
+        data.username,
+
+    text:
+        data.text
+
+};
+
+
+replyText.textContent =
+    data.username +
+    "： " +
+    data.text;
+
+
+replyBar.classList.remove(
+    "hidden"
+);
+
+
+input.focus();
+```
+
+}
+
+/* =========================
+返信キャンセル
+========================= */
+
+function cancelReply() {
+
+```
+replyTarget = null;
+
+replyBar.classList.add(
+    "hidden"
+);
+
+replyText.textContent = "";
+```
+
+}
+
+cancelReplyButton.onclick =
+cancelReply;
+
+/* =========================
+メッセージ送信
 ========================= */
 
 async function sendMessage() {
 
-    if (!selectedFriend) {
+```
+if (!selectedFriend) {
 
-        alert(
-            "先に友達を選択してください。"
-        );
+    alert(
+        "先に友達を選択してください。"
+    );
 
-        return;
-    }
-
-
-    const text =
-        input.value.trim();
-
-
-    if (text === "") {
-        return;
-    }
-
-
-    try {
-
-        await addDoc(
-            messagesCollection,
-            {
-                text: text,
-                username: username,
-                receiver: selectedFriend,
-                createdAt: serverTimestamp()
-            }
-        );
-
-        input.value = "";
-
-    } catch (error) {
-
-        console.error(error);
-
-        alert(
-            "メッセージを送信できませんでした。"
-        );
-
-    }
+    return;
 }
 
 
+const text =
+    input.value.trim();
+
+
+if (text === "") {
+    return;
+}
+
+
+try {
+
+    const messageData = {
+
+        text: text,
+
+        username: username,
+
+        receiver:
+            selectedFriend,
+
+        createdAt:
+            serverTimestamp()
+
+    };
+
+
+    if (replyTarget) {
+
+        messageData.replyTo = {
+
+            username:
+                replyTarget.username,
+
+            text:
+                replyTarget.text
+
+        };
+
+    }
+
+
+    await addDoc(
+        messagesCollection,
+        messageData
+    );
+
+
+    input.value = "";
+
+
+    cancelReply();
+
+
+} catch (error) {
+
+    console.error(
+        "送信エラー:",
+        error
+    );
+
+
+    alert(
+        "メッセージを送信できませんでした。"
+    );
+
+}
+```
+
+}
+
 /* =========================
-   送信
+送信ボタン
 ========================= */
 
 sendButton.onclick =
-    sendMessage;
-
+sendMessage;
 
 /* =========================
-   Enter
+Enter
 ========================= */
 
 input.onkeydown =
-    function (event) {
+function (event) {
 
-        if (event.key === "Enter") {
-            sendMessage();
+```
+    if (
+        event.key ===
+        "Enter"
+    ) {
+
+        sendMessage();
+
+    }
+
+};
+```
+
+/* =========================
+送信取り消し
+========================= */
+
+async function deleteMessage(
+messageId
+) {
+
+```
+const answer =
+    confirm(
+        "このメッセージを取り消しますか？"
+    );
+
+
+if (!answer) {
+    return;
+}
+
+
+try {
+
+    await updateDoc(
+        doc(
+            db,
+            "messages",
+            messageId
+        ),
+        {
+            deleted: true
         }
+    );
 
-    };
+} catch (error) {
+
+    console.error(
+        "削除エラー:",
+        error
+    );
+
+}
+```
+
+}
+
+/* =========================
+通知
+========================= */
+
+function showNotification(
+sender,
+text
+) {
+
+```
+if (
+    !("Notification" in window)
+) {
+    return;
+}
+
+
+if (
+    Notification.permission ===
+    "granted"
+) {
+
+    new Notification(
+        sender +
+        "からメッセージ",
+        {
+            body: text,
+            icon: "./icons/icon-192.png"
+        }
+    );
+
+}
+```
+
+}
