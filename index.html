@@ -1,5 +1,7 @@
+```html
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -30,37 +32,36 @@
             <button class="call-button">📞</button>
         </header>
 
+
         <main id="messages" class="messages">
 
-            <div class="message other">
-                <div class="bubble">
-                    こんにちは！
-                </div>
-            </div>
-
-            <div class="message mine">
-                <div class="bubble">
-                    こんにちは！
-                </div>
-            </div>
+            <!-- Firebaseからメッセージがここに表示されます -->
 
         </main>
 
+
         <div class="input-area">
+
             <input
                 id="messageInput"
                 type="text"
                 placeholder="メッセージを入力"
+                autocomplete="off"
             >
 
             <button id="sendButton">
                 送信
             </button>
+
         </div>
 
     </div>
 
-    <script src="./script.js"></script>
+
+    <!-- Firebase対応のscript.js -->
+    <script type="module" src="./script.js"></script>
 
 </body>
+
 </html>
+```
