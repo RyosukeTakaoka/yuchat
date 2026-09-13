@@ -12,7 +12,7 @@ import {
 
 
 /* =========================
-   Firebase設定
+   Firebase
 ========================= */
 
 const firebaseConfig = {
@@ -23,7 +23,6 @@ const firebaseConfig = {
     messagingSenderId: "89509274877",
     appId: "1:89509274877:web:978a6179645ce88c3d4a94"
 };
-
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
@@ -53,16 +52,24 @@ if (!username) {
    HTML
 ========================= */
 
-const input = document.getElementById("messageInput");
-const sendButton = document.getElementById("sendButton");
-const messages = document.getElementById("messages");
 const status = document.getElementById("status");
-
 const addFriendButton =
     document.getElementById("addFriendButton");
 
 const friendsList =
     document.getElementById("friendsList");
+
+const chatHeader =
+    document.getElementById("chatHeader");
+
+const messages =
+    document.getElementById("messages");
+
+const input =
+    document.getElementById("messageInput");
+
+const sendButton =
+    document.getElementById("sendButton");
 
 
 status.textContent =
@@ -73,55 +80,72 @@ status.textContent =
    Firestore
 ========================= */
 
+const friendsCollection =
+    collection(db, "friends");
+
 const messagesCollection =
     collection(db, "messages");
 
-const friendsCollection =
-    collection(db, "friends");
+
+/* =========================
+   現在のチャット相手
+========================= */
+
+let selectedFriend = null;
 
 
 /* =========================
    友達追加
 ========================= */
 
-addFriendButton.addEventListener("click", async function () {
+addFriendButton.addEventListener(
+    "click",
+    async function () {
 
-    const friendName =
-        prompt("追加する友達の名前を入力してください");
+        const friendName =
+            prompt("追加する友達の名前を入力してください");
 
-    if (!friendName || friendName.trim() === "") {
-        return;
+        if (!friendName || friendName.trim() === "") {
+            return;
+        }
+
+        const name = friendName.trim();
+
+        try {
+
+            await addDoc(friendsCollection, {
+
+                owner: username,
+
+                friendName: name,
+
+                createdAt: serverTimestamp()
+
+            });
+
+            alert(
+                name + "さんを友達に追加しました！"
+            );
+
+        } catch (error) {
+
+            console.error(
+                "友達追加エラー:",
+                error
+            );
+
+            alert(
+                "友達を追加できませんでした。"
+            );
+
+        }
+
     }
-
-    const name = friendName.trim();
-
-    try {
-
-        await addDoc(friendsCollection, {
-
-            owner: username,
-
-            friendName: name,
-
-            createdAt: serverTimestamp()
-
-        });
-
-        alert(name + "さんを友達に追加しました！");
-
-    } catch (error) {
-
-        console.error("友達追加エラー:", error);
-
-        alert("友達を追加できませんでした。");
-
-    }
-
-});
+);
 
 
 /* =========================
-   友達一覧表示
+   友達一覧
 ========================= */
 
 const friendsQuery = query(
@@ -130,66 +154,67 @@ const friendsQuery = query(
 );
 
 
-onSnapshot(friendsQuery, function(snapshot) {
+onSnapshot(
+    friendsQuery,
+    function (snapshot) {
 
-    friendsList.innerHTML = "";
+        friendsList.innerHTML = "";
 
-    snapshot.forEach(function(doc) {
+        snapshot.forEach(
+            function (doc) {
 
-        const data = doc.data();
+                const data = doc.data();
 
-        // 自分が追加した友達だけ表示
-        if (data.owner !== username) {
-            return;
-        }
+                if (data.owner !== username) {
+                    return;
+                }
 
-        const friend = document.createElement("button");
+                const friend =
+                    document.createElement("button");
 
-        friend.className = "friend";
+                friend.className = "friend";
 
-        friend.textContent =
-            "👤 " + data.friendName;
+                friend.textContent =
+                    "👤 " + data.friendName;
 
-        friendsList.appendChild(friend);
+                friend.addEventListener(
+                    "click",
+                    function () {
 
-    });
+                        openChat(
+                            data.friendName
+                        );
 
-});
+                    }
+                );
+
+                friendsList.appendChild(friend);
+
+            }
+        );
+
+    }
+);
 
 
 /* =========================
-   メッセージ送信
+   チャットを開く
 ========================= */
 
-async function sendMessage() {
+function openChat(friendName) {
 
-    const text = input.value.trim();
+    selectedFriend = friendName;
 
-    if (text === "") {
-        return;
-    }
+    chatHeader.textContent =
+        "💬 " + friendName;
 
-    try {
+    input.disabled = false;
+    sendButton.disabled = false;
 
-        await addDoc(messagesCollection, {
+    input.placeholder =
+        friendName + "にメッセージ";
 
-            text: text,
-
-            username: username,
-
-            createdAt: serverTimestamp()
-
-        });
-
-        input.value = "";
-
-    } catch (error) {
-
-        console.error("送信エラー:", error);
-
-        alert("メッセージを送信できませんでした。");
-
-    }
+    loadMessages();
 
 }
 
@@ -198,56 +223,182 @@ async function sendMessage() {
    メッセージ表示
 ========================= */
 
-const messagesQuery = query(
-    messagesCollection,
-    orderBy("createdAt", "asc")
-);
+let unsubscribeMessages = null;
 
 
-onSnapshot(messagesQuery, function(snapshot) {
+function loadMessages() {
+
+    if (unsubscribeMessages) {
+        unsubscribeMessages();
+    }
 
     messages.innerHTML = "";
 
-    snapshot.forEach(function(doc) {
+    if (!selectedFriend) {
+        return;
+    }
 
-        const data = doc.data();
 
-        const message =
-            document.createElement("div");
+    const messagesQuery = query(
+        messagesCollection,
+        orderBy("createdAt", "asc")
+    );
 
-        if (data.username === username) {
 
-            message.className =
-                "message mine";
+    unsubscribeMessages =
+        onSnapshot(
+            messagesQuery,
+            function (snapshot) {
 
-        } else {
+                messages.innerHTML = "";
 
-            message.className =
-                "message other";
+                snapshot.forEach(
+                    function (doc) {
 
-        }
+                        const data =
+                            doc.data();
 
-        const bubble =
-            document.createElement("div");
 
-        bubble.className = "bubble";
+                        /*
+                         * 自分と相手の
+                         * チャットだけ表示
+                         */
 
-        const name =
-            data.username || "相手";
+                        const isMyMessage =
+                            data.username === username;
 
-        bubble.textContent =
-            name + "： " + data.text;
+                        const isFromFriend =
+                            data.username === selectedFriend;
 
-        message.appendChild(bubble);
 
-        messages.appendChild(message);
+                        if (
+                            !isMyMessage &&
+                            !isFromFriend
+                        ) {
+                            return;
+                        }
 
-    });
 
-    messages.scrollTop =
-        messages.scrollHeight;
+                        const message =
+                            document.createElement(
+                                "div"
+                            );
 
-});
+
+                        if (isMyMessage) {
+
+                            message.className =
+                                "message mine";
+
+                        } else {
+
+                            message.className =
+                                "message other";
+
+                        }
+
+
+                        const bubble =
+                            document.createElement(
+                                "div"
+                            );
+
+                        bubble.className =
+                            "bubble";
+
+
+                        const name =
+                            data.username ||
+                            "相手";
+
+
+                        bubble.textContent =
+                            name +
+                            "： " +
+                            data.text;
+
+
+                        message.appendChild(
+                            bubble
+                        );
+
+                        messages.appendChild(
+                            message
+                        );
+
+                    }
+                );
+
+
+                messages.scrollTop =
+                    messages.scrollHeight;
+
+            }
+        );
+
+}
+
+
+/* =========================
+   メッセージ送信
+========================= */
+
+async function sendMessage() {
+
+    if (!selectedFriend) {
+
+        alert(
+            "先に友達を選択してください。"
+        );
+
+        return;
+    }
+
+
+    const text =
+        input.value.trim();
+
+
+    if (text === "") {
+        return;
+    }
+
+
+    try {
+
+        await addDoc(
+            messagesCollection,
+            {
+
+                text: text,
+
+                username: username,
+
+                receiver: selectedFriend,
+
+                createdAt:
+                    serverTimestamp()
+
+            }
+        );
+
+
+        input.value = "";
+
+    } catch (error) {
+
+        console.error(
+            "送信エラー:",
+            error
+        );
+
+        alert(
+            "メッセージを送信できませんでした。"
+        );
+
+    }
+
+}
 
 
 /* =========================
@@ -266,7 +417,7 @@ sendButton.addEventListener(
 
 input.addEventListener(
     "keydown",
-    function(event) {
+    function (event) {
 
         if (event.key === "Enter") {
 
