@@ -1,10 +1,11 @@
+```css
 * {
     box-sizing: border-box;
 }
 
 body {
     margin: 0;
-    background: #ffffff;
+    background: #f5f5f5;
     color: #111111;
     font-family:
         -apple-system,
@@ -23,6 +24,10 @@ body {
     flex-direction: column;
     background: #ffffff;
 }
+
+/* =========================
+   ヘッダー
+========================= */
 
 .header {
     height: 70px;
@@ -45,16 +50,64 @@ body {
     color: #777777;
 }
 
-.call-button {
+.add-friend-button {
     width: 44px;
     height: 44px;
     border: none;
     border-radius: 50%;
     background: #111111;
-    color: white;
-    font-size: 19px;
+    color: #ffffff;
+    font-size: 27px;
+    line-height: 44px;
     cursor: pointer;
 }
+
+.add-friend-button:active {
+    transform: scale(0.94);
+}
+
+/* =========================
+   友達一覧
+========================= */
+
+.friends-section {
+    padding: 14px 15px 8px;
+    border-bottom: 1px solid #eeeeee;
+    background: #ffffff;
+}
+
+.section-title {
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #777777;
+}
+
+.friends-list {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+}
+
+.friend {
+    flex-shrink: 0;
+    padding: 9px 14px;
+    border: none;
+    border-radius: 20px;
+    background: #f1f1f1;
+    color: #111111;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.friend:active {
+    transform: scale(0.96);
+}
+
+/* =========================
+   メッセージ
+========================= */
 
 .messages {
     flex: 1;
@@ -81,10 +134,11 @@ body {
     border-radius: 20px;
     font-size: 15px;
     line-height: 1.5;
+    word-break: break-word;
 }
 
 .mine .bubble {
-    color: white;
+    color: #ffffff;
     background: linear-gradient(
         135deg,
         #7c3aed,
@@ -98,6 +152,10 @@ body {
     color: #111111;
     border-bottom-left-radius: 5px;
 }
+
+/* =========================
+   入力欄
+========================= */
 
 .input-area {
     display: flex;
@@ -130,17 +188,25 @@ body {
     border: none;
     border-radius: 23px;
     background: #111111;
-    color: white;
+    color: #ffffff;
     font-weight: 600;
     cursor: pointer;
 }
 
+#sendButton:active {
+    transform: scale(0.96);
+}
+
+/* =========================
+   パソコン表示
+========================= */
+
 @media (min-width: 601px) {
-    body {
-        background: #f5f5f5;
-    }
 
     .app {
+        min-height: 100vh;
         box-shadow: 0 0 30px rgba(0, 0, 0, 0.08);
     }
+
 }
+```
