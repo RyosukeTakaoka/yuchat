@@ -14,9 +14,111 @@
 
 <body>
 
-<div class="app">
+<!-- =========================
+     ログイン画面
+========================= -->
+
+<div
+    id="loginScreen"
+    class="login-screen">
+
+    <div class="login-card">
+
+        <div class="login-logo">
+            💬
+        </div>
+
+        <h1>
+            ゆうChat
+        </h1>
+
+        <p>
+            友達とつながろう
+        </p>
+
+        <button
+            id="googleLoginButton"
+            class="login-button google-login">
+
+            🔵 Googleでログイン
+
+        </button>
+
+        <button
+            id="guestLoginButton"
+            class="login-button guest-login">
+
+            👤 ゲストとして始める
+
+        </button>
+
+        <div
+            id="loginError"
+            class="login-error">
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- =========================
+     ゲスト名設定画面
+========================= -->
+
+<div
+    id="nameScreen"
+    class="login-screen hidden">
+
+    <div class="login-card">
+
+        <div class="login-logo">
+            👤
+        </div>
+
+        <h1>
+            ようこそ！
+        </h1>
+
+        <p>
+            ゆうChatで使う名前を入力してください
+        </p>
+
+        <input
+            id="nameInput"
+            class="name-input"
+            type="text"
+            maxlength="20"
+            placeholder="名前を入力">
+
+        <button
+            id="startChatButton"
+            class="login-button guest-login">
+
+            ゆうChatを始める
+
+        </button>
+
+        <div
+            id="nameError"
+            class="login-error">
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- =========================
+     アプリ本体
+========================= -->
+
+<div
+    id="app"
+    class="app hidden">
 
     <!-- ヘッダー -->
+
     <header class="header">
 
         <div class="profile-area">
@@ -30,7 +132,8 @@
                     src=""
                     alt="プロフィール画像">
 
-                <span id="profileImagePlaceholder">
+                <span
+                    id="profileImagePlaceholder">
                     👤
                 </span>
 
@@ -40,8 +143,7 @@
                 id="profileImageInput"
                 type="file"
                 accept="image/*"
-                hidden
-            >
+                hidden>
 
             <div class="profile-info">
 
@@ -88,12 +190,21 @@
 
             </button>
 
+            <button
+                id="logoutButton"
+                class="header-button logout-button">
+
+                🚪
+
+            </button>
+
         </div>
 
     </header>
 
 
     <!-- 友達 -->
+
     <section class="friends-section">
 
         <div class="section-title">
@@ -109,6 +220,7 @@
 
 
     <!-- グループ -->
+
     <section class="groups-section">
 
         <div class="section-title">
@@ -124,6 +236,7 @@
 
 
     <!-- チャットヘッダー -->
+
     <div
         id="chatHeader"
         class="chat-header">
@@ -134,6 +247,7 @@
 
 
     <!-- 返信 -->
+
     <div
         id="replyBar"
         class="reply-bar hidden">
@@ -162,6 +276,7 @@
 
 
     <!-- メッセージ -->
+
     <main
         id="messages"
         class="messages">
@@ -169,6 +284,7 @@
 
 
     <!-- 入力 -->
+
     <div class="input-area">
 
         <input
@@ -176,8 +292,7 @@
             type="text"
             placeholder="友達またはグループを選択してください"
             autocomplete="off"
-            disabled
-        >
+            disabled>
 
         <button
             id="sendButton"
