@@ -7,11 +7,9 @@ import {
     collection,
     addDoc,
     getDocs,
-    getDoc,
     doc,
     setDoc,
     updateDoc,
-    deleteDoc,
     query,
     where,
     onSnapshot,
@@ -19,6 +17,15 @@ import {
     serverTimestamp,
     writeBatch
 } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+
+import {
+    getAuth,
+    GoogleAuthProvider,
+    signInWithPopup,
+    signInAnonymously,
+    onAuthStateChanged,
+    signOut
+} from "https://www.gstatic.com/firebasejs/12.1.0/firebase-auth.js";
 
 
 /* =========================
@@ -38,108 +45,523 @@ const app = initializeApp(firebaseConfig);
 
 const db = getFirestore(app);
 
+const auth = getAuth(app);
+
+const googleProvider =
+    new GoogleAuthProvider();
+
 
 /* =========================
-   HTML
+   ログイン画面
 ========================= */
 
-const myName = document.getElementById("myName");
-const status = document.getElementById("status");
+const loginScreen =
+    document.getElementById("loginScreen");
+
+const nameScreen =
+    document.getElementById("nameScreen");
+
+const appScreen =
+    document.getElementById("app");
+
+const googleLoginButton =
+    document.getElementById(
+        "googleLoginButton"
+    );
+
+const guestLoginButton =
+    document.getElementById(
+        "guestLoginButton"
+    );
+
+const startChatButton =
+    document.getElementById(
+        "startChatButton"
+    );
+
+const nameInput =
+    document.getElementById(
+        "nameInput"
+    );
+
+const loginError =
+    document.getElementById(
+        "loginError"
+    );
+
+const nameError =
+    document.getElementById(
+        "nameError"
+    );
+
+const logoutButton =
+    document.getElementById(
+        "logoutButton"
+    );
+
+
+/* =========================
+   アプリHTML
+========================= */
+
+const myName =
+    document.getElementById("myName");
+
+const status =
+    document.getElementById("status");
 
 const changeNameButton =
-    document.getElementById("changeNameButton");
+    document.getElementById(
+        "changeNameButton"
+    );
 
 const profileImageInput =
-    document.getElementById("profileImageInput");
+    document.getElementById(
+        "profileImageInput"
+    );
 
 const myProfileImage =
-    document.getElementById("myProfileImage");
+    document.getElementById(
+        "myProfileImage"
+    );
 
 const profileImagePlaceholder =
-    document.getElementById("profileImagePlaceholder");
+    document.getElementById(
+        "profileImagePlaceholder"
+    );
 
 const addFriendButton =
-    document.getElementById("addFriendButton");
+    document.getElementById(
+        "addFriendButton"
+    );
 
 const createGroupButton =
-    document.getElementById("createGroupButton");
+    document.getElementById(
+        "createGroupButton"
+    );
 
 const friendsList =
-    document.getElementById("friendsList");
+    document.getElementById(
+        "friendsList"
+    );
 
 const groupsList =
-    document.getElementById("groupsList");
+    document.getElementById(
+        "groupsList"
+    );
 
 const chatHeader =
-    document.getElementById("chatHeader");
+    document.getElementById(
+        "chatHeader"
+    );
 
 const messages =
-    document.getElementById("messages");
+    document.getElementById(
+        "messages"
+    );
 
 const messageInput =
-    document.getElementById("messageInput");
+    document.getElementById(
+        "messageInput"
+    );
 
 const sendButton =
-    document.getElementById("sendButton");
+    document.getElementById(
+        "sendButton"
+    );
 
 const replyBar =
-    document.getElementById("replyBar");
+    document.getElementById(
+        "replyBar"
+    );
 
 const replyText =
-    document.getElementById("replyText");
+    document.getElementById(
+        "replyText"
+    );
 
 const cancelReplyButton =
-    document.getElementById("cancelReplyButton");
+    document.getElementById(
+        "cancelReplyButton"
+    );
 
 
 /* =========================
-   自分の名前
+   変数
 ========================= */
 
-let username =
-    localStorage.getItem("yuuchat_username");
+let username = "";
 
-if (!username) {
+let currentUser = null;
 
-    username =
-        prompt("あなたの名前を入力してください");
+let friendsData = [];
 
-    if (!username || !username.trim()) {
-        username = "ゆうた";
+let groupsData = [];
+
+let selectedChat = null;
+
+let selectedChatType = null;
+
+let stopMessagesListener = null;
+
+let replyTarget = null;
+
+let allMessages = [];
+
+
+/* =========================
+   ログイン状態監視
+========================= */
+
+onAuthStateChanged(
+    auth,
+    async user => {
+
+        currentUser = user;
+
+
+        if (!user) {
+
+            showLoginScreen();
+
+            return;
+        }
+
+
+        /*
+         * Googleログインの場合
+         */
+
+        if (
+            user.providerData.some(
+                provider =>
+                    provider.providerId ===
+                    "google.com"
+            )
+        ) {
+
+            let savedName =
+                localStorage.getItem(
+                    "yuuchat_username"
+                );
+
+
+            if (!savedName) {
+
+                savedName =
+                    user.displayName ||
+                    "ゆうた";
+
+                localStorage.setItem(
+                    "yuuchat_username",
+                    savedName
+                );
+            }
+
+
+            username =
+                savedName;
+
+            startApp();
+
+            return;
+        }
+
+
+        /*
+         * ゲストの場合
+         */
+
+        const savedName =
+            localStorage.getItem(
+                "yuuchat_username"
+            );
+
+
+        if (savedName) {
+
+            username =
+                savedName;
+
+            startApp();
+
+        } else {
+
+            showNameScreen();
+        }
     }
+);
 
-    username = username.trim();
 
-    localStorage.setItem(
-        "yuuchat_username",
-        username
+/* =========================
+   Googleログイン
+========================= */
+
+googleLoginButton.addEventListener(
+    "click",
+    async () => {
+
+        loginError.textContent = "";
+
+        googleLoginButton.disabled = true;
+
+        try {
+
+            await signInWithPopup(
+                auth,
+                googleProvider
+            );
+
+        } catch (error) {
+
+            console.error(error);
+
+            loginError.textContent =
+                "Googleログインに失敗しました。もう一度試してください。";
+
+            googleLoginButton.disabled =
+                false;
+        }
+    }
+);
+
+
+/* =========================
+   ゲストログイン
+========================= */
+
+guestLoginButton.addEventListener(
+    "click",
+    async () => {
+
+        loginError.textContent = "";
+
+        guestLoginButton.disabled = true;
+
+        try {
+
+            await signInAnonymously(
+                auth
+            );
+
+        } catch (error) {
+
+            console.error(error);
+
+            loginError.textContent =
+                "ゲストログインに失敗しました。";
+
+            guestLoginButton.disabled =
+                false;
+        }
+    }
+);
+
+
+/* =========================
+   名前設定
+========================= */
+
+startChatButton.addEventListener(
+    "click",
+    () => {
+
+        nameError.textContent = "";
+
+        const name =
+            nameInput.value.trim();
+
+
+        if (!name) {
+
+            nameError.textContent =
+                "名前を入力してください。";
+
+            return;
+        }
+
+
+        if (name.length > 20) {
+
+            nameError.textContent =
+                "名前は20文字以内にしてください。";
+
+            return;
+        }
+
+
+        username =
+            name;
+
+        localStorage.setItem(
+            "yuuchat_username",
+            username
+        );
+
+
+        startApp();
+    }
+);
+
+
+/* =========================
+   画面切り替え
+========================= */
+
+function showLoginScreen() {
+
+    loginScreen.classList.remove(
+        "hidden"
+    );
+
+    nameScreen.classList.add(
+        "hidden"
+    );
+
+    appScreen.classList.add(
+        "hidden"
     );
 }
 
-myName.textContent = username;
 
-status.textContent = "🟢 オンライン";
+function showNameScreen() {
+
+    loginScreen.classList.add(
+        "hidden"
+    );
+
+    nameScreen.classList.remove(
+        "hidden"
+    );
+
+    appScreen.classList.add(
+        "hidden"
+    );
+}
+
+
+function startApp() {
+
+    loginScreen.classList.add(
+        "hidden"
+    );
+
+    nameScreen.classList.add(
+        "hidden"
+    );
+
+    appScreen.classList.remove(
+        "hidden"
+    );
+
+
+    myName.textContent =
+        username;
+
+    status.textContent =
+        "🟢 オンライン";
+
+
+    loadProfileImage();
+
+    updateOnline();
+
+    listenFriends();
+
+    listenGroups();
+
+    listenAllMessages();
+}
+
+
+/* =========================
+   ログアウト
+========================= */
+
+logoutButton.addEventListener(
+    "click",
+    async () => {
+
+        const ok =
+            confirm(
+                "ログアウトしますか？"
+            );
+
+        if (!ok) return;
+
+
+        try {
+
+            if (
+                stopMessagesListener
+            ) {
+
+                stopMessagesListener();
+
+                stopMessagesListener =
+                    null;
+            }
+
+
+            await signOut(auth);
+
+        } catch (error) {
+
+            console.error(error);
+
+            alert(
+                "ログアウトに失敗しました。"
+            );
+        }
+    }
+);
 
 
 /* =========================
    プロフィール画像
 ========================= */
 
-const savedProfileImage =
-    localStorage.getItem(
-        "yuuchat_profile_image"
+function getProfileImageKey() {
+
+    if (!currentUser) {
+
+        return "yuuchat_profile_image";
+    }
+
+    return (
+        "yuuchat_profile_image_" +
+        currentUser.uid
     );
+}
 
-if (savedProfileImage) {
 
-    myProfileImage.src =
-        savedProfileImage;
+function loadProfileImage() {
 
-    myProfileImage.style.display =
-        "block";
+    const saved =
+        localStorage.getItem(
+            getProfileImageKey()
+        );
 
-    profileImagePlaceholder.style.display =
-        "none";
+
+    if (saved) {
+
+        myProfileImage.src =
+            saved;
+
+        myProfileImage.style.display =
+            "block";
+
+        profileImagePlaceholder.style.display =
+            "none";
+
+    } else {
+
+        myProfileImage.style.display =
+            "none";
+
+        profileImagePlaceholder.style.display =
+            "block";
+    }
 }
 
 
@@ -152,18 +574,22 @@ profileImageInput.addEventListener(
 
         if (!file) return;
 
+
         const reader =
             new FileReader();
+
 
         reader.onload = () => {
 
             const imageData =
                 reader.result;
 
+
             localStorage.setItem(
-                "yuuchat_profile_image",
+                getProfileImageKey(),
                 imageData
             );
+
 
             myProfileImage.src =
                 imageData;
@@ -174,6 +600,7 @@ profileImageInput.addEventListener(
             profileImagePlaceholder.style.display =
                 "none";
         };
+
 
         reader.readAsDataURL(file);
     }
@@ -188,7 +615,9 @@ changeNameButton.addEventListener(
     "click",
     async () => {
 
-        const oldName = username;
+        const oldName =
+            username;
+
 
         const newName =
             prompt(
@@ -196,14 +625,36 @@ changeNameButton.addEventListener(
                 username
             );
 
+
         if (!newName) return;
+
 
         const trimmed =
             newName.trim();
 
+
         if (!trimmed) return;
 
-        if (trimmed === oldName) return;
+
+        if (
+            trimmed === oldName
+        ) {
+
+            return;
+        }
+
+
+        if (
+            trimmed.length > 20
+        ) {
+
+            alert(
+                "名前は20文字以内にしてください。"
+            );
+
+            return;
+        }
+
 
         try {
 
@@ -212,25 +663,31 @@ changeNameButton.addEventListener(
                 trimmed
             );
 
+
             username =
                 trimmed;
+
 
             localStorage.setItem(
                 "yuuchat_username",
                 username
             );
 
+
             myName.textContent =
                 username;
 
-            alert("名前を変更しました");
+
+            alert(
+                "名前を変更しました"
+            );
 
         } catch (error) {
 
             console.error(error);
 
             alert(
-                "名前変更に失敗しました"
+                "名前変更に失敗しました。"
             );
         }
     }
@@ -250,12 +707,14 @@ async function renameUser(
         writeBatch(db);
 
 
-    /* 友達 */
-
     const friendsSnapshot =
         await getDocs(
-            collection(db, "friends")
+            collection(
+                db,
+                "friends"
+            )
         );
+
 
     friendsSnapshot.forEach(
         friendDoc => {
@@ -263,35 +722,43 @@ async function renameUser(
             const data =
                 friendDoc.data();
 
+            const updateData = {};
+
+            let changed = false;
+
+
             if (
-                data.owner === oldName ||
-                data.friendName === oldName
+                data.owner ===
+                oldName
             ) {
 
-                const ref =
+                updateData.owner =
+                    newName;
+
+                changed = true;
+            }
+
+
+            if (
+                data.friendName ===
+                oldName
+            ) {
+
+                updateData.friendName =
+                    newName;
+
+                changed = true;
+            }
+
+
+            if (changed) {
+
+                batch.update(
                     doc(
                         db,
                         "friends",
                         friendDoc.id
-                    );
-
-                const updateData = {};
-
-                if (data.owner === oldName) {
-                    updateData.owner =
-                        newName;
-                }
-
-                if (
-                    data.friendName ===
-                    oldName
-                ) {
-                    updateData.friendName =
-                        newName;
-                }
-
-                batch.update(
-                    ref,
+                    ),
                     updateData
                 );
             }
@@ -299,12 +766,14 @@ async function renameUser(
     );
 
 
-    /* グループ */
-
     const groupsSnapshot =
         await getDocs(
-            collection(db, "groups")
+            collection(
+                db,
+                "groups"
+            )
         );
+
 
     groupsSnapshot.forEach(
         groupDoc => {
@@ -312,12 +781,17 @@ async function renameUser(
             const data =
                 groupDoc.data();
 
+
             let changed = false;
 
+
             let members =
-                Array.isArray(data.members)
+                Array.isArray(
+                    data.members
+                )
                     ? [...data.members]
                     : [];
+
 
             members =
                 members.map(
@@ -337,37 +811,34 @@ async function renameUser(
                     }
                 );
 
+
+            const updateData = {};
+
+
             if (
-                data.owner === oldName
+                data.owner ===
+                oldName
             ) {
+
+                updateData.owner =
+                    newName;
 
                 changed = true;
             }
 
+
             if (changed) {
 
-                const ref =
+                updateData.members =
+                    members;
+
+
+                batch.update(
                     doc(
                         db,
                         "groups",
                         groupDoc.id
-                    );
-
-                const updateData = {
-                    members
-                };
-
-                if (
-                    data.owner ===
-                    oldName
-                ) {
-
-                    updateData.owner =
-                        newName;
-                }
-
-                batch.update(
-                    ref,
+                    ),
                     updateData
                 );
             }
@@ -375,18 +846,21 @@ async function renameUser(
     );
 
 
-    /* メッセージ */
-
     const messagesSnapshot =
         await getDocs(
-            collection(db, "messages")
+            collection(
+                db,
+                "messages"
+            )
         );
+
 
     messagesSnapshot.forEach(
         messageDoc => {
 
             const data =
                 messageDoc.data();
+
 
             const updateData = {};
 
@@ -434,16 +908,20 @@ async function renameUser(
 
 
             if (
-                Array.isArray(data.readBy)
+                Array.isArray(
+                    data.readBy
+                )
             ) {
 
                 const newReadBy =
                     data.readBy.map(
                         name =>
-                            name === oldName
+                            name ===
+                            oldName
                                 ? newName
                                 : name
                     );
+
 
                 if (
                     JSON.stringify(
@@ -487,6 +965,9 @@ async function renameUser(
 
 async function updateOnline() {
 
+    if (!username) return;
+
+
     try {
 
         await setDoc(
@@ -499,7 +980,12 @@ async function updateOnline() {
                 username,
                 online: true,
                 lastSeen:
-                    serverTimestamp()
+                    serverTimestamp(),
+
+                uid:
+                    currentUser
+                        ? currentUser.uid
+                        : null
             },
             {
                 merge: true
@@ -516,29 +1002,16 @@ async function updateOnline() {
 }
 
 
-updateOnline();
+setTimeout(
+    updateOnline,
+    500
+);
+
 
 setInterval(
     updateOnline,
     20000
 );
-
-
-/* =========================
-   友達データ
-========================= */
-
-let friendsData = [];
-
-let groupsData = [];
-
-let selectedChat = null;
-
-let selectedChatType = null;
-
-let stopMessagesListener = null;
-
-let replyTarget = null;
 
 
 /* =========================
@@ -549,7 +1022,10 @@ function listenFriends() {
 
     const q =
         query(
-            collection(db, "friends"),
+            collection(
+                db,
+                "friends"
+            ),
             where(
                 "owner",
                 "==",
@@ -557,11 +1033,13 @@ function listenFriends() {
             )
         );
 
+
     onSnapshot(
         q,
         snapshot => {
 
             friendsData = [];
+
 
             snapshot.forEach(
                 friendDoc => {
@@ -575,13 +1053,11 @@ function listenFriends() {
                 }
             );
 
+
             renderFriends();
         }
     );
 }
-
-
-listenFriends();
 
 
 /* =========================
@@ -592,7 +1068,10 @@ function listenGroups() {
 
     const q =
         query(
-            collection(db, "groups"),
+            collection(
+                db,
+                "groups"
+            ),
             where(
                 "members",
                 "array-contains",
@@ -600,11 +1079,13 @@ function listenGroups() {
             )
         );
 
+
     onSnapshot(
         q,
         snapshot => {
 
             groupsData = [];
+
 
             snapshot.forEach(
                 groupDoc => {
@@ -618,38 +1099,38 @@ function listenGroups() {
                 }
             );
 
+
             renderGroups();
         }
     );
 }
 
 
-listenGroups();
-
-
 /* =========================
-   未読数
+   全メッセージ
 ========================= */
-
-let allMessages = [];
-
 
 function listenAllMessages() {
 
     const q =
         query(
-            collection(db, "messages"),
+            collection(
+                db,
+                "messages"
+            ),
             orderBy(
                 "createdAt",
                 "asc"
             )
         );
 
+
     onSnapshot(
         q,
         snapshot => {
 
             allMessages = [];
+
 
             snapshot.forEach(
                 messageDoc => {
@@ -663,10 +1144,15 @@ function listenAllMessages() {
                 }
             );
 
+
             renderFriends();
+
             renderGroups();
 
-            if (selectedChat) {
+
+            if (
+                selectedChat
+            ) {
 
                 renderCurrentMessages();
             }
@@ -675,8 +1161,9 @@ function listenAllMessages() {
 }
 
 
-listenAllMessages();
-
+/* =========================
+   未読数
+========================= */
 
 function getUnreadCountForFriend(
     friendName
@@ -692,6 +1179,7 @@ function getUnreadCountForFriend(
                 return false;
             }
 
+
             if (
                 message.receiver !==
                 username
@@ -699,12 +1187,14 @@ function getUnreadCountForFriend(
                 return false;
             }
 
+
             if (
                 message.username !==
                 friendName
             ) {
                 return false;
             }
+
 
             if (
                 Array.isArray(
@@ -714,8 +1204,10 @@ function getUnreadCountForFriend(
                     username
                 )
             ) {
+
                 return false;
             }
+
 
             return true;
         }
@@ -737,6 +1229,7 @@ function getUnreadCountForGroup(
                 return false;
             }
 
+
             if (
                 message.chatId !==
                 groupId
@@ -744,12 +1237,14 @@ function getUnreadCountForGroup(
                 return false;
             }
 
+
             if (
                 message.username ===
                 username
             ) {
                 return false;
             }
+
 
             if (
                 Array.isArray(
@@ -759,8 +1254,10 @@ function getUnreadCountForGroup(
                     username
                 )
             ) {
+
                 return false;
             }
+
 
             return true;
         }
@@ -776,18 +1273,22 @@ function renderFriends() {
 
     friendsList.innerHTML = "";
 
+
     if (
-        friendsData.length === 0
+        friendsData.length ===
+        0
     ) {
 
         friendsList.innerHTML =
-            `<div style="
+            `
+            <div style="
                 color:#aaa;
                 font-size:12px;
                 padding:5px;
             ">
                 友達を追加してください
-            </div>`;
+            </div>
+            `;
 
         return;
     }
@@ -800,6 +1301,7 @@ function renderFriends() {
                 document.createElement(
                     "button"
                 );
+
 
             item.className =
                 "friend-item";
@@ -823,6 +1325,7 @@ function renderFriends() {
                     "span"
                 );
 
+
             dot.className =
                 "offline-dot";
 
@@ -832,8 +1335,10 @@ function renderFriends() {
                     "span"
                 );
 
+
             name.className =
                 "friend-name";
+
 
             name.textContent =
                 friend.friendName;
@@ -850,20 +1355,25 @@ function renderFriends() {
                 );
 
 
-            if (unread > 0) {
+            if (
+                unread > 0
+            ) {
 
                 const badge =
                     document.createElement(
                         "span"
                     );
 
+
                 badge.className =
                     "unread-badge";
+
 
                 badge.textContent =
                     unread > 99
                         ? "99+"
                         : unread;
+
 
                 item.appendChild(
                     badge
@@ -898,18 +1408,22 @@ function renderGroups() {
 
     groupsList.innerHTML = "";
 
+
     if (
-        groupsData.length === 0
+        groupsData.length ===
+        0
     ) {
 
         groupsList.innerHTML =
-            `<div style="
+            `
+            <div style="
                 color:#aaa;
                 font-size:12px;
                 padding:5px;
             ">
                 グループはありません
-            </div>`;
+            </div>
+            `;
 
         return;
     }
@@ -922,6 +1436,7 @@ function renderGroups() {
                 document.createElement(
                     "button"
                 );
+
 
             item.className =
                 "group-item";
@@ -945,8 +1460,10 @@ function renderGroups() {
                     "span"
                 );
 
+
             name.className =
                 "group-name";
+
 
             name.textContent =
                 "👥 " +
@@ -962,20 +1479,25 @@ function renderGroups() {
                 );
 
 
-            if (unread > 0) {
+            if (
+                unread > 0
+            ) {
 
                 const badge =
                     document.createElement(
                         "span"
                     );
 
+
                 badge.className =
                     "unread-badge";
+
 
                 badge.textContent =
                     unread > 99
                         ? "99+"
                         : unread;
+
 
                 item.appendChild(
                     badge
@@ -1015,12 +1537,16 @@ addFriendButton.addEventListener(
                 "追加する友達の名前を入力してください"
             );
 
+
         if (!friendName) return;
+
 
         const trimmed =
             friendName.trim();
 
+
         if (!trimmed) return;
+
 
         if (
             trimmed === username
@@ -1036,7 +1562,10 @@ addFriendButton.addEventListener(
 
         const q =
             query(
-                collection(db, "friends"),
+                collection(
+                    db,
+                    "friends"
+                ),
                 where(
                     "owner",
                     "==",
@@ -1054,7 +1583,9 @@ addFriendButton.addEventListener(
             await getDocs(q);
 
 
-        if (!result.empty) {
+        if (
+            !result.empty
+        ) {
 
             alert(
                 "すでに追加されています"
@@ -1065,7 +1596,10 @@ addFriendButton.addEventListener(
 
 
         await addDoc(
-            collection(db, "friends"),
+            collection(
+                db,
+                "friends"
+            ),
             {
                 owner:
                     username,
@@ -1096,7 +1630,8 @@ createGroupButton.addEventListener(
     async () => {
 
         if (
-            friendsData.length === 0
+            friendsData.length ===
+            0
         ) {
 
             alert(
@@ -1112,13 +1647,15 @@ createGroupButton.addEventListener(
                 "グループ名を入力してください"
             );
 
+
         if (!groupName) return;
 
 
         const membersInput =
             prompt(
-                "メンバー名をカンマ区切りで入力してください\n例：たかし、ゆうき"
+                "メンバー名をカンマ区切りで入力してください\n例：たかし,ゆうき"
             );
+
 
         if (!membersInput) return;
 
@@ -1144,11 +1681,18 @@ createGroupButton.addEventListener(
 
 
         const uniqueMembers =
-            [...new Set(members)];
+            [
+                ...new Set(
+                    members
+                )
+            ];
 
 
         await addDoc(
-            collection(db, "groups"),
+            collection(
+                db,
+                "groups"
+            ),
             {
                 name:
                     groupName.trim(),
@@ -1186,14 +1730,17 @@ function selectFriend(
     selectedChatType =
         "friend";
 
+
     chatHeader.textContent =
         friendName;
+
 
     messageInput.disabled =
         false;
 
     sendButton.disabled =
         false;
+
 
     messageInput.placeholder =
         "メッセージを入力...";
@@ -1226,8 +1773,11 @@ function selectGroup(
 
     const group =
         groupsData.find(
-            g => g.id === groupId
+            g =>
+                g.id ===
+                groupId
         );
+
 
     if (!group) return;
 
@@ -1238,8 +1788,10 @@ function selectGroup(
     selectedChatType =
         "group";
 
+
     chatHeader.textContent =
-        "👥 " + group.name;
+        "👥 " +
+        group.name;
 
 
     messageInput.disabled =
@@ -1247,6 +1799,7 @@ function selectGroup(
 
     sendButton.disabled =
         false;
+
 
     messageInput.placeholder =
         "グループにメッセージ...";
@@ -1275,7 +1828,9 @@ function selectGroup(
 
 function listenMessages() {
 
-    if (stopMessagesListener) {
+    if (
+        stopMessagesListener
+    ) {
 
         stopMessagesListener();
 
@@ -1286,7 +1841,10 @@ function listenMessages() {
 
     const q =
         query(
-            collection(db, "messages"),
+            collection(
+                db,
+                "messages"
+            ),
             orderBy(
                 "createdAt",
                 "asc"
@@ -1300,6 +1858,7 @@ function listenMessages() {
             snapshot => {
 
                 const list = [];
+
 
                 snapshot.forEach(
                     messageDoc => {
@@ -1425,11 +1984,14 @@ function renderMessages(
                         "div"
                     );
 
+
                 user.className =
                     "message-user";
 
+
                 user.textContent =
                     message.username;
+
 
                 row.appendChild(
                     user
@@ -1442,6 +2004,7 @@ function renderMessages(
                     "div"
                 );
 
+
             bubble.className =
                 "message-bubble";
 
@@ -1453,6 +2016,7 @@ function renderMessages(
                 bubble.classList.add(
                     "deleted-message"
                 );
+
 
                 bubble.textContent =
                     "このメッセージは取り消されました";
@@ -1468,20 +2032,25 @@ function renderMessages(
                             "div"
                         );
 
+
                     reply.style.fontSize =
                         "11px";
+
 
                     reply.style.opacity =
                         "0.7";
 
+
                     reply.style.marginBottom =
                         "5px";
+
 
                     reply.textContent =
                         "↩️ " +
                         message.replyTo.username +
                         ": " +
                         message.replyTo.text;
+
 
                     bubble.appendChild(
                         reply
@@ -1494,8 +2063,10 @@ function renderMessages(
                         "div"
                     );
 
+
                 text.textContent =
                     message.text;
+
 
                 bubble.appendChild(
                     text
@@ -1508,27 +2079,26 @@ function renderMessages(
             );
 
 
-            /* 時刻 */
-
             const time =
                 document.createElement(
                     "div"
                 );
 
+
             time.className =
                 "message-time";
+
 
             time.textContent =
                 formatTime(
                     message.createdAt
                 );
 
+
             row.appendChild(
                 time
             );
 
-
-            /* リアクション */
 
             if (
                 message.reaction
@@ -1539,6 +2109,7 @@ function renderMessages(
                         "div"
                     );
 
+
                 reactionArea.className =
                     "reaction-area";
 
@@ -1548,8 +2119,10 @@ function renderMessages(
                         "span"
                     );
 
+
                 reaction.className =
                     "reaction";
+
 
                 reaction.textContent =
                     message.reaction;
@@ -1559,13 +2132,12 @@ function renderMessages(
                     reaction
                 );
 
+
                 row.appendChild(
                     reactionArea
                 );
             }
 
-
-            /* 操作 */
 
             if (
                 !message.deleted
@@ -1576,6 +2148,7 @@ function renderMessages(
                         "div"
                     );
 
+
                 actions.className =
                     "message-actions";
 
@@ -1584,6 +2157,7 @@ function renderMessages(
                     document.createElement(
                         "button"
                     );
+
 
                 replyButton.textContent =
                     "↩️ 返信";
@@ -1609,6 +2183,7 @@ function renderMessages(
                     document.createElement(
                         "button"
                     );
+
 
                 reactionButton.textContent =
                     "❤️";
@@ -1637,6 +2212,7 @@ function renderMessages(
                         document.createElement(
                             "button"
                         );
+
 
                     deleteButton.textContent =
                         "送信取り消し";
@@ -1701,13 +2277,19 @@ function formatTime(
     const hours =
         String(
             date.getHours()
-        ).padStart(2, "0");
+        ).padStart(
+            2,
+            "0"
+        );
 
 
     const minutes =
         String(
             date.getMinutes()
-        ).padStart(2, "0");
+        ).padStart(
+            2,
+            "0"
+        );
 
 
     return (
@@ -1808,7 +2390,10 @@ async function sendMessage() {
 
 
     await addDoc(
-        collection(db, "messages"),
+        collection(
+            db,
+            "messages"
+        ),
         data
     );
 
@@ -1851,9 +2436,11 @@ function cancelReply() {
     replyTarget =
         null;
 
+
     replyBar.classList.add(
         "hidden"
     );
+
 
     replyText.textContent =
         "";
@@ -1901,6 +2488,7 @@ async function deleteMessage(
             "このメッセージを取り消しますか？"
         );
 
+
     if (!ok) return;
 
 
@@ -1911,8 +2499,11 @@ async function deleteMessage(
             messageId
         ),
         {
-            deleted: true,
-            text: ""
+            deleted:
+                true,
+
+            text:
+                ""
         }
     );
 }
@@ -1928,7 +2519,10 @@ async function markFriendMessagesAsRead(
 
     const q =
         query(
-            collection(db, "messages"),
+            collection(
+                db,
+                "messages"
+            ),
             where(
                 "username",
                 "==",
@@ -2001,7 +2595,10 @@ async function markGroupMessagesAsRead(
 
     const q =
         query(
-            collection(db, "messages"),
+            collection(
+                db,
+                "messages"
+            ),
             where(
                 "chatType",
                 "==",
@@ -2069,7 +2666,7 @@ async function markGroupMessagesAsRead(
 
 
 /* =========================
-   現在のメッセージ再表示
+   現在のチャット再表示
 ========================= */
 
 function renderCurrentMessages() {
@@ -2126,5 +2723,7 @@ function renderCurrentMessages() {
         );
 
 
-    renderMessages(list);
+    renderMessages(
+        list
+    );
 }
