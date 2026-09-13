@@ -1,140 +1,209 @@
 <!DOCTYPE html>
+
 <html lang="ja">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <title>ゆうChat</title>
+```
+<title>ゆうChat</title>
 
-    <link rel="stylesheet" href="./style.css">
+<link rel="stylesheet" href="./style.css">
 
-    <meta name="theme-color" content="#ffffff">
+<meta name="theme-color" content="#ffffff">
+```
+
 </head>
 
 <body>
 
 <div class="app">
 
-    <header class="header">
+```
+<!-- ヘッダー -->
+<header class="header">
 
-        <div>
-            <div class="app-name">ゆうChat</div>
+    <div class="profile-area">
 
-            <div
-                class="status"
-                id="status">
-                オンライン
-            </div>
-        </div>
+        <label
+            for="profileImageInput"
+            class="profile-image-button">
 
-        <div class="header-buttons">
+            <img
+                id="myProfileImage"
+                src=""
+                alt="プロフィール画像">
 
-            <button
-                id="addFriendButton"
-                class="header-button">
-                ＋
-            </button>
+            <span id="profileImagePlaceholder">
+                👤
+            </span>
 
-            <button
-                id="createGroupButton"
-                class="header-button group-button">
-                👥
-            </button>
-
-        </div>
-
-    </header>
-
-
-    <section class="friends-section">
-
-        <div class="section-title">
-            友達
-        </div>
-
-        <div
-            id="friendsList"
-            class="friends-list">
-        </div>
-
-    </section>
-
-
-    <section class="groups-section">
-
-        <div class="section-title">
-            グループ
-        </div>
-
-        <div
-            id="groupsList"
-            class="groups-list">
-        </div>
-
-    </section>
-
-
-    <div
-        id="chatHeader"
-        class="chat-header">
-
-        相手を選択してください
-
-    </div>
-
-
-    <div
-        id="replyBar"
-        class="reply-bar hidden">
-
-        <div>
-
-            <div class="reply-title">
-                返信中
-            </div>
-
-            <div
-                id="replyText"
-                class="reply-text">
-            </div>
-
-        </div>
-
-        <button
-            id="cancelReplyButton">
-            ×
-        </button>
-
-    </div>
-
-
-    <main
-        id="messages"
-        class="messages">
-    </main>
-
-
-    <div class="input-area">
+        </label>
 
         <input
-            id="messageInput"
-            type="text"
-            placeholder="友達またはグループを選択してください"
-            autocomplete="off"
-            disabled
+            id="profileImageInput"
+            type="file"
+            accept="image/*"
+            hidden
         >
 
+        <div class="profile-info">
+
+            <button
+                id="changeNameButton"
+                class="name-button">
+
+                <span id="myName">
+                    ゆうた
+                </span>
+
+                ✏️
+
+            </button>
+
+            <div
+                id="status"
+                class="status">
+                オフライン
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <div class="header-buttons">
+
         <button
-            id="sendButton"
-            disabled>
-            送信
+            id="addFriendButton"
+            class="header-button">
+
+            ＋
+
+        </button>
+
+        <button
+            id="createGroupButton"
+            class="header-button group-button">
+
+            👥
+
         </button>
 
     </div>
+
+</header>
+
+
+<!-- 友達 -->
+<section class="friends-section">
+
+    <div class="section-title">
+        友達
+    </div>
+
+    <div
+        id="friendsList"
+        class="friends-list">
+    </div>
+
+</section>
+
+
+<!-- グループ -->
+<section class="groups-section">
+
+    <div class="section-title">
+        グループ
+    </div>
+
+    <div
+        id="groupsList"
+        class="groups-list">
+    </div>
+
+</section>
+
+
+<!-- チャットヘッダー -->
+<div
+    id="chatHeader"
+    class="chat-header">
+
+    相手を選択してください
 
 </div>
 
+
+<!-- 入力中 -->
+<div
+    id="typingStatus"
+    class="typing-status hidden">
+
+    入力中…
+
+</div>
+
+
+<!-- 返信 -->
+<div
+    id="replyBar"
+    class="reply-bar hidden">
+
+    <div>
+
+        <div class="reply-title">
+            返信中
+        </div>
+
+        <div
+            id="replyText"
+            class="reply-text">
+        </div>
+
+    </div>
+
+    <button
+        id="cancelReplyButton">
+
+        ×
+
+    </button>
+
+</div>
+
+
+<!-- メッセージ -->
+<main
+    id="messages"
+    class="messages">
+</main>
+
+
+<!-- 入力 -->
+<div class="input-area">
+
+    <input
+        id="messageInput"
+        type="text"
+        placeholder="友達またはグループを選択してください"
+        autocomplete="off"
+        disabled
+    >
+
+    <button
+        id="sendButton"
+        disabled>
+
+        送信
+
+    </button>
+
+</div>
+```
+
+</div>
 
 <script
     type="module"
