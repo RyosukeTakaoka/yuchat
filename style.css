@@ -4,6 +4,7 @@
 
 body {
     margin: 0;
+
     font-family:
         -apple-system,
         BlinkMacSystemFont,
@@ -19,12 +20,164 @@ button {
     cursor: pointer;
 }
 
+.hidden {
+    display: none !important;
+}
+
+
+/* =========================
+   ログイン
+========================= */
+
+.login-screen {
+    width: 100%;
+    min-height: 100vh;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    padding: 20px;
+
+    background:
+        linear-gradient(
+            135deg,
+            #f5f3ff,
+            #eef5ff,
+            #fff
+        );
+}
+
+.login-card {
+    width: 100%;
+    max-width: 380px;
+
+    padding: 38px 30px;
+
+    background: white;
+
+    border-radius: 24px;
+
+    box-shadow:
+        0 15px 50px rgba(0,0,0,0.08);
+
+    text-align: center;
+}
+
+.login-logo {
+    width: 72px;
+    height: 72px;
+
+    margin: 0 auto 15px;
+
+    border-radius: 22px;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    background:
+        linear-gradient(
+            135deg,
+            #6d5dfc,
+            #9b5cff,
+            #ff5ca8
+        );
+
+    font-size: 35px;
+}
+
+.login-card h1 {
+    margin: 0;
+
+    font-size: 30px;
+}
+
+.login-card p {
+    margin: 8px 0 25px;
+
+    color: #888;
+
+    font-size: 14px;
+}
+
+.login-button {
+    width: 100%;
+
+    height: 50px;
+
+    margin-top: 12px;
+
+    border: none;
+
+    border-radius: 14px;
+
+    font-size: 14px;
+
+    font-weight: 700;
+
+    transition: 0.2s;
+}
+
+.login-button:hover {
+    transform: translateY(-1px);
+}
+
+.google-login {
+    background: #f5f5f5;
+    color: #222;
+
+    border: 1px solid #ddd;
+}
+
+.guest-login {
+    background: #6d5dfc;
+    color: white;
+}
+
+.login-error {
+    margin-top: 15px;
+
+    color: #e53935;
+
+    font-size: 12px;
+}
+
+.name-input {
+    width: 100%;
+
+    height: 48px;
+
+    padding: 0 14px;
+
+    border: 1px solid #ddd;
+
+    border-radius: 13px;
+
+    outline: none;
+
+    font-size: 14px;
+}
+
+.name-input:focus {
+    border-color: #6d5dfc;
+}
+
+
+/* =========================
+   アプリ
+========================= */
+
 .app {
     width: 100%;
     max-width: 900px;
+
     height: 100vh;
+
     margin: 0 auto;
+
     background: white;
+
     display: flex;
     flex-direction: column;
 }
@@ -36,19 +189,22 @@ button {
 
 .header {
     height: 75px;
+
     padding: 10px 18px;
 
     display: flex;
     align-items: center;
     justify-content: space-between;
 
-    border-bottom: 1px solid #eeeeee;
+    border-bottom: 1px solid #eee;
+
     background: white;
 }
 
 .profile-area {
     display: flex;
     align-items: center;
+
     gap: 10px;
 }
 
@@ -57,6 +213,7 @@ button {
     height: 48px;
 
     border-radius: 50%;
+
     background: #eef2ff;
 
     display: flex;
@@ -64,6 +221,7 @@ button {
     justify-content: center;
 
     overflow: hidden;
+
     cursor: pointer;
 
     position: relative;
@@ -72,6 +230,7 @@ button {
 .profile-image-button img {
     width: 100%;
     height: 100%;
+
     object-fit: cover;
 
     display: none;
@@ -100,13 +259,15 @@ button {
 
 .status {
     margin-top: 3px;
+
     font-size: 11px;
+
     color: #22a06b;
 }
 
 .header-buttons {
     display: flex;
-    gap: 8px;
+    gap: 7px;
 }
 
 .header-button {
@@ -114,15 +275,20 @@ button {
     height: 40px;
 
     border: none;
+
     border-radius: 12px;
 
     background: #f1f3f8;
 
-    font-size: 20px;
+    font-size: 18px;
 }
 
 .header-button:hover {
     background: #e5e8f0;
+}
+
+.logout-button {
+    font-size: 16px;
 }
 
 
@@ -134,6 +300,7 @@ button {
     padding: 8px 18px 4px;
 
     font-size: 12px;
+
     font-weight: 700;
 
     color: #888;
@@ -161,13 +328,15 @@ button {
 
     padding: 9px;
 
-    border: 1px solid #eeeeee;
+    border: 1px solid #eee;
+
     border-radius: 13px;
 
     background: white;
 
     display: flex;
     align-items: center;
+
     gap: 7px;
 
     position: relative;
@@ -181,34 +350,36 @@ button {
 .friend-item.active,
 .group-item.active {
     border-color: #7c3aed;
+
     background: #f5f0ff;
 }
 
 .friend-name,
 .group-name {
     font-size: 13px;
+
     font-weight: 600;
 
     white-space: nowrap;
+
     overflow: hidden;
+
     text-overflow: ellipsis;
 }
 
-.online-dot {
-    width: 8px;
-    height: 8px;
-
-    border-radius: 50%;
-
-    background: #22c55e;
-}
-
+.online-dot,
 .offline-dot {
     width: 8px;
     height: 8px;
 
     border-radius: 50%;
+}
 
+.online-dot {
+    background: #22c55e;
+}
+
+.offline-dot {
     background: #bbb;
 }
 
@@ -226,6 +397,7 @@ button {
     border-radius: 999px;
 
     background: #ff3b30;
+
     color: white;
 
     display: flex;
@@ -233,21 +405,24 @@ button {
     justify-content: center;
 
     font-size: 10px;
+
     font-weight: 700;
 }
 
 
 /* =========================
-   チャットヘッダー
+   チャット
 ========================= */
 
 .chat-header {
     padding: 13px 18px;
 
-    border-top: 1px solid #eeeeee;
-    border-bottom: 1px solid #eeeeee;
+    border-top: 1px solid #eee;
+
+    border-bottom: 1px solid #eee;
 
     font-size: 15px;
+
     font-weight: 700;
 
     background: white;
@@ -268,6 +443,7 @@ button {
     background: #f8f9fc;
 
     display: flex;
+
     flex-direction: column;
 
     gap: 9px;
@@ -275,6 +451,7 @@ button {
 
 .message-row {
     display: flex;
+
     flex-direction: column;
 
     max-width: 78%;
@@ -282,16 +459,19 @@ button {
 
 .message-row.mine {
     align-self: flex-end;
+
     align-items: flex-end;
 }
 
 .message-row.other {
     align-self: flex-start;
+
     align-items: flex-start;
 }
 
 .message-user {
     font-size: 10px;
+
     color: #888;
 
     margin-bottom: 3px;
@@ -303,6 +483,7 @@ button {
     border-radius: 17px;
 
     font-size: 14px;
+
     line-height: 1.45;
 
     word-break: break-word;
@@ -310,6 +491,7 @@ button {
 
 .mine .message-bubble {
     background: #6d5dfc;
+
     color: white;
 
     border-bottom-right-radius: 5px;
@@ -317,15 +499,17 @@ button {
 
 .other .message-bubble {
     background: white;
+
     color: #222;
 
-    border: 1px solid #eeeeee;
+    border: 1px solid #eee;
 
     border-bottom-left-radius: 5px;
 }
 
 .deleted-message {
     opacity: 0.6;
+
     font-style: italic;
 }
 
@@ -333,11 +517,13 @@ button {
     margin-top: 3px;
 
     font-size: 9px;
+
     color: #999;
 }
 
 .message-actions {
     display: flex;
+
     gap: 4px;
 
     margin-top: 3px;
@@ -345,9 +531,11 @@ button {
 
 .message-actions button {
     border: none;
+
     background: transparent;
 
     font-size: 11px;
+
     color: #888;
 
     padding: 2px 4px;
@@ -359,6 +547,7 @@ button {
 
 .reaction-area {
     display: flex;
+
     gap: 4px;
 
     margin-top: 3px;
@@ -370,6 +559,7 @@ button {
     border-radius: 999px;
 
     background: white;
+
     border: 1px solid #ddd;
 
     font-size: 11px;
@@ -383,22 +573,22 @@ button {
 .reply-bar {
     padding: 8px 15px;
 
-    border-top: 1px solid #eeeeee;
+    border-top: 1px solid #eee;
 
     background: #faf9ff;
 
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
 
-.reply-bar.hidden {
-    display: none;
+    align-items: center;
+
+    justify-content: space-between;
 }
 
 .reply-title {
     font-size: 11px;
+
     font-weight: 700;
+
     color: #7c3aed;
 }
 
@@ -408,18 +598,23 @@ button {
     margin-top: 2px;
 
     font-size: 12px;
+
     color: #777;
 
     white-space: nowrap;
+
     overflow: hidden;
+
     text-overflow: ellipsis;
 }
 
 #cancelReplyButton {
     border: none;
+
     background: none;
 
     font-size: 20px;
+
     color: #888;
 }
 
@@ -432,9 +627,10 @@ button {
     padding: 10px 14px;
 
     display: flex;
+
     gap: 8px;
 
-    border-top: 1px solid #eeeeee;
+    border-top: 1px solid #eee;
 
     background: white;
 }
@@ -463,9 +659,11 @@ button {
     width: 70px;
 
     border: none;
+
     border-radius: 14px;
 
     background: #6d5dfc;
+
     color: white;
 
     font-weight: 700;
@@ -473,6 +671,7 @@ button {
 
 #sendButton:disabled {
     opacity: 0.4;
+
     cursor: default;
 }
 
