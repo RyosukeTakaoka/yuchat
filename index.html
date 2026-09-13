@@ -24,18 +24,43 @@
     <div class="app">
 
         <header class="header">
+
             <div>
                 <div class="app-name">ゆうChat</div>
-                <div class="status" id="status">オンライン</div>
+                <div class="status" id="status">
+                    オンライン
+                </div>
             </div>
 
-            <button class="call-button">📞</button>
+            <button id="addFriendButton" class="add-friend-button">
+                ＋
+            </button>
+
         </header>
 
+
+        <!-- 友達一覧 -->
+
+        <section class="friends-section">
+
+            <div class="section-title">
+                友達
+            </div>
+
+            <div id="friendsList" class="friends-list">
+                <!-- ここに友達が表示されます -->
+            </div>
+
+        </section>
+
+
+        <!-- チャット画面 -->
 
         <main id="messages" class="messages">
         </main>
 
+
+        <!-- メッセージ入力 -->
 
         <div class="input-area">
 
