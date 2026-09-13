@@ -1,220 +1,358 @@
-```css
 * {
-    box-sizing: border-box;
-}
+  box-sizing: border-box;
+  }
 
 body {
-    margin: 0;
-    background: #f5f5f5;
-    color: #111;
-    font-family:
-        -apple-system,
-        BlinkMacSystemFont,
-        "Helvetica Neue",
-        Arial,
-        sans-serif;
+margin: 0;
+background: #f5f5f5;
+color: #111;
+font-family:
+-apple-system,
+BlinkMacSystemFont,
+"Helvetica Neue",
+Arial,
+sans-serif;
 }
 
 .app {
-    width: 100%;
-    max-width: 600px;
-    height: 100vh;
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    background: #fff;
+width: 100%;
+max-width: 600px;
+height: 100vh;
+margin: 0 auto;
+display: flex;
+flex-direction: column;
+background: #fff;
 }
 
-/* ヘッダー */
+/* =========================
+ヘッダー
+========================= */
 
 .header {
-    height: 70px;
-    padding: 12px 18px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid #eee;
+height: 70px;
+padding: 12px 18px;
+display: flex;
+align-items: center;
+justify-content: space-between;
+border-bottom: 1px solid #eee;
 }
 
 .app-name {
-    font-size: 21px;
-    font-weight: 700;
+font-size: 21px;
+font-weight: 700;
 }
 
 .status {
-    margin-top: 3px;
-    font-size: 12px;
-    color: #777;
+margin-top: 3px;
+font-size: 12px;
+color: #777;
 }
 
 .add-friend-button {
-    width: 44px;
-    height: 44px;
-    border: none;
-    border-radius: 50%;
-    background: #111;
-    color: white;
-    font-size: 27px;
-    cursor: pointer;
+width: 44px;
+height: 44px;
+border: none;
+border-radius: 50%;
+background: #111;
+color: white;
+font-size: 27px;
+cursor: pointer;
 }
 
 .add-friend-button:active {
-    transform: scale(.94);
+transform: scale(.94);
 }
 
-/* 友達一覧 */
+/* =========================
+友達
+========================= */
 
 .friends-section {
-    padding: 14px 15px 8px;
-    border-bottom: 1px solid #eee;
+padding: 14px 15px 8px;
+border-bottom: 1px solid #eee;
 }
 
 .section-title {
-    margin-bottom: 8px;
-    font-size: 13px;
-    font-weight: 700;
-    color: #777;
+margin-bottom: 8px;
+font-size: 13px;
+font-weight: 700;
+color: #777;
 }
 
 .friends-list {
-    display: flex;
-    gap: 8px;
-    overflow-x: auto;
-    padding-bottom: 4px;
+display: flex;
+gap: 8px;
+overflow-x: auto;
+padding-bottom: 4px;
 }
 
 .friend {
-    flex-shrink: 0;
-    padding: 9px 14px;
-    border: none;
-    border-radius: 20px;
-    background: #f1f1f1;
-    color: #111;
-    font-size: 14px;
-    cursor: pointer;
+flex-shrink: 0;
+padding: 9px 14px;
+border: none;
+border-radius: 20px;
+background: #f1f1f1;
+color: #111;
+font-size: 14px;
+cursor: pointer;
 }
 
 .friend:hover {
-    background: #e7e7e7;
+background: #e7e7e7;
 }
 
-.friend:active {
-    transform: scale(.96);
-}
-
-/* チャットヘッダー */
+/* =========================
+チャットヘッダー
+========================= */
 
 .chat-header {
-    padding: 13px 18px;
-    border-bottom: 1px solid #eee;
-    font-size: 15px;
-    font-weight: 600;
-    background: #fff;
+padding: 13px 18px;
+border-bottom: 1px solid #eee;
+font-size: 15px;
+font-weight: 600;
 }
 
-/* メッセージ */
+/* =========================
+返信バー
+========================= */
+
+.reply-bar {
+display: flex;
+justify-content: space-between;
+align-items: center;
+padding: 8px 14px;
+background: #f7f7f7;
+border-bottom: 1px solid #eee;
+}
+
+.reply-bar.hidden {
+display: none;
+}
+
+.reply-title {
+font-size: 11px;
+color: #7c3aed;
+font-weight: 700;
+}
+
+.reply-text {
+max-width: 300px;
+overflow: hidden;
+white-space: nowrap;
+text-overflow: ellipsis;
+font-size: 13px;
+color: #555;
+}
+
+#cancelReplyButton {
+border: none;
+background: transparent;
+font-size: 24px;
+color: #777;
+cursor: pointer;
+}
+
+/* =========================
+メッセージ
+========================= */
 
 .messages {
-    flex: 1;
-    padding: 20px 15px;
-    overflow-y: auto;
+flex: 1;
+padding: 20px 15px;
+overflow-y: auto;
 }
 
 .message {
-    display: flex;
-    margin-bottom: 12px;
+display: flex;
+margin-bottom: 14px;
 }
 
 .message.mine {
-    justify-content: flex-end;
+justify-content: flex-end;
 }
 
 .message.other {
-    justify-content: flex-start;
+justify-content: flex-start;
+}
+
+.message-container {
+max-width: 78%;
 }
 
 .bubble {
-    max-width: 75%;
-    padding: 11px 15px;
-    border-radius: 20px;
-    font-size: 15px;
-    line-height: 1.5;
-    word-break: break-word;
+padding: 11px 15px;
+border-radius: 20px;
+font-size: 15px;
+line-height: 1.5;
+word-break: break-word;
 }
 
 .mine .bubble {
-    color: white;
-    background: linear-gradient(
-        135deg,
-        #7c3aed,
-        #ec4899
-    );
-    border-bottom-right-radius: 5px;
+color: white;
+background: linear-gradient(
+135deg,
+#7c3aed,
+#ec4899
+);
+border-bottom-right-radius: 5px;
 }
 
 .other .bubble {
-    background: #f1f1f1;
-    color: #111;
-    border-bottom-left-radius: 5px;
+background: #f1f1f1;
+color: #111;
+border-bottom-left-radius: 5px;
 }
 
-/* 入力欄 */
+/* =========================
+返信表示
+========================= */
+
+.reply-preview {
+margin-bottom: 4px;
+padding: 6px 9px;
+border-left: 3px solid #7c3aed;
+background: #f5f5f5;
+color: #777;
+font-size: 11px;
+border-radius: 5px;
+}
+
+/* =========================
+リアクション
+========================= */
+
+.reactions {
+display: flex;
+gap: 4px;
+margin-top: 4px;
+font-size: 12px;
+}
+
+.reactions span {
+padding: 3px 7px;
+border-radius: 12px;
+background: #eee;
+}
+
+/* =========================
+操作ボタン
+========================= */
+
+.message-actions {
+display: flex;
+gap: 4px;
+margin-top: 4px;
+opacity: .65;
+}
+
+.message.mine .message-actions {
+justify-content: flex-end;
+}
+
+.action-button {
+border: none;
+background: #f1f1f1;
+border-radius: 12px;
+padding: 3px 7px;
+font-size: 12px;
+cursor: pointer;
+}
+
+.action-button:hover {
+background: #ddd;
+}
+
+/* =========================
+取り消し
+========================= */
+
+.deleted-message {
+padding: 9px 13px;
+border-radius: 16px;
+background: #f1f1f1;
+color: #999;
+font-size: 13px;
+font-style: italic;
+}
+
+/* =========================
+入力
+========================= */
 
 .input-area {
-    display: flex;
-    gap: 8px;
-    padding: 12px;
-    border-top: 1px solid #eee;
-    background: #fff;
+display: flex;
+gap: 8px;
+padding: 12px;
+border-top: 1px solid #eee;
+background: #fff;
 }
 
 #messageInput {
-    flex: 1;
-    min-width: 0;
-    height: 46px;
-    padding: 0 16px;
-    border: 1px solid #ddd;
-    border-radius: 23px;
-    outline: none;
-    font-size: 15px;
-    background: #fafafa;
+flex: 1;
+min-width: 0;
+height: 46px;
+padding: 0 16px;
+border: 1px solid #ddd;
+border-radius: 23px;
+outline: none;
+font-size: 15px;
+background: #fafafa;
 }
 
 #messageInput:focus {
-    border-color: #7c3aed;
+border-color: #7c3aed;
 }
 
 #messageInput:disabled {
-    background: #f1f1f1;
-    color: #999;
+background: #f1f1f1;
+color: #999;
 }
 
 #sendButton {
-    height: 46px;
-    padding: 0 17px;
-    border: none;
-    border-radius: 23px;
-    background: #111;
-    color: white;
-    font-weight: 600;
-    cursor: pointer;
+height: 46px;
+padding: 0 17px;
+border: none;
+border-radius: 23px;
+background: #111;
+color: white;
+font-weight: 600;
+cursor: pointer;
 }
 
 #sendButton:disabled {
-    background: #ccc;
-    cursor: default;
+background: #ccc;
 }
 
-#sendButton:active {
-    transform: scale(.96);
+/* =========================
+スマホ
+========================= */
+
+@media (max-width: 600px) {
+
+```
+.message-container {
+    max-width: 84%;
 }
 
-/* パソコン */
-
-@media (min-width: 601px) {
-    .app {
-        min-height: 100vh;
-        box-shadow: 0 0 30px rgba(0, 0, 0, .08);
-    }
+.bubble {
+    font-size: 14px;
 }
 ```
+
+}
+
+/* =========================
+PC
+========================= */
+
+@media (min-width: 601px) {
+
+```
+.app {
+    min-height: 100vh;
+    box-shadow:
+        0 0 30px rgba(0, 0, 0, .08);
+}
+```
+
+}
