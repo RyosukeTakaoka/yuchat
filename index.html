@@ -1,107 +1,128 @@
-```html
 <!DOCTYPE html>
+
 <html lang="ja">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <title>ゆうChat</title>
+```
+<title>ゆうChat</title>
 
-    <link rel="stylesheet" href="./style.css">
+<link rel="stylesheet" href="./style.css">
 
-    <meta name="theme-color" content="#ffffff">
+<meta name="theme-color" content="#ffffff">
+```
+
 </head>
 
 <body>
 
-    <div class="app">
+<div class="app">
 
-        <!-- ヘッダー -->
+```
+<!-- ヘッダー -->
+<header class="header">
 
-        <header class="header">
+    <div>
+        <div class="app-name">ゆうChat</div>
 
-            <div>
-                <div class="app-name">ゆうChat</div>
-
-                <div class="status" id="status">
-                    オンライン
-                </div>
-            </div>
-
-            <button
-                id="addFriendButton"
-                class="add-friend-button">
-                ＋
-            </button>
-
-        </header>
-
-
-        <!-- 友達一覧 -->
-
-        <section class="friends-section">
-
-            <div class="section-title">
-                友達
-            </div>
-
-            <div
-                id="friendsList"
-                class="friends-list">
-            </div>
-
-        </section>
-
-
-        <!-- 現在の相手 -->
-
-        <div
-            id="chatHeader"
-            class="chat-header">
-
-            相手を選択してください
-
+        <div class="status" id="status">
+            オンライン
         </div>
-
-
-        <!-- メッセージ -->
-
-        <main
-            id="messages"
-            class="messages">
-        </main>
-
-
-        <!-- メッセージ入力 -->
-
-        <div class="input-area">
-
-            <input
-                id="messageInput"
-                type="text"
-                placeholder="友達を選択してください"
-                autocomplete="off"
-                disabled
-            >
-
-            <button
-                id="sendButton"
-                disabled>
-                送信
-            </button>
-
-        </div>
-
     </div>
 
+    <button
+        id="addFriendButton"
+        class="add-friend-button">
+        ＋
+    </button>
 
-    <script
-        type="module"
-        src="./script.js">
-    </script>
+</header>
+
+
+<!-- 友達一覧 -->
+<section class="friends-section">
+
+    <div class="section-title">
+        友達
+    </div>
+
+    <div
+        id="friendsList"
+        class="friends-list">
+    </div>
+
+</section>
+
+
+<!-- チャット相手 -->
+<div
+    id="chatHeader"
+    class="chat-header">
+
+    相手を選択してください
+
+</div>
+
+
+<!-- 返信中 -->
+<div
+    id="replyBar"
+    class="reply-bar hidden">
+
+    <div>
+        <div class="reply-title">
+            返信中
+        </div>
+
+        <div
+            id="replyText"
+            class="reply-text">
+        </div>
+    </div>
+
+    <button id="cancelReplyButton">
+        ×
+    </button>
+
+</div>
+
+
+<!-- メッセージ -->
+<main
+    id="messages"
+    class="messages">
+</main>
+
+
+<!-- 入力 -->
+<div class="input-area">
+
+    <input
+        id="messageInput"
+        type="text"
+        placeholder="友達を選択してください"
+        autocomplete="off"
+        disabled
+    >
+
+    <button
+        id="sendButton"
+        disabled>
+        送信
+    </button>
+
+</div>
+```
+
+</div>
+
+<script
+    type="module"
+    src="./script.js">
+</script>
 
 </body>
 
 </html>
-```
