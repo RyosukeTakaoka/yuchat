@@ -59,15 +59,103 @@ const sendButton = document.getElementById("sendButton");
 const messages = document.getElementById("messages");
 const status = document.getElementById("status");
 
+const addFriendButton =
+    document.getElementById("addFriendButton");
 
-status.textContent = username + "としてオンライン";
+const friendsList =
+    document.getElementById("friendsList");
+
+
+status.textContent =
+    username + "としてオンライン";
 
 
 /* =========================
    Firestore
 ========================= */
 
-const messagesCollection = collection(db, "messages");
+const messagesCollection =
+    collection(db, "messages");
+
+const friendsCollection =
+    collection(db, "friends");
+
+
+/* =========================
+   友達追加
+========================= */
+
+addFriendButton.addEventListener("click", async function () {
+
+    const friendName =
+        prompt("追加する友達の名前を入力してください");
+
+    if (!friendName || friendName.trim() === "") {
+        return;
+    }
+
+    const name = friendName.trim();
+
+    try {
+
+        await addDoc(friendsCollection, {
+
+            owner: username,
+
+            friendName: name,
+
+            createdAt: serverTimestamp()
+
+        });
+
+        alert(name + "さんを友達に追加しました！");
+
+    } catch (error) {
+
+        console.error("友達追加エラー:", error);
+
+        alert("友達を追加できませんでした。");
+
+    }
+
+});
+
+
+/* =========================
+   友達一覧表示
+========================= */
+
+const friendsQuery = query(
+    friendsCollection,
+    orderBy("createdAt", "asc")
+);
+
+
+onSnapshot(friendsQuery, function(snapshot) {
+
+    friendsList.innerHTML = "";
+
+    snapshot.forEach(function(doc) {
+
+        const data = doc.data();
+
+        // 自分が追加した友達だけ表示
+        if (data.owner !== username) {
+            return;
+        }
+
+        const friend = document.createElement("button");
+
+        friend.className = "friend";
+
+        friend.textContent =
+            "👤 " + data.friendName;
+
+        friendsList.appendChild(friend);
+
+    });
+
+});
 
 
 /* =========================
@@ -103,6 +191,7 @@ async function sendMessage() {
         alert("メッセージを送信できませんでした。");
 
     }
+
 }
 
 
@@ -116,37 +205,39 @@ const messagesQuery = query(
 );
 
 
-onSnapshot(messagesQuery, (snapshot) => {
+onSnapshot(messagesQuery, function(snapshot) {
 
     messages.innerHTML = "";
 
-
-    snapshot.forEach((doc) => {
+    snapshot.forEach(function(doc) {
 
         const data = doc.data();
 
-
-        const message = document.createElement("div");
-
+        const message =
+            document.createElement("div");
 
         if (data.username === username) {
 
-            message.className = "message mine";
+            message.className =
+                "message mine";
 
         } else {
 
-            message.className = "message other";
+            message.className =
+                "message other";
 
         }
 
-
-        const bubble = document.createElement("div");
+        const bubble =
+            document.createElement("div");
 
         bubble.className = "bubble";
 
+        const name =
+            data.username || "相手";
 
-        bubble.textContent = data.username + "： " + data.text;
-
+        bubble.textContent =
+            name + "： " + data.text;
 
         message.appendChild(bubble);
 
@@ -154,8 +245,8 @@ onSnapshot(messagesQuery, (snapshot) => {
 
     });
 
-
-    messages.scrollTop = messages.scrollHeight;
+    messages.scrollTop =
+        messages.scrollHeight;
 
 });
 
@@ -164,20 +255,26 @@ onSnapshot(messagesQuery, (snapshot) => {
    送信ボタン
 ========================= */
 
-sendButton.addEventListener("click", sendMessage);
+sendButton.addEventListener(
+    "click",
+    sendMessage
+);
 
 
 /* =========================
    Enterキー
 ========================= */
 
-input.addEventListener("keydown", function(event) {
+input.addEventListener(
+    "keydown",
+    function(event) {
 
-    if (event.key === "Enter") {
+        if (event.key === "Enter") {
 
-        sendMessage();
+            sendMessage();
+
+        }
 
     }
-
-});
+);
 ```
