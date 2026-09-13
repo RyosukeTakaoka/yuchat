@@ -1,0 +1,146 @@
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: #ffffff;
+    color: #111111;
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Helvetica Neue",
+        Arial,
+        sans-serif;
+}
+
+.app {
+    width: 100%;
+    max-width: 600px;
+    height: 100vh;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    background: #ffffff;
+}
+
+.header {
+    height: 70px;
+    padding: 12px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #eeeeee;
+    background: #ffffff;
+}
+
+.app-name {
+    font-size: 21px;
+    font-weight: 700;
+}
+
+.status {
+    margin-top: 3px;
+    font-size: 12px;
+    color: #777777;
+}
+
+.call-button {
+    width: 44px;
+    height: 44px;
+    border: none;
+    border-radius: 50%;
+    background: #111111;
+    color: white;
+    font-size: 19px;
+    cursor: pointer;
+}
+
+.messages {
+    flex: 1;
+    padding: 20px 15px;
+    overflow-y: auto;
+}
+
+.message {
+    display: flex;
+    margin-bottom: 12px;
+}
+
+.message.mine {
+    justify-content: flex-end;
+}
+
+.message.other {
+    justify-content: flex-start;
+}
+
+.bubble {
+    max-width: 75%;
+    padding: 11px 15px;
+    border-radius: 20px;
+    font-size: 15px;
+    line-height: 1.5;
+}
+
+.mine .bubble {
+    color: white;
+    background: linear-gradient(
+        135deg,
+        #7c3aed,
+        #ec4899
+    );
+    border-bottom-right-radius: 5px;
+}
+
+.other .bubble {
+    background: #f1f1f1;
+    color: #111111;
+    border-bottom-left-radius: 5px;
+}
+
+.input-area {
+    display: flex;
+    gap: 8px;
+    padding: 12px;
+    border-top: 1px solid #eeeeee;
+    background: #ffffff;
+}
+
+#messageInput {
+    flex: 1;
+    min-width: 0;
+    height: 46px;
+    padding: 0 16px;
+    border: 1px solid #dddddd;
+    border-radius: 23px;
+    outline: none;
+    font-size: 15px;
+    color: #111111;
+    background: #fafafa;
+}
+
+#messageInput:focus {
+    border-color: #7c3aed;
+}
+
+#sendButton {
+    height: 46px;
+    padding: 0 17px;
+    border: none;
+    border-radius: 23px;
+    background: #111111;
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+@media (min-width: 601px) {
+    body {
+        background: #f5f5f5;
+    }
+
+    .app {
+        box-shadow: 0 0 30px rgba(0, 0, 0, 0.08);
+    }
+}
