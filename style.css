@@ -804,3 +804,95 @@ button {
     }
 
 }
+#maintenanceScreen {
+    position: fixed;
+    inset: 0;
+    z-index: 99999;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    padding: 20px;
+
+    background:
+        linear-gradient(
+            135deg,
+            #f5f3ff,
+            #eef5ff,
+            #ffffff
+        );
+}
+
+.maintenance-card {
+    width: 100%;
+    max-width: 430px;
+
+    padding: 45px 30px;
+
+    text-align: center;
+
+    background: white;
+
+    border-radius: 26px;
+
+    box-shadow:
+        0 20px 60px rgba(0,0,0,0.10);
+}
+
+.maintenance-icon {
+    width: 70px;
+    height: 70px;
+
+    margin: 0 auto 20px;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    border-radius: 22px;
+
+    background:
+        linear-gradient(
+            135deg,
+            #6d5dfc,
+            #9b5cff,
+            #ff5ca8
+        );
+
+    font-size: 32px;
+}
+
+.maintenance-card h1 {
+    margin: 0;
+
+    font-size: 24px;
+
+    color: #222;
+}
+
+.maintenance-card p {
+    margin: 15px 0 0;
+
+    font-size: 14px;
+
+    line-height: 1.8;
+
+    color: #777;
+}
+
+.maintenance-line {
+    width: 50px;
+    height: 3px;
+
+    margin: 25px auto 0;
+
+    border-radius: 999px;
+
+    background: #6d5dfc;
+}
+
+.maintenance-developer {
+    font-size: 12px !important;
+    color: #999 !important;
+}
