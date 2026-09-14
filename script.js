@@ -1,15 +1,15 @@
-import {
-    initializeApp
-} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
 
 import {
     getFirestore,
     collection,
     addDoc,
     getDocs,
+    getDoc,
     doc,
     setDoc,
     updateDoc,
+    deleteDoc,
     query,
     where,
     onSnapshot,
@@ -28,9 +28,9 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 
 
-/* =========================
-   Firebase
-========================= */
+// ==============================
+// Firebase
+// ==============================
 
 const firebaseConfig = {
     apiKey: "AIzaSyDJFat47USz6KKaGuvj1dVjfELhRmH_2Tw",
@@ -42,1766 +42,1579 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-
 const db = getFirestore(app);
-
 const auth = getAuth(app);
 
-const googleProvider = new GoogleAuthProvider();
 
-
-/* =========================
-   ログイン画面
-========================= */
-
-const loginScreen =
-    document.getElementById("loginScreen");
-
-const nameScreen =
-    document.getElementById("nameScreen");
-
-const appScreen =
-    document.getElementById("app");
-
-const googleLoginButton =
-    document.getElementById(
-        "googleLoginButton"
-    );
-
-const guestLoginButton =
-    document.getElementById(
-        "guestLoginButton"
-    );
-
-const startChatButton =
-    document.getElementById(
-        "startChatButton"
-    );
-
-const nameInput =
-    document.getElementById(
-        "nameInput"
-    );
-
-const loginError =
-    document.getElementById(
-        "loginError"
-    );
-
-const nameError =
-    document.getElementById(
-        "nameError"
-    );
-
-const logoutButton =
-    document.getElementById(
-        "logoutButton"
-    );
-
-
-/* =========================
-   アプリHTML
-========================= */
-
-const myName =
-    document.getElementById("myName");
-
-const status =
-    document.getElementById("status");
-
-const changeNameButton =
-    document.getElementById(
-        "changeNameButton"
-    );
-
-const profileImageInput =
-    document.getElementById(
-        "profileImageInput"
-    );
-
-const myProfileImage =
-    document.getElementById(
-        "myProfileImage"
-    );
-
-const profileImagePlaceholder =
-    document.getElementById(
-        "profileImagePlaceholder"
-    );
-
-const addFriendButton =
-    document.getElementById(
-        "addFriendButton"
-    );
-
-const createGroupButton =
-    document.getElementById(
-        "createGroupButton"
-    );
-
-const friendsList =
-    document.getElementById(
-        "friendsList"
-    );
-
-const groupsList =
-    document.getElementById(
-        "groupsList"
-    );
-
-const chatHeader =
-    document.getElementById(
-        "chatHeader"
-    );
-
-const messages =
-    document.getElementById(
-        "messages"
-    );
-
-const messageInput =
-    document.getElementById(
-        "messageInput"
-    );
-
-const sendButton =
-    document.getElementById(
-        "sendButton"
-    );
-
-const replyBar =
-    document.getElementById(
-        "replyBar"
-    );
-
-const replyText =
-    document.getElementById(
-        "replyText"
-    );
-
-const cancelReplyButton =
-    document.getElementById(
-        "cancelReplyButton"
-    );
-
-
-/* =========================
-   変数
-========================= */
-
-let username = "";
+// ==============================
+// 状態
+// ==============================
 
 let currentUser = null;
+let username = null;
 
 let friendsData = [];
-
 let groupsData = [];
 
 let selectedChat = null;
-
 let selectedChatType = null;
+let selectedFriendshipId = null;
 
-let stopMessagesListener = null;
-
-let replyTarget = null;
-
-let allMessages = [];
-
-
-/* =========================
-   ログイン状態監視
-========================= */
-
-onAuthStateChanged(
-    auth,
-    async user => {
-
-        currentUser = user;
+let unsubscribeMessages = null;
+let unsubscribeFriends = null;
+let unsubscribeGroups = null;
+let unsubscribeAllMessages = null;
 
 
-        if (!user) {
+// ==============================
+// HTML
+// ==============================
 
-            showLoginScreen();
+const loginScreen = document.getElementById("loginScreen");
+const nameScreen = document.getElementById("nameScreen");
+const appElement = document.getElementById("app");
 
-            return;
-        }
+const googleLoginButton = document.getElementById("googleLoginButton");
+const guestLoginButton = document.getElementById("guestLoginButton");
 
+const nameInput = document.getElementById("nameInput");
+const startChatButton = document.getElementById("startChatButton");
 
-        /*
-         * Googleログインの場合
-         */
+const loginError = document.getElementById("loginError");
+const nameError = document.getElementById("nameError");
 
-        if (
-            user.providerData.some(
-                provider =>
-                    provider.providerId ===
-                    "google.com"
-            )
-        ) {
+const myName = document.getElementById("myName");
+const statusElement = document.getElementById("status");
 
-            let savedName =
-                localStorage.getItem(
-                    "yuuchat_username"
-                );
+const friendsList = document.getElementById("friendsList");
+const groupsList = document.getElementById("groupsList");
 
+const addFriendButton = document.getElementById("addFriendButton");
+const createGroupButton = document.getElementById("createGroupButton");
+const logoutButton = document.getElementById("logoutButton");
 
-            if (!savedName) {
+const chatHeader = document.getElementById("chatHeader");
+const messagesElement = document.getElementById("messages");
 
-                savedName =
-                    user.displayName ||
-                    "ゆうた";
+const messageInput = document.getElementById("messageInput");
+const sendButton = document.getElementById("sendButton");
 
-                localStorage.setItem(
-                    "yuuchat_username",
-                    savedName
-                );
-            }
-
-
-            username =
-                savedName;
-
-            startApp();
-
-            return;
-        }
+const replyBar = document.getElementById("replyBar");
+const replyText = document.getElementById("replyText");
+const cancelReplyButton = document.getElementById("cancelReplyButton");
 
 
-        /*
-         * ゲストの場合
-         */
+// ==============================
+// ログイン
+// ==============================
 
-        const savedName =
-            localStorage.getItem(
-                "yuuchat_username"
-            );
-
-
-        if (savedName) {
-
-            username =
-                savedName;
-
-            startApp();
-
-        } else {
-
-            showNameScreen();
-        }
-    }
-);
-
-
-/* =========================
-   Googleログイン
-========================= */
-
-googleLoginButton.addEventListener(
-    "click",
-    async () => {
-
+googleLoginButton?.addEventListener("click", async () => {
+    try {
         loginError.textContent = "";
 
-        googleLoginButton.disabled = true;
+        const provider = new GoogleAuthProvider();
 
-        try {
+        await signInWithPopup(auth, provider);
 
-            await signInWithPopup(
-                auth,
-                googleProvider
-            );
-
-        } catch (error) {
-
-            console.error(error);
-
-            loginError.textContent =
-                "Googleログインに失敗しました。もう一度試してください。";
-
-            googleLoginButton.disabled =
-                false;
-        }
+    } catch (error) {
+        console.error(error);
+        loginError.textContent = "ログインに失敗しました。";
     }
-);
+});
 
 
-/* =========================
-   ゲストログイン
-========================= */
-
-guestLoginButton.addEventListener(
-    "click",
-    async () => {
-
+guestLoginButton?.addEventListener("click", async () => {
+    try {
         loginError.textContent = "";
 
-        guestLoginButton.disabled = true;
+        await signInAnonymously(auth);
 
-        try {
-
-            await signInAnonymously(
-                auth
-            );
-
-        } catch (error) {
-
-            console.error(error);
-
-            loginError.textContent =
-                "ゲストログインに失敗しました。";
-
-            guestLoginButton.disabled =
-                false;
-        }
+    } catch (error) {
+        console.error(error);
+        loginError.textContent = "ゲストログインに失敗しました。";
     }
-);
+});
 
 
-/* =========================
-   名前設定
-========================= */
+// ==============================
+// 認証状態
+// ==============================
 
-startChatButton.addEventListener(
-    "click",
-    () => {
+onAuthStateChanged(auth, async (user) => {
 
-        nameError.textContent = "";
+    if (!user) {
+        currentUser = null;
 
-        const name =
-            nameInput.value.trim();
+        loginScreen?.classList.remove("hidden");
+        nameScreen?.classList.add("hidden");
+        appElement?.classList.add("hidden");
 
+        return;
+    }
 
-        if (!name) {
+    currentUser = user;
 
-            nameError.textContent =
-                "名前を入力してください。";
+    const savedName = localStorage.getItem("yuuchat_username");
 
-            return;
-        }
+    let suggestedName = savedName;
 
+    if (!suggestedName && user.displayName) {
+        suggestedName = user.displayName;
+    }
 
-        if (name.length > 20) {
+    if (suggestedName) {
 
-            nameError.textContent =
-                "名前は20文字以内にしてください。";
-
-            return;
-        }
-
-
-        username =
-            name;
-
-        localStorage.setItem(
-            "yuuchat_username",
-            username
+        const userDoc = await getDoc(
+            doc(db, "users", suggestedName)
         );
 
-
-        startApp();
-    }
-);
-
-
-/* =========================
-   画面切り替え
-========================= */
-
-function showLoginScreen() {
-
-    loginScreen.classList.remove(
-        "hidden"
-    );
-
-    nameScreen.classList.add(
-        "hidden"
-    );
-
-    appScreen.classList.add(
-        "hidden"
-    );
-}
-
-
-function showNameScreen() {
-
-    loginScreen.classList.add(
-        "hidden"
-    );
-
-    nameScreen.classList.remove(
-        "hidden"
-    );
-
-    appScreen.classList.add(
-        "hidden"
-    );
-}
-
-
-function startApp() {
-
-    loginScreen.classList.add(
-        "hidden"
-    );
-
-    nameScreen.classList.add(
-        "hidden"
-    );
-
-    appScreen.classList.remove(
-        "hidden"
-    );
-
-
-    myName.textContent =
-        username;
-
-    status.textContent =
-        "🟢 オンライン";
-
-
-    loadProfileImage();
-
-    updateOnline();
-
-    listenFriends();
-
-    listenGroups();
-
-    listenAllMessages();
-}
-
-
-/* =========================
-   ログアウト
-========================= */
-
-logoutButton.addEventListener(
-    "click",
-    async () => {
-
-        const ok =
-            confirm(
-                "ログアウトしますか？"
-            );
-
-        if (!ok) return;
-
-
-        try {
-
-            if (
-                stopMessagesListener
-            ) {
-
-                stopMessagesListener();
-
-                stopMessagesListener =
-                    null;
-            }
-
-
-            await signOut(auth);
-
-        } catch (error) {
-
-            console.error(error);
-
-            alert(
-                "ログアウトに失敗しました。"
-            );
-        }
-    }
-);
-
-
-/* =========================
-   プロフィール画像
-========================= */
-
-function getProfileImageKey() {
-
-    if (!currentUser) {
-
-        return "yuuchat_profile_image";
-    }
-
-    return (
-        "yuuchat_profile_image_" +
-        currentUser.uid
-    );
-}
-
-
-function loadProfileImage() {
-
-    const saved =
-        localStorage.getItem(
-            getProfileImageKey()
-        );
-
-
-    if (saved) {
-
-        myProfileImage.src =
-            saved;
-
-        myProfileImage.style.display =
-            "block";
-
-        profileImagePlaceholder.style.display =
-            "none";
-
-    } else {
-
-        myProfileImage.style.display =
-            "none";
-
-        profileImagePlaceholder.style.display =
-            "block";
-    }
-}
-
-
-profileImageInput.addEventListener(
-    "change",
-    () => {
-
-        const file =
-            profileImageInput.files[0];
-
-        if (!file) return;
-
-
-        const reader =
-            new FileReader();
-
-
-        reader.onload = () => {
-
-            const imageData =
-                reader.result;
-
-
-            localStorage.setItem(
-                getProfileImageKey(),
-                imageData
-            );
-
-
-            myProfileImage.src =
-                imageData;
-
-            myProfileImage.style.display =
-                "block";
-
-            profileImagePlaceholder.style.display =
-                "none";
-        };
-
-
-        reader.readAsDataURL(file);
-    }
-);
-
-
-/* =========================
-   名前変更
-========================= */
-
-changeNameButton.addEventListener(
-    "click",
-    async () => {
-
-        const oldName =
-            username;
-
-
-        const newName =
-            prompt(
-                "新しい名前を入力してください",
-                username
-            );
-
-
-        if (!newName) return;
-
-
-        const trimmed =
-            newName.trim();
-
-
-        if (!trimmed) return;
-
-
         if (
-            trimmed === oldName
+            !userDoc.exists() ||
+            !userDoc.data().uid ||
+            userDoc.data().uid === user.uid
         ) {
 
-            return;
-        }
-
-
-        if (
-            trimmed.length > 20
-        ) {
-
-            alert(
-                "名前は20文字以内にしてください。"
-            );
-
-            return;
-        }
-
-
-        try {
-
-            await renameUser(
-                oldName,
-                trimmed
-            );
-
-
-            username =
-                trimmed;
-
+            username = suggestedName;
 
             localStorage.setItem(
                 "yuuchat_username",
                 username
             );
 
+            await startApp();
 
-            myName.textContent =
-                username;
+        } else {
 
+            nameInput.value = "";
+            nameError.textContent =
+                "この名前はすでに使われています。別の名前を入力してください。";
 
-            alert(
-                "名前を変更しました"
-            );
-
-        } catch (error) {
-
-            console.error(error);
-
-            alert(
-                "名前変更に失敗しました。"
-            );
+            showNameScreen();
         }
+
+    } else {
+
+        showNameScreen();
     }
-);
+});
 
 
-/* =========================
-   名前変更処理
-========================= */
+// ==============================
+// 名前画面
+// ==============================
 
-async function renameUser(
-    oldName,
-    newName
-) {
+function showNameScreen() {
 
-    const batch =
-        writeBatch(db);
+    loginScreen?.classList.add("hidden");
+    appElement?.classList.add("hidden");
+    nameScreen?.classList.remove("hidden");
+
+}
 
 
-    const friendsSnapshot =
-        await getDocs(
-            collection(
-                db,
-                "friends"
-            )
+// ==============================
+// 名前決定
+// ==============================
+
+startChatButton?.addEventListener("click", async () => {
+
+    const newName = nameInput.value.trim();
+
+    if (!newName) {
+        nameError.textContent = "名前を入力してください。";
+        return;
+    }
+
+    if (newName.length > 20) {
+        nameError.textContent = "名前は20文字以内にしてください。";
+        return;
+    }
+
+    try {
+
+        const existingUser = await getDoc(
+            doc(db, "users", newName)
         );
 
+        if (
+            existingUser.exists() &&
+            existingUser.data().uid &&
+            existingUser.data().uid !== currentUser.uid
+        ) {
 
-    friendsSnapshot.forEach(
-        friendDoc => {
+            nameError.textContent =
+                "その名前はすでに使われています。";
 
-            const data =
-                friendDoc.data();
+            return;
+        }
 
-            const updateData = {};
+        username = newName;
 
-            let changed = false;
+        localStorage.setItem(
+            "yuuchat_username",
+            username
+        );
 
+        await startApp();
 
-            if (
-                data.owner ===
-                oldName
-            ) {
+    } catch (error) {
 
-                updateData.owner =
-                    newName;
+        console.error(error);
 
-                changed = true;
-            }
+        nameError.textContent =
+            "名前の設定に失敗しました。";
 
+    }
 
-            if (
-                data.friendName ===
-                oldName
-            ) {
-
-                updateData.friendName =
-                    newName;
-
-                changed = true;
-            }
+});
 
 
-            if (changed) {
+// ==============================
+// アプリ開始
+// ==============================
 
-                batch.update(
-                    doc(
-                        db,
-                        "friends",
-                        friendDoc.id
-                    ),
-                    updateData
-                );
-            }
+async function startApp() {
+
+    loginScreen?.classList.add("hidden");
+    nameScreen?.classList.add("hidden");
+    appElement?.classList.remove("hidden");
+
+    myName.textContent = username;
+
+    await updateOnline();
+
+    loadProfileImage();
+
+    listenFriends();
+    listenGroups();
+    listenAllMessages();
+
+}
+
+
+// ==============================
+// オンライン状態
+// ==============================
+
+async function updateOnline() {
+
+    if (!username || !currentUser) return;
+
+    await setDoc(
+        doc(db, "users", username),
+        {
+            username: username,
+            uid: currentUser.uid,
+            online: true,
+            lastSeen: serverTimestamp()
+        },
+        {
+            merge: true
         }
     );
 
-
-    const groupsSnapshot =
-        await getDocs(
-            collection(
-                db,
-                "groups"
-            )
-        );
+    statusElement.textContent = "🟢 オンライン";
+}
 
 
-    groupsSnapshot.forEach(
-        groupDoc => {
+// ==============================
+// 20秒ごとにオンライン更新
+// ==============================
 
-            const data =
-                groupDoc.data();
+setInterval(() => {
 
+    if (currentUser && username) {
+        updateOnline();
+    }
 
-            let changed = false;
-
-
-            let members =
-                Array.isArray(
-                    data.members
-                )
-                    ? [...data.members]
-                    : [];
+}, 20000);
 
 
-            members =
-                members.map(
-                    member => {
+// ==============================
+// ログアウト
+// ==============================
 
-                        if (
-                            member ===
-                            oldName
-                        ) {
+logoutButton?.addEventListener("click", async () => {
 
-                            changed = true;
+    try {
 
-                            return newName;
-                        }
+        if (username) {
 
-                        return member;
-                    }
-                );
-
-
-            const updateData = {};
-
-
-            if (
-                data.owner ===
-                oldName
-            ) {
-
-                updateData.owner =
-                    newName;
-
-                changed = true;
-            }
-
-
-            if (changed) {
-
-                updateData.members =
-                    members;
-
-
-                batch.update(
-                    doc(
-                        db,
-                        "groups",
-                        groupDoc.id
-                    ),
-                    updateData
-                );
-            }
-        }
-    );
-
-
-    const messagesSnapshot =
-        await getDocs(
-            collection(
-                db,
-                "messages"
-            )
-        );
-
-
-    messagesSnapshot.forEach(
-        messageDoc => {
-
-            const data =
-                messageDoc.data();
-
-
-            const updateData = {};
-
-            let changed = false;
-
-
-            if (
-                data.username ===
-                oldName
-            ) {
-
-                updateData.username =
-                    newName;
-
-                changed = true;
-            }
-
-
-            if (
-                data.receiver ===
-                oldName
-            ) {
-
-                updateData.receiver =
-                    newName;
-
-                changed = true;
-            }
-
-
-            if (
-                data.replyTo &&
-                data.replyTo.username ===
-                oldName
-            ) {
-
-                updateData.replyTo = {
-                    ...data.replyTo,
-                    username:
-                        newName
-                };
-
-                changed = true;
-            }
-
-
-            if (
-                Array.isArray(
-                    data.readBy
-                )
-            ) {
-
-                const newReadBy =
-                    data.readBy.map(
-                        name =>
-                            name ===
-                            oldName
-                                ? newName
-                                : name
-                    );
-
-
-                if (
-                    JSON.stringify(
-                        newReadBy
-                    ) !==
-                    JSON.stringify(
-                        data.readBy
-                    )
-                ) {
-
-                    updateData.readBy =
-                        newReadBy;
-
-                    changed = true;
+            await updateDoc(
+                doc(db, "users", username),
+                {
+                    online: false,
+                    lastSeen: serverTimestamp()
                 }
-            }
-
-
-            if (changed) {
-
-                batch.update(
-                    doc(
-                        db,
-                        "messages",
-                        messageDoc.id
-                    ),
-                    updateData
-                );
-            }
+            );
         }
+
+    } catch (error) {
+        console.error(error);
+    }
+
+    await signOut(auth);
+
+    location.reload();
+
+});
+
+
+// ==============================
+// プロフィール画像
+// ==============================
+
+const profileImageInput =
+    document.getElementById("profileImageInput");
+
+const myProfileImage =
+    document.getElementById("myProfileImage");
+
+const profileImagePlaceholder =
+    document.getElementById("profileImagePlaceholder");
+
+
+profileImageInput?.addEventListener("change", () => {
+
+    const file = profileImageInput.files[0];
+
+    if (!file) return;
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+
+        const imageData = reader.result;
+
+        localStorage.setItem(
+            `yuuchat_profile_${currentUser.uid}`,
+            imageData
+        );
+
+        loadProfileImage();
+    };
+
+    reader.readAsDataURL(file);
+
+});
+
+
+function loadProfileImage() {
+
+    if (!currentUser) return;
+
+    const imageData = localStorage.getItem(
+        `yuuchat_profile_${currentUser.uid}`
     );
 
+    if (imageData) {
+
+        myProfileImage.src = imageData;
+        myProfileImage.style.display = "block";
+        profileImagePlaceholder.style.display = "none";
+
+    } else {
+
+        myProfileImage.style.display = "none";
+        profileImagePlaceholder.style.display = "block";
+
+    }
+}
+
+
+// ==============================
+// 名前変更
+// ==============================
+
+const changeNameButton =
+    document.getElementById("changeNameButton");
+
+changeNameButton?.addEventListener("click", async () => {
+
+    const newName = prompt(
+        "新しい名前を入力してください",
+        username
+    );
+
+    if (!newName) return;
+
+    const trimmedName = newName.trim();
+
+    if (!trimmedName || trimmedName === username) {
+        return;
+    }
+
+    if (trimmedName.length > 20) {
+        alert("名前は20文字以内にしてください。");
+        return;
+    }
+
+    try {
+
+        const newUserDoc = await getDoc(
+            doc(db, "users", trimmedName)
+        );
+
+        if (
+            newUserDoc.exists() &&
+            newUserDoc.data().uid !== currentUser.uid
+        ) {
+
+            alert("その名前はすでに使われています。");
+            return;
+        }
+
+        await renameUser(username, trimmedName);
+
+        username = trimmedName;
+
+        localStorage.setItem(
+            "yuuchat_username",
+            username
+        );
+
+        myName.textContent = username;
+
+        alert("名前を変更しました。");
+
+    } catch (error) {
+
+        console.error(error);
+        alert("名前変更に失敗しました。");
+
+    }
+
+});
+
+
+// ==============================
+// 名前変更処理
+// ==============================
+
+async function renameUser(oldName, newName) {
+
+    const batch = writeBatch(db);
+
+    const newUserRef = doc(db, "users", newName);
+
+    batch.set(
+        newUserRef,
+        {
+            username: newName,
+            uid: currentUser.uid,
+            online: true,
+            lastSeen: serverTimestamp()
+        },
+        { merge: true }
+    );
+
+
+    // 友達
+    const friendsSnapshot =
+        await getDocs(collection(db, "friends"));
+
+    friendsSnapshot.forEach((item) => {
+
+        const data = item.data();
+
+        if (
+            data.owner === oldName ||
+            data.friendName === oldName
+        ) {
+
+            batch.update(
+                item.ref,
+                {
+                    owner:
+                        data.owner === oldName
+                            ? newName
+                            : data.owner,
+
+                    friendName:
+                        data.friendName === oldName
+                            ? newName
+                            : data.friendName
+                }
+            );
+        }
+    });
+
+
+    // グループ
+    const groupsSnapshot =
+        await getDocs(collection(db, "groups"));
+
+    groupsSnapshot.forEach((item) => {
+
+        const data = item.data();
+
+        if (data.owner === oldName ||
+            data.members?.includes(oldName)) {
+
+            const newMembers =
+                (data.members || []).map(member =>
+                    member === oldName
+                        ? newName
+                        : member
+                );
+
+            batch.update(
+                item.ref,
+                {
+                    owner:
+                        data.owner === oldName
+                            ? newName
+                            : data.owner,
+
+                    members: newMembers
+                }
+            );
+        }
+    });
+
+
+    // メッセージ
+    const messagesSnapshot =
+        await getDocs(collection(db, "messages"));
+
+    messagesSnapshot.forEach((item) => {
+
+        const data = item.data();
+
+        if (
+            data.sender === oldName ||
+            data.receiver === oldName
+        ) {
+
+            batch.update(
+                item.ref,
+                {
+                    sender:
+                        data.sender === oldName
+                            ? newName
+                            : data.sender,
+
+                    receiver:
+                        data.receiver === oldName
+                            ? newName
+                            : data.receiver
+                }
+            );
+        }
+    });
+
+
+    batch.delete(doc(db, "users", oldName));
 
     await batch.commit();
 }
 
 
-/* =========================
-   オンライン状態
-========================= */
-
-async function updateOnline() {
-
-    if (!username) return;
-
-
-    try {
-
-        await setDoc(
-            doc(
-                db,
-                "users",
-                username
-            ),
-            {
-                username,
-                online: true,
-                lastSeen:
-                    serverTimestamp(),
-
-                uid:
-                    currentUser
-                        ? currentUser.uid
-                        : null
-            },
-            {
-                merge: true
-            }
-        );
-
-    } catch (error) {
-
-        console.error(
-            "online error",
-            error
-        );
-    }
-}
-
-
-setTimeout(
-    updateOnline,
-    500
-);
-
-
-setInterval(
-    updateOnline,
-    20000
-);
-
-
-/* =========================
-   友達一覧
-========================= */
+// ==============================
+// 友達一覧
+// ==============================
 
 function listenFriends() {
 
-    const q =
-        query(
-            collection(
-                db,
-                "friends"
-            ),
-            where(
-                "owner",
-                "==",
-                username
-            )
-        );
+    if (unsubscribeFriends) {
+        unsubscribeFriends();
+    }
 
-
-    onSnapshot(
-        q,
-        snapshot => {
-
-            friendsData = [];
-
-
-            snapshot.forEach(
-                friendDoc => {
-
-                    friendsData.push({
-                        id:
-                            friendDoc.id,
-
-                        ...friendDoc.data()
-                    });
-                }
-            );
-
-
-            renderFriends();
-        }
+    const q = query(
+        collection(db, "friends"),
+        where("owner", "==", username)
     );
+
+    unsubscribeFriends = onSnapshot(q, async (snapshot) => {
+
+        friendsData = [];
+
+        snapshot.forEach((item) => {
+
+            friendsData.push({
+                id: item.id,
+                ...item.data()
+            });
+
+        });
+
+        renderFriends();
+
+    });
 }
 
 
-/* =========================
-   グループ一覧
-========================= */
-
-function listenGroups() {
-
-    const q =
-        query(
-            collection(
-                db,
-                "groups"
-            ),
-            where(
-                "members",
-                "array-contains",
-                username
-            )
-        );
-
-
-    onSnapshot(
-        q,
-        snapshot => {
-
-            groupsData = [];
-
-
-            snapshot.forEach(
-                groupDoc => {
-
-                    groupsData.push({
-                        id:
-                            groupDoc.id,
-
-                        ...groupDoc.data()
-                    });
-                }
-            );
-
-
-            renderGroups();
-        }
-    );
-}
-
-
-/* =========================
-   全メッセージ
-========================= */
-
-function listenAllMessages() {
-
-    const q =
-        query(
-            collection(
-                db,
-                "messages"
-            ),
-            orderBy(
-                "createdAt",
-                "asc"
-            )
-        );
-
-
-    onSnapshot(
-        q,
-        snapshot => {
-
-            allMessages = [];
-
-
-            snapshot.forEach(
-                messageDoc => {
-
-                    allMessages.push({
-                        id:
-                            messageDoc.id,
-
-                        ...messageDoc.data()
-                    });
-                }
-            );
-
-
-            renderFriends();
-
-            renderGroups();
-
-
-            if (
-                selectedChat
-            ) {
-
-                renderCurrentMessages();
-            }
-        }
-    );
-}
-
-
-/* =========================
-   未読数
-========================= */
-
-function getUnreadCountForFriend(
-    friendName
-) {
-
-    return allMessages.filter(
-        message => {
-
-            if (
-                message.username ===
-                username
-            ) {
-                return false;
-            }
-
-
-            if (
-                message.receiver !==
-                username
-            ) {
-                return false;
-            }
-
-
-            if (
-                message.username !==
-                friendName
-            ) {
-                return false;
-            }
-
-
-            if (
-                Array.isArray(
-                    message.readBy
-                ) &&
-                message.readBy.includes(
-                    username
-                )
-            ) {
-
-                return false;
-            }
-
-
-            return true;
-        }
-    ).length;
-}
-
-
-function getUnreadCountForGroup(
-    groupId
-) {
-
-    return allMessages.filter(
-        message => {
-
-            if (
-                message.chatType !==
-                "group"
-            ) {
-                return false;
-            }
-
-
-            if (
-                message.chatId !==
-                groupId
-            ) {
-                return false;
-            }
-
-
-            if (
-                message.username ===
-                username
-            ) {
-                return false;
-            }
-
-
-            if (
-                Array.isArray(
-                    message.readBy
-                ) &&
-                message.readBy.includes(
-                    username
-                )
-            ) {
-
-                return false;
-            }
-
-
-            return true;
-        }
-    ).length;
-}
-
-
-/* =========================
-   友達表示
-========================= */
+// ==============================
+// 友達表示
+// ==============================
 
 function renderFriends() {
 
     friendsList.innerHTML = "";
 
-
-    if (
-        friendsData.length ===
-        0
-    ) {
+    if (friendsData.length === 0) {
 
         friendsList.innerHTML =
-            `
-            <div style="
-                color:#aaa;
-                font-size:12px;
-                padding:5px;
-            ">
-                友達を追加してください
-            </div>
-            `;
+            `<div class="empty-message">友達がいません</div>`;
 
         return;
     }
 
 
-    friendsData.forEach(
-        friend => {
+    friendsData.forEach((friend) => {
 
-            const item =
-                document.createElement(
-                    "button"
-                );
+        const row = document.createElement("div");
+
+        row.className = "friend-item";
 
 
-            item.className =
-                "friend-item";
+        const mainButton =
+            document.createElement("button");
+
+        mainButton.className =
+            "friend-main-button";
 
 
-            if (
-                selectedChatType ===
-                    "friend" &&
-                selectedChat ===
-                    friend.friendName
-            ) {
+        const dot =
+            document.createElement("span");
 
-                item.classList.add(
-                    "active"
-                );
+        dot.textContent = "🟢";
+
+
+        const name =
+            document.createElement("span");
+
+        name.className = "friend-name";
+        name.textContent = friend.friendName;
+
+
+        const unread =
+            document.createElement("span");
+
+        unread.className = "unread-badge";
+        unread.style.display = "none";
+
+
+        mainButton.appendChild(dot);
+        mainButton.appendChild(name);
+        mainButton.appendChild(unread);
+
+
+        mainButton.addEventListener(
+            "click",
+            () => selectFriend(friend.friendName)
+        );
+
+
+        const deleteButton =
+            document.createElement("button");
+
+        deleteButton.className =
+            "friend-delete-button";
+
+        deleteButton.textContent = "×";
+
+        deleteButton.title = "友達を削除";
+
+        deleteButton.addEventListener(
+            "click",
+            (event) => {
+
+                event.stopPropagation();
+
+                deleteFriend(friend.friendName);
             }
+        );
 
 
-            const dot =
-                document.createElement(
-                    "span"
-                );
+        row.appendChild(mainButton);
+        row.appendChild(deleteButton);
 
+        friendsList.appendChild(row);
 
-            dot.className =
-                "offline-dot";
+    });
 
-
-            const name =
-                document.createElement(
-                    "span"
-                );
-
-
-            name.className =
-                "friend-name";
-
-
-            name.textContent =
-                friend.friendName;
-
-
-            item.appendChild(dot);
-
-            item.appendChild(name);
-
-
-            const unread =
-                getUnreadCountForFriend(
-                    friend.friendName
-                );
-
-
-            if (
-                unread > 0
-            ) {
-
-                const badge =
-                    document.createElement(
-                        "span"
-                    );
-
-
-                badge.className =
-                    "unread-badge";
-
-
-                badge.textContent =
-                    unread > 99
-                        ? "99+"
-                        : unread;
-
-
-                item.appendChild(
-                    badge
-                );
-            }
-
-
-            item.addEventListener(
-                "click",
-                () => {
-
-                    selectFriend(
-                        friend.friendName
-                    );
-                }
-            );
-
-
-            friendsList.appendChild(
-                item
-            );
-        }
-    );
+    updateUnreadBadges();
 }
 
 
-/* =========================
-   グループ表示
-========================= */
+// ==============================
+// 友達追加
+// ==============================
+
+addFriendButton?.addEventListener("click", async () => {
+
+    const friendName = prompt(
+        "追加したい友達の名前を入力してください"
+    );
+
+    if (!friendName) return;
+
+    const trimmedName = friendName.trim();
+
+    if (!trimmedName) return;
+
+    if (trimmedName === username) {
+
+        alert("自分自身は友達に追加できません。");
+        return;
+    }
+
+
+    try {
+
+        // 本当に存在するアカウントか確認
+        const userSnapshot =
+            await getDoc(
+                doc(db, "users", trimmedName)
+            );
+
+
+        if (!userSnapshot.exists()) {
+
+            alert(
+                "その名前のユーザーは存在しません。\n正しい名前を入力してください。"
+            );
+
+            return;
+        }
+
+
+        const userData = userSnapshot.data();
+
+        if (!userData.uid) {
+
+            alert("そのユーザーを確認できません。");
+            return;
+        }
+
+
+        if (userData.uid === currentUser.uid) {
+
+            alert("自分自身は追加できません。");
+            return;
+        }
+
+
+        // すでに存在するか確認
+        const existingQuery =
+            query(
+                collection(db, "friends"),
+                where("owner", "==", username),
+                where("friendName", "==", trimmedName)
+            );
+
+        const existingSnapshot =
+            await getDocs(existingQuery);
+
+
+        if (!existingSnapshot.empty) {
+
+            alert("すでに友達です。");
+            return;
+        }
+
+
+        // 新しいチャットID
+        const friendshipId =
+            crypto.randomUUID();
+
+
+        const batch = writeBatch(db);
+
+
+        // 自分側
+        const myFriendRef =
+            doc(collection(db, "friends"));
+
+        batch.set(
+            myFriendRef,
+            {
+                owner: username,
+                friendName: trimmedName,
+                friendshipId: friendshipId,
+                createdAt: serverTimestamp()
+            }
+        );
+
+
+        // 相手側
+        const theirFriendRef =
+            doc(collection(db, "friends"));
+
+        batch.set(
+            theirFriendRef,
+            {
+                owner: trimmedName,
+                friendName: username,
+                friendshipId: friendshipId,
+                createdAt: serverTimestamp()
+            }
+        );
+
+
+        await batch.commit();
+
+
+        alert(
+            `${trimmedName}さんを友達に追加しました！`
+        );
+
+    } catch (error) {
+
+        console.error(error);
+
+        alert(
+            "友達追加に失敗しました。"
+        );
+
+    }
+
+});
+
+
+// ==============================
+// 友達削除
+// ==============================
+
+async function deleteFriend(friendName) {
+
+    const ok = confirm(
+        `${friendName}さんを友達から削除しますか？\n\n削除すると、お互いの友達一覧から消えます。\n再追加すると新しいチャットになります。`
+    );
+
+    if (!ok) return;
+
+
+    try {
+
+        const myQuery =
+            query(
+                collection(db, "friends"),
+                where("owner", "==", username),
+                where("friendName", "==", friendName)
+            );
+
+        const theirQuery =
+            query(
+                collection(db, "friends"),
+                where("owner", "==", friendName),
+                where("friendName", "==", username)
+            );
+
+
+        const mySnapshot =
+            await getDocs(myQuery);
+
+        const theirSnapshot =
+            await getDocs(theirQuery);
+
+
+        const batch = writeBatch(db);
+
+
+        mySnapshot.forEach(item => {
+            batch.delete(item.ref);
+        });
+
+        theirSnapshot.forEach(item => {
+            batch.delete(item.ref);
+        });
+
+
+        await batch.commit();
+
+
+        if (selectedChat === friendName) {
+
+            selectedChat = null;
+            selectedChatType = null;
+            selectedFriendshipId = null;
+
+            chatHeader.textContent =
+                "相手を選択してください";
+
+            messagesElement.innerHTML = "";
+
+            messageInput.disabled = true;
+            sendButton.disabled = true;
+
+            messageInput.placeholder =
+                "友達またはグループを選択してください";
+        }
+
+
+        alert(
+            "友達を削除しました。"
+        );
+
+
+    } catch (error) {
+
+        console.error(error);
+
+        alert(
+            "友達の削除に失敗しました。"
+        );
+
+    }
+
+}
+
+
+// ==============================
+// 友達のチャットID確認
+// ==============================
+
+async function ensureFriendshipId(friendName) {
+
+    const currentFriend =
+        friendsData.find(
+            friend => friend.friendName === friendName
+        );
+
+
+    if (currentFriend?.friendshipId) {
+
+        return currentFriend.friendshipId;
+    }
+
+
+    const myQuery =
+        query(
+            collection(db, "friends"),
+            where("owner", "==", username),
+            where("friendName", "==", friendName)
+        );
+
+
+    const theirQuery =
+        query(
+            collection(db, "friends"),
+            where("owner", "==", friendName),
+            where("friendName", "==", username)
+        );
+
+
+    const mySnapshot =
+        await getDocs(myQuery);
+
+    const theirSnapshot =
+        await getDocs(theirQuery);
+
+
+    let friendshipId = null;
+
+
+    mySnapshot.forEach(item => {
+
+        if (!friendshipId) {
+            friendshipId =
+                item.data().friendshipId || null;
+        }
+
+    });
+
+
+    theirSnapshot.forEach(item => {
+
+        if (!friendshipId) {
+            friendshipId =
+                item.data().friendshipId || null;
+        }
+
+    });
+
+
+    if (!friendshipId) {
+        friendshipId = crypto.randomUUID();
+    }
+
+
+    const batch = writeBatch(db);
+
+
+    mySnapshot.forEach(item => {
+
+        batch.update(
+            item.ref,
+            {
+                friendshipId
+            }
+        );
+
+    });
+
+
+    theirSnapshot.forEach(item => {
+
+        batch.update(
+            item.ref,
+            {
+                friendshipId
+            }
+        );
+
+    });
+
+
+    await batch.commit();
+
+
+    // 古いメッセージにもIDを付ける
+    const messagesSnapshot =
+        await getDocs(collection(db, "messages"));
+
+
+    const oldMessages = [];
+
+
+    messagesSnapshot.forEach(item => {
+
+        const data = item.data();
+
+
+        const isPair =
+            (
+                data.sender === username &&
+                data.receiver === friendName
+            ) ||
+            (
+                data.sender === friendName &&
+                data.receiver === username
+            );
+
+
+        if (
+            isPair &&
+            !data.friendshipId &&
+            data.chatType !== "group"
+        ) {
+
+            oldMessages.push(item);
+
+        }
+
+    });
+
+
+    // 500件ずつ処理
+    for (
+        let i = 0;
+        i < oldMessages.length;
+        i += 450
+    ) {
+
+        const chunk =
+            oldMessages.slice(i, i + 450);
+
+        const messageBatch =
+            writeBatch(db);
+
+        chunk.forEach(item => {
+
+            messageBatch.update(
+                item.ref,
+                {
+                    friendshipId
+                }
+            );
+
+        });
+
+        await messageBatch.commit();
+    }
+
+
+    return friendshipId;
+}
+
+
+// ==============================
+// グループ一覧
+// ==============================
+
+function listenGroups() {
+
+    if (unsubscribeGroups) {
+        unsubscribeGroups();
+    }
+
+    const q = query(
+        collection(db, "groups"),
+        where("members", "array-contains", username)
+    );
+
+
+    unsubscribeGroups =
+        onSnapshot(q, snapshot => {
+
+            groupsData = [];
+
+            snapshot.forEach(item => {
+
+                groupsData.push({
+                    id: item.id,
+                    ...item.data()
+                });
+
+            });
+
+            renderGroups();
+        });
+}
+
+
+// ==============================
+// グループ表示
+// ==============================
 
 function renderGroups() {
 
     groupsList.innerHTML = "";
 
 
-    if (
-        groupsData.length ===
-        0
-    ) {
+    if (groupsData.length === 0) {
 
         groupsList.innerHTML =
-            `
-            <div style="
-                color:#aaa;
-                font-size:12px;
-                padding:5px;
-            ">
-                グループはありません
-            </div>
-            `;
+            `<div class="empty-message">グループがありません</div>`;
 
         return;
     }
 
 
-    groupsData.forEach(
-        group => {
+    groupsData.forEach(group => {
 
-            const item =
-                document.createElement(
-                    "button"
-                );
+        const row =
+            document.createElement("div");
 
-
-            item.className =
-                "group-item";
+        row.className = "group-item";
 
 
-            if (
-                selectedChatType ===
-                    "group" &&
-                selectedChat ===
-                    group.id
-            ) {
+        const mainButton =
+            document.createElement("button");
 
-                item.classList.add(
-                    "active"
-                );
+        mainButton.className =
+            "group-main-button";
+
+        mainButton.textContent =
+            `👥 ${group.name}`;
+
+
+        mainButton.addEventListener(
+            "click",
+            () => selectGroup(group.id)
+        );
+
+
+        const manageButton =
+            document.createElement("button");
+
+        manageButton.className =
+            "group-manage-button";
+
+        manageButton.textContent = "⋯";
+
+        manageButton.title =
+            "グループ管理";
+
+
+        manageButton.addEventListener(
+            "click",
+            event => {
+
+                event.stopPropagation();
+
+                manageGroup(group);
             }
+        );
 
 
-            const name =
-                document.createElement(
-                    "span"
-                );
+        row.appendChild(mainButton);
+        row.appendChild(manageButton);
+
+        groupsList.appendChild(row);
+
+    });
 
 
-            name.className =
-                "group-name";
-
-
-            name.textContent =
-                "👥 " +
-                group.name;
-
-
-            item.appendChild(name);
-
-
-            const unread =
-                getUnreadCountForGroup(
-                    group.id
-                );
-
-
-            if (
-                unread > 0
-            ) {
-
-                const badge =
-                    document.createElement(
-                        "span"
-                    );
-
-
-                badge.className =
-                    "unread-badge";
-
-
-                badge.textContent =
-                    unread > 99
-                        ? "99+"
-                        : unread;
-
-
-                item.appendChild(
-                    badge
-                );
-            }
-
-
-            item.addEventListener(
-                "click",
-                () => {
-
-                    selectGroup(
-                        group.id
-                    );
-                }
-            );
-
-
-            groupsList.appendChild(
-                item
-            );
-        }
-    );
+    updateUnreadBadges();
 }
 
 
-/* =========================
-   友達追加
-========================= */
+// ==============================
+// グループ作成
+// ==============================
 
-addFriendButton.addEventListener(
+createGroupButton?.addEventListener(
     "click",
     async () => {
-
-        const friendName =
-            prompt(
-                "追加する友達の名前を入力してください"
-            );
-
-
-        if (!friendName) return;
-
-
-        const trimmed =
-            friendName.trim();
-
-
-        if (!trimmed) return;
-
-
-        if (
-            trimmed === username
-        ) {
-
-            alert(
-                "自分自身は追加できません"
-            );
-
-            return;
-        }
-
-
-        const q =
-            query(
-                collection(
-                    db,
-                    "friends"
-                ),
-                where(
-                    "owner",
-                    "==",
-                    username
-                ),
-                where(
-                    "friendName",
-                    "==",
-                    trimmed
-                )
-            );
-
-
-        const result =
-            await getDocs(q);
-
-
-        if (
-            !result.empty
-        ) {
-
-            alert(
-                "すでに追加されています"
-            );
-
-            return;
-        }
-
-
-        await addDoc(
-            collection(
-                db,
-                "friends"
-            ),
-            {
-                owner:
-                    username,
-
-                friendName:
-                    trimmed,
-
-                createdAt:
-                    serverTimestamp()
-            }
-        );
-
-
-        alert(
-            trimmed +
-            " さんを追加しました"
-        );
-    }
-);
-
-
-/* =========================
-   グループ作成
-========================= */
-
-createGroupButton.addEventListener(
-    "click",
-    async () => {
-
-        if (
-            friendsData.length ===
-            0
-        ) {
-
-            alert(
-                "先に友達を追加してください"
-            );
-
-            return;
-        }
-
 
         const groupName =
-            prompt(
-                "グループ名を入力してください"
-            );
+            prompt("グループ名を入力してください");
 
 
         if (!groupName) return;
 
 
-        const membersInput =
+        const membersText =
             prompt(
-                "メンバー名をカンマ区切りで入力してください\n例：たかし,ゆうき"
+                "参加させる友達の名前をカンマ区切りで入力してください。\n例：たかし,けんた"
             );
 
 
-        if (!membersInput) return;
+        let members = [username];
 
 
-        const names =
-            membersInput
-                .split(",")
-                .map(
-                    name =>
-                        name.trim()
-                )
-                .filter(
-                    name =>
-                        name.length > 0
-                );
+        if (membersText) {
+
+            const names =
+                membersText
+                    .split(",")
+                    .map(name => name.trim())
+                    .filter(Boolean);
 
 
-        const members =
-            [
-                username,
-                ...names
-            ];
+            for (const name of names) {
+
+                const friend =
+                    friendsData.find(
+                        friend =>
+                            friend.friendName === name
+                    );
 
 
-        const uniqueMembers =
-            [
-                ...new Set(
-                    members
-                )
-            ];
+                if (!friend) {
+
+                    alert(
+                        `${name}さんはあなたの友達一覧にいません。`
+                    );
+
+                    return;
+                }
 
 
-        await addDoc(
-            collection(
-                db,
-                "groups"
-            ),
+                if (!members.includes(name)) {
+                    members.push(name);
+                }
+
+            }
+
+        }
+
+
+        try {
+
+            await addDoc(
+                collection(db, "groups"),
+                {
+                    name: groupName.trim(),
+                    owner: username,
+                    members: members,
+                    createdAt: serverTimestamp()
+                }
+            );
+
+
+            alert(
+                "グループを作成しました！"
+            );
+
+
+        } catch (error) {
+
+            console.error(error);
+
+            alert(
+                "グループ作成に失敗しました。"
+            );
+
+        }
+
+    }
+);
+
+
+// ==============================
+// グループ管理
+// ==============================
+
+async function manageGroup(group) {
+
+    const choice =
+        prompt(
+            `「${group.name}」の管理\n\n1 → メンバーを追加\n2 → グループから退会\n\n番号を入力してください`
+        );
+
+
+    if (choice === "1") {
+
+        await addMembersToGroup(group);
+
+    } else if (choice === "2") {
+
+        await leaveGroup(group);
+
+    }
+
+}
+
+
+// ==============================
+// グループにメンバー追加
+// ==============================
+
+async function addMembersToGroup(group) {
+
+    const text =
+        prompt(
+            "追加する友達の名前をカンマ区切りで入力してください。\n例：たかし,けんた"
+        );
+
+
+    if (!text) return;
+
+
+    const names =
+        text
+            .split(",")
+            .map(name => name.trim())
+            .filter(Boolean);
+
+
+    const newMembers =
+        [...(group.members || [])];
+
+
+    for (const name of names) {
+
+        const friend =
+            friendsData.find(
+                friend =>
+                    friend.friendName === name
+            );
+
+
+        if (!friend) {
+
+            alert(
+                `${name}さんはあなたの友達ではありません。`
+            );
+
+            return;
+        }
+
+
+        if (!newMembers.includes(name)) {
+
+            newMembers.push(name);
+        }
+
+    }
+
+
+    try {
+
+        await updateDoc(
+            doc(db, "groups", group.id),
             {
-                name:
-                    groupName.trim(),
-
-                owner:
-                    username,
-
-                members:
-                    uniqueMembers,
-
-                createdAt:
-                    serverTimestamp()
+                members: newMembers
             }
         );
 
 
         alert(
-            "グループを作成しました"
+            "メンバーを追加しました！"
         );
+
+
+    } catch (error) {
+
+        console.error(error);
+
+        alert(
+            "メンバー追加に失敗しました。"
+        );
+
     }
-);
 
-
-/* =========================
-   友達チャット
-========================= */
-
-function selectFriend(
-    friendName
-) {
-
-    selectedChat =
-        friendName;
-
-    selectedChatType =
-        "friend";
-
-
-    chatHeader.textContent =
-        friendName;
-
-
-    messageInput.disabled =
-        false;
-
-    sendButton.disabled =
-        false;
-
-
-    messageInput.placeholder =
-        "メッセージを入力...";
-
-
-    cancelReply();
-
-
-    listenMessages();
-
-
-    markFriendMessagesAsRead(
-        friendName
-    );
-
-
-    renderFriends();
-
-    renderGroups();
 }
 
 
-/* =========================
-   グループチャット
-========================= */
+// ==============================
+// グループ退会
+// ==============================
 
-function selectGroup(
-    groupId
-) {
+async function leaveGroup(group) {
+
+    const ok =
+        confirm(
+            `「${group.name}」から退会しますか？`
+        );
+
+
+    if (!ok) return;
+
+
+    try {
+
+        const members =
+            (group.members || [])
+                .filter(member =>
+                    member !== username
+                );
+
+
+        // 自分しかいない場合
+        if (members.length === 0) {
+
+            await deleteDoc(
+                doc(db, "groups", group.id)
+            );
+
+        } else {
+
+            const updateData = {
+                members: members
+            };
+
+
+            // オーナーだった場合
+            if (group.owner === username) {
+
+                updateData.owner =
+                    members[0];
+            }
+
+
+            await updateDoc(
+                doc(db, "groups", group.id),
+                updateData
+            );
+
+        }
+
+
+        if (
+            selectedChat === group.id &&
+            selectedChatType === "group"
+        ) {
+
+            selectedChat = null;
+            selectedChatType = null;
+
+            chatHeader.textContent =
+                "相手を選択してください";
+
+            messagesElement.innerHTML = "";
+
+            messageInput.disabled = true;
+            sendButton.disabled = true;
+
+        }
+
+
+        alert(
+            "グループから退会しました。"
+        );
+
+
+    } catch (error) {
+
+        console.error(error);
+
+        alert(
+            "グループ退会に失敗しました。"
+        );
+
+    }
+
+}
+
+
+// ==============================
+// 友達選択
+// ==============================
+
+async function selectFriend(friendName) {
+
+    try {
+
+        const friendshipId =
+            await ensureFriendshipId(friendName);
+
+
+        selectedChat = friendName;
+        selectedChatType = "friend";
+        selectedFriendshipId = friendshipId;
+
+
+        chatHeader.textContent =
+            friendName;
+
+
+        messageInput.disabled = false;
+        sendButton.disabled = false;
+
+        messageInput.placeholder =
+            `${friendName}さんにメッセージ`;
+
+
+        cancelReply();
+
+
+        listenMessages();
+
+
+        await markFriendMessagesAsRead();
+
+
+        renderCurrentMessages();
+
+
+    } catch (error) {
+
+        console.error(error);
+
+        alert(
+            "チャットを開けませんでした。"
+        );
+
+    }
+
+}
+
+
+// ==============================
+// グループ選択
+// ==============================
+
+async function selectGroup(groupId) {
 
     const group =
         groupsData.find(
-            g =>
-                g.id ===
-                groupId
+            group => group.id === groupId
         );
 
 
     if (!group) return;
 
 
-    selectedChat =
-        groupId;
-
-    selectedChatType =
-        "group";
+    selectedChat = groupId;
+    selectedChatType = "group";
+    selectedFriendshipId = null;
 
 
     chatHeader.textContent =
-        "👥 " +
-        group.name;
+        `👥 ${group.name}`;
 
 
-    messageInput.disabled =
-        false;
-
-    sendButton.disabled =
-        false;
+    messageInput.disabled = false;
+    sendButton.disabled = false;
 
 
     messageInput.placeholder =
-        "グループにメッセージ...";
+        `${group.name}にメッセージ`;
 
 
     cancelReply();
@@ -1810,516 +1623,345 @@ function selectGroup(
     listenMessages();
 
 
-    markGroupMessagesAsRead(
-        groupId
-    );
+    await markGroupMessagesAsRead();
 
 
-    renderFriends();
+    renderCurrentMessages();
 
-    renderGroups();
 }
 
 
-/* =========================
-   メッセージ監視
-========================= */
+// ==============================
+// メッセージ監視
+// ==============================
 
 function listenMessages() {
 
-    if (
-        stopMessagesListener
-    ) {
-
-        stopMessagesListener();
-
-        stopMessagesListener =
-            null;
+    if (unsubscribeMessages) {
+        unsubscribeMessages();
     }
 
 
     const q =
         query(
-            collection(
-                db,
-                "messages"
-            ),
-            orderBy(
-                "createdAt",
-                "asc"
-            )
+            collection(db, "messages"),
+            orderBy("createdAt", "asc")
         );
 
 
-    stopMessagesListener =
-        onSnapshot(
-            q,
-            snapshot => {
+    unsubscribeMessages =
+        onSnapshot(q, snapshot => {
 
-                const list = [];
+            renderMessages(
+                snapshot.docs.map(
+                    item => ({
+                        id: item.id,
+                        ...item.data()
+                    })
+                )
+            );
 
+        });
 
-                snapshot.forEach(
-                    messageDoc => {
-
-                        const data =
-                            messageDoc.data();
-
-
-                        if (
-                            selectedChatType ===
-                            "friend"
-                        ) {
-
-                            const isFriendMessage =
-                                (
-                                    data.chatType !==
-                                    "group"
-                                ) &&
-                                (
-                                    (
-                                        data.username ===
-                                        username &&
-                                        data.receiver ===
-                                        selectedChat
-                                    ) ||
-                                    (
-                                        data.username ===
-                                        selectedChat &&
-                                        data.receiver ===
-                                        username
-                                    )
-                                );
-
-
-                            if (
-                                isFriendMessage
-                            ) {
-
-                                list.push({
-                                    id:
-                                        messageDoc.id,
-
-                                    ...data
-                                });
-                            }
-                        }
-
-
-                        if (
-                            selectedChatType ===
-                            "group"
-                        ) {
-
-                            if (
-                                data.chatType ===
-                                    "group" &&
-                                data.chatId ===
-                                    selectedChat
-                            ) {
-
-                                list.push({
-                                    id:
-                                        messageDoc.id,
-
-                                    ...data
-                                });
-                            }
-                        }
-                    }
-                );
-
-
-                renderMessages(
-                    list
-                );
-            }
-        );
 }
 
 
-/* =========================
-   メッセージ表示
-========================= */
+// ==============================
+// メッセージ描画
+// ==============================
 
-function renderMessages(
-    list
-) {
+function renderMessages(allMessages) {
 
-    messages.innerHTML = "";
+    let filtered = [];
 
-
-    list.forEach(
-        message => {
-
-            const row =
-                document.createElement(
-                    "div"
-                );
-
-
-            const mine =
-                message.username ===
-                username;
-
-
-            row.className =
-                "message-row " +
-                (
-                    mine
-                        ? "mine"
-                        : "other"
-                );
-
-
-            if (
-                !mine &&
-                selectedChatType ===
-                    "group"
-            ) {
-
-                const user =
-                    document.createElement(
-                        "div"
-                    );
-
-
-                user.className =
-                    "message-user";
-
-
-                user.textContent =
-                    message.username;
-
-
-                row.appendChild(
-                    user
-                );
-            }
-
-
-            const bubble =
-                document.createElement(
-                    "div"
-                );
-
-
-            bubble.className =
-                "message-bubble";
-
-
-            if (
-                message.deleted
-            ) {
-
-                bubble.classList.add(
-                    "deleted-message"
-                );
-
-
-                bubble.textContent =
-                    "このメッセージは取り消されました";
-
-            } else {
-
-                if (
-                    message.replyTo
-                ) {
-
-                    const reply =
-                        document.createElement(
-                            "div"
-                        );
-
-
-                    reply.style.fontSize =
-                        "11px";
-
-
-                    reply.style.opacity =
-                        "0.7";
-
-
-                    reply.style.marginBottom =
-                        "5px";
-
-
-                    reply.textContent =
-                        "↩️ " +
-                        message.replyTo.username +
-                        ": " +
-                        message.replyTo.text;
-
-
-                    bubble.appendChild(
-                        reply
-                    );
-                }
-
-
-                const text =
-                    document.createElement(
-                        "div"
-                    );
-
-
-                text.textContent =
-                    message.text;
-
-
-                bubble.appendChild(
-                    text
-                );
-            }
-
-
-            row.appendChild(
-                bubble
-            );
-
-
-            const time =
-                document.createElement(
-                    "div"
-                );
-
-
-            time.className =
-                "message-time";
-
-
-            time.textContent =
-                formatTime(
-                    message.createdAt
-                );
-
-
-            row.appendChild(
-                time
-            );
-
-
-            if (
-                message.reaction
-            ) {
-
-                const reactionArea =
-                    document.createElement(
-                        "div"
-                    );
-
-
-                reactionArea.className =
-                    "reaction-area";
-
-
-                const reaction =
-                    document.createElement(
-                        "span"
-                    );
-
-
-                reaction.className =
-                    "reaction";
-
-
-                reaction.textContent =
-                    message.reaction;
-
-
-                reactionArea.appendChild(
-                    reaction
-                );
-
-
-                row.appendChild(
-                    reactionArea
-                );
-            }
-
-
-            if (
-                !message.deleted
-            ) {
-
-                const actions =
-                    document.createElement(
-                        "div"
-                    );
-
-
-                actions.className =
-                    "message-actions";
-
-
-                const replyButton =
-                    document.createElement(
-                        "button"
-                    );
-
-
-                replyButton.textContent =
-                    "↩️ 返信";
-
-
-                replyButton.addEventListener(
-                    "click",
-                    () => {
-
-                        startReply(
-                            message
-                        );
-                    }
-                );
-
-
-                actions.appendChild(
-                    replyButton
-                );
-
-
-                const reactionButton =
-                    document.createElement(
-                        "button"
-                    );
-
-
-                reactionButton.textContent =
-                    "❤️";
-
-
-                reactionButton.addEventListener(
-                    "click",
-                    () => {
-
-                        addReaction(
-                            message.id,
-                            "❤️"
-                        );
-                    }
-                );
-
-
-                actions.appendChild(
-                    reactionButton
-                );
-
-
-                if (mine) {
-
-                    const deleteButton =
-                        document.createElement(
-                            "button"
-                        );
-
-
-                    deleteButton.textContent =
-                        "送信取り消し";
-
-
-                    deleteButton.addEventListener(
-                        "click",
-                        () => {
-
-                            deleteMessage(
-                                message.id
-                            );
-                        }
-                    );
-
-
-                    actions.appendChild(
-                        deleteButton
-                    );
-                }
-
-
-                row.appendChild(
-                    actions
-                );
-            }
-
-
-            messages.appendChild(
-                row
-            );
-        }
-    );
-
-
-    messages.scrollTop =
-        messages.scrollHeight;
-}
-
-
-/* =========================
-   時刻
-========================= */
-
-function formatTime(
-    timestamp
-) {
 
     if (
-        !timestamp ||
-        !timestamp.toDate
+        selectedChatType === "friend" &&
+        selectedFriendshipId
     ) {
 
-        return "";
+        filtered =
+            allMessages.filter(message => {
+
+                const pair =
+                    (
+                        message.sender === username &&
+                        message.receiver === selectedChat
+                    ) ||
+                    (
+                        message.sender === selectedChat &&
+                        message.receiver === username
+                    );
+
+
+                return (
+                    pair &&
+                    message.friendshipId ===
+                        selectedFriendshipId
+                );
+
+            });
+
+    } else if (
+        selectedChatType === "group"
+    ) {
+
+        filtered =
+            allMessages.filter(message =>
+                message.chatType === "group" &&
+                message.chatId === selectedChat
+            );
+
     }
 
 
-    const date =
-        timestamp.toDate();
+    messagesElement.innerHTML = "";
 
 
-    const hours =
-        String(
-            date.getHours()
-        ).padStart(
-            2,
-            "0"
-        );
+    filtered.forEach(message => {
+
+        renderSingleMessage(message);
+
+    });
 
 
-    const minutes =
-        String(
-            date.getMinutes()
-        ).padStart(
-            2,
-            "0"
-        );
+    messagesElement.scrollTop =
+        messagesElement.scrollHeight;
 
-
-    return (
-        hours +
-        ":" +
-        minutes
-    );
 }
 
 
-/* =========================
-   送信
-========================= */
+// ==============================
+// 1つのメッセージ
+// ==============================
 
-sendButton.addEventListener(
+function renderSingleMessage(message) {
+
+    const row =
+        document.createElement("div");
+
+    const mine =
+        message.sender === username;
+
+
+    row.className =
+        mine
+            ? "message-row mine"
+            : "message-row";
+
+
+    const bubble =
+        document.createElement("div");
+
+    bubble.className =
+        mine
+            ? "message-bubble mine"
+            : "message-bubble";
+
+
+    if (
+        selectedChatType === "group" &&
+        !mine
+    ) {
+
+        const sender =
+            document.createElement("div");
+
+        sender.className =
+            "message-sender";
+
+        sender.textContent =
+            message.sender;
+
+        bubble.appendChild(sender);
+
+    }
+
+
+    if (message.replyToText) {
+
+        const reply =
+            document.createElement("div");
+
+        reply.className =
+            "message-reply";
+
+        reply.textContent =
+            `↩ ${message.replyToText}`;
+
+        bubble.appendChild(reply);
+    }
+
+
+    const text =
+        document.createElement("div");
+
+    text.className =
+        "message-text";
+
+
+    if (message.deleted) {
+
+        text.textContent =
+            "このメッセージは削除されました。";
+
+        text.style.opacity = "0.6";
+
+    } else {
+
+        text.textContent =
+            message.text || "";
+
+    }
+
+
+    bubble.appendChild(text);
+
+
+    const time =
+        document.createElement("div");
+
+    time.className =
+        "message-time";
+
+
+    if (message.createdAt?.toDate) {
+
+        const date =
+            message.createdAt.toDate();
+
+        time.textContent =
+            date.toLocaleTimeString(
+                "ja-JP",
+                {
+                    hour: "2-digit",
+                    minute: "2-digit"
+                }
+            );
+
+    }
+
+
+    bubble.appendChild(time);
+
+
+    // リアクション
+    if (message.reaction) {
+
+        const reaction =
+            document.createElement("div");
+
+        reaction.className =
+            "message-reaction";
+
+        reaction.textContent =
+            message.reaction;
+
+        bubble.appendChild(reaction);
+
+    }
+
+
+    // 操作ボタン
+    if (!message.deleted) {
+
+        const actions =
+            document.createElement("div");
+
+        actions.className =
+            "message-actions";
+
+
+        const replyButton =
+            document.createElement("button");
+
+        replyButton.textContent =
+            "↩";
+
+        replyButton.title =
+            "返信";
+
+
+        replyButton.addEventListener(
+            "click",
+            () => startReply(message)
+        );
+
+
+        const reactionButton =
+            document.createElement("button");
+
+        reactionButton.textContent =
+            "❤️";
+
+        reactionButton.title =
+            "リアクション";
+
+
+        reactionButton.addEventListener(
+            "click",
+            () => addReaction(message.id)
+        );
+
+
+        actions.appendChild(replyButton);
+        actions.appendChild(reactionButton);
+
+
+        if (mine) {
+
+            const deleteButton =
+                document.createElement("button");
+
+            deleteButton.textContent =
+                "🗑️";
+
+            deleteButton.title =
+                "送信取り消し";
+
+
+            deleteButton.addEventListener(
+                "click",
+                () => deleteMessage(message.id)
+            );
+
+
+            actions.appendChild(deleteButton);
+
+        }
+
+
+        bubble.appendChild(actions);
+    }
+
+
+    row.appendChild(bubble);
+
+    messagesElement.appendChild(row);
+
+}
+
+
+// ==============================
+// メッセージ送信
+// ==============================
+
+sendButton?.addEventListener(
     "click",
     sendMessage
 );
 
 
-messageInput.addEventListener(
+messageInput?.addEventListener(
     "keydown",
     event => {
 
-        if (
-            event.key ===
-            "Enter"
-        ) {
+        if (event.key === "Enter") {
 
             sendMessage();
+
         }
+
     }
 );
 
@@ -2332,397 +1974,463 @@ async function sendMessage() {
 
     if (!text) return;
 
-    if (!selectedChat) return;
 
+    if (!selectedChat) {
 
-    const data = {
+        alert(
+            "友達またはグループを選択してください。"
+        );
 
-        username,
-
-        text,
-
-        createdAt:
-            serverTimestamp(),
-
-        readBy:
-            [username]
-    };
-
-
-    if (
-        selectedChatType ===
-        "friend"
-    ) {
-
-        data.receiver =
-            selectedChat;
-
-        data.chatType =
-            "friend";
+        return;
     }
 
 
-    if (
-        selectedChatType ===
-        "group"
-    ) {
+    try {
 
-        data.chatType =
-            "group";
+        const messageData = {
 
-        data.chatId =
-            selectedChat;
-    }
+            sender: username,
 
+            text: text,
 
-    if (replyTarget) {
+            createdAt: serverTimestamp(),
 
-        data.replyTo = {
+            deleted: false,
 
-            username:
-                replyTarget.username,
+            readBy: [username]
 
-            text:
-                replyTarget.text
         };
+
+
+        if (selectedChatType === "friend") {
+
+            messageData.receiver =
+                selectedChat;
+
+            messageData.chatType =
+                "friend";
+
+            messageData.friendshipId =
+                selectedFriendshipId;
+
+        }
+
+
+        if (selectedChatType === "group") {
+
+            messageData.chatType =
+                "group";
+
+            messageData.chatId =
+                selectedChat;
+
+        }
+
+
+        if (replyingMessage) {
+
+            messageData.replyToId =
+                replyingMessage.id;
+
+            messageData.replyToText =
+                replyingMessage.text || "";
+
+        }
+
+
+        await addDoc(
+            collection(db, "messages"),
+            messageData
+        );
+
+
+        messageInput.value = "";
+
+        cancelReply();
+
+
+        setTimeout(() => {
+
+            messagesElement.scrollTop =
+                messagesElement.scrollHeight;
+
+        }, 100);
+
+
+    } catch (error) {
+
+        console.error(error);
+
+        alert(
+            "メッセージ送信に失敗しました。"
+        );
+
     }
 
-
-    await addDoc(
-        collection(
-            db,
-            "messages"
-        ),
-        data
-    );
-
-
-    messageInput.value =
-        "";
-
-
-    cancelReply();
 }
 
 
-/* =========================
-   返信
-========================= */
+// ==============================
+// 返信
+// ==============================
 
-function startReply(
-    message
-) {
+let replyingMessage = null;
 
-    replyTarget =
-        message;
+
+function startReply(message) {
+
+    replyingMessage = message;
+
+
+    replyBar.classList.remove("hidden");
 
 
     replyText.textContent =
-        message.text;
-
-
-    replyBar.classList.remove(
-        "hidden"
-    );
+        message.text || "";
 
 
     messageInput.focus();
+
 }
 
 
-function cancelReply() {
-
-    replyTarget =
-        null;
-
-
-    replyBar.classList.add(
-        "hidden"
-    );
-
-
-    replyText.textContent =
-        "";
-}
-
-
-cancelReplyButton.addEventListener(
+cancelReplyButton?.addEventListener(
     "click",
     cancelReply
 );
 
 
-/* =========================
-   リアクション
-========================= */
+function cancelReply() {
 
-async function addReaction(
-    messageId,
-    reaction
-) {
+    replyingMessage = null;
 
-    await updateDoc(
-        doc(
-            db,
-            "messages",
-            messageId
-        ),
-        {
-            reaction
-        }
-    );
+    replyBar?.classList.add("hidden");
+
+    if (replyText) {
+        replyText.textContent = "";
+    }
+
 }
 
 
-/* =========================
-   送信取り消し
-========================= */
+// ==============================
+// メッセージ削除
+// ==============================
 
-async function deleteMessage(
-    messageId
-) {
+async function deleteMessage(messageId) {
 
     const ok =
         confirm(
-            "このメッセージを取り消しますか？"
+            "このメッセージの送信を取り消しますか？"
         );
 
 
     if (!ok) return;
 
 
-    await updateDoc(
-        doc(
-            db,
-            "messages",
-            messageId
-        ),
-        {
-            deleted:
-                true,
+    try {
 
-            text:
-                ""
-        }
-    );
+        await updateDoc(
+            doc(db, "messages", messageId),
+            {
+                deleted: true,
+                text: ""
+            }
+        );
+
+    } catch (error) {
+
+        console.error(error);
+
+        alert(
+            "メッセージ削除に失敗しました。"
+        );
+
+    }
+
 }
 
 
-/* =========================
-   既読
-========================= */
+// ==============================
+// リアクション
+// ==============================
 
-async function markFriendMessagesAsRead(
-    friendName
-) {
+async function addReaction(messageId) {
 
-    const q =
-        query(
-            collection(
-                db,
-                "messages"
-            ),
-            where(
-                "username",
-                "==",
-                friendName
-            ),
-            where(
-                "receiver",
-                "==",
-                username
-            )
+    try {
+
+        await updateDoc(
+            doc(db, "messages", messageId),
+            {
+                reaction: "❤️"
+            }
         );
+
+    } catch (error) {
+
+        console.error(error);
+
+    }
+
+}
+
+
+// ==============================
+// 既読
+// ==============================
+
+async function markFriendMessagesAsRead() {
+
+    if (!selectedFriendshipId) return;
 
 
     const snapshot =
-        await getDocs(q);
+        await getDocs(
+            collection(db, "messages")
+        );
 
 
     const batch =
         writeBatch(db);
 
 
-    snapshot.forEach(
-        messageDoc => {
-
-            const data =
-                messageDoc.data();
+    let count = 0;
 
 
-            const readBy =
-                Array.isArray(
-                    data.readBy
-                )
-                    ? [...data.readBy]
-                    : [];
+    snapshot.forEach(item => {
+
+        const data = item.data();
 
 
-            if (
-                !readBy.includes(
-                    username
-                )
-            ) {
-
-                readBy.push(
-                    username
-                );
+        const pair =
+            (
+                data.sender === selectedChat &&
+                data.receiver === username
+            );
 
 
-                batch.update(
-                    doc(
-                        db,
-                        "messages",
-                        messageDoc.id
-                    ),
-                    {
-                        readBy
-                    }
-                );
-            }
+        if (
+            pair &&
+            data.friendshipId === selectedFriendshipId &&
+            !(data.readBy || []).includes(username)
+        ) {
+
+            batch.update(
+                item.ref,
+                {
+                    readBy: [
+                        ...(data.readBy || []),
+                        username
+                    ]
+                }
+            );
+
+            count++;
         }
-    );
+
+    });
 
 
-    await batch.commit();
+    if (count > 0) {
+        await batch.commit();
+    }
+
 }
 
 
-async function markGroupMessagesAsRead(
-    groupId
-) {
-
-    const q =
-        query(
-            collection(
-                db,
-                "messages"
-            ),
-            where(
-                "chatType",
-                "==",
-                "group"
-            ),
-            where(
-                "chatId",
-                "==",
-                groupId
-            )
-        );
-
-
-    const snapshot =
-        await getDocs(q);
-
-
-    const batch =
-        writeBatch(db);
-
-
-    snapshot.forEach(
-        messageDoc => {
-
-            const data =
-                messageDoc.data();
-
-
-            const readBy =
-                Array.isArray(
-                    data.readBy
-                )
-                    ? [...data.readBy]
-                    : [];
-
-
-            if (
-                !readBy.includes(
-                    username
-                )
-            ) {
-
-                readBy.push(
-                    username
-                );
-
-
-                batch.update(
-                    doc(
-                        db,
-                        "messages",
-                        messageDoc.id
-                    ),
-                    {
-                        readBy
-                    }
-                );
-            }
-        }
-    );
-
-
-    await batch.commit();
-}
-
-
-/* =========================
-   現在のチャット再表示
-========================= */
-
-function renderCurrentMessages() {
+async function markGroupMessagesAsRead() {
 
     if (!selectedChat) return;
 
 
-    const list =
-        allMessages.filter(
-            message => {
-
-                if (
-                    selectedChatType ===
-                    "friend"
-                ) {
-
-                    return (
-                        message.chatType !==
-                            "group" &&
-                        (
-                            (
-                                message.username ===
-                                username &&
-                                message.receiver ===
-                                selectedChat
-                            ) ||
-                            (
-                                message.username ===
-                                selectedChat &&
-                                message.receiver ===
-                                username
-                            )
-                        )
-                    );
-                }
-
-
-                if (
-                    selectedChatType ===
-                    "group"
-                ) {
-
-                    return (
-                        message.chatType ===
-                            "group" &&
-                        message.chatId ===
-                            selectedChat
-                    );
-                }
-
-
-                return false;
-            }
+    const snapshot =
+        await getDocs(
+            collection(db, "messages")
         );
 
 
-    renderMessages(
-        list
-    );
+    const batch =
+        writeBatch(db);
+
+
+    let count = 0;
+
+
+    snapshot.forEach(item => {
+
+        const data = item.data();
+
+
+        if (
+            data.chatType === "group" &&
+            data.chatId === selectedChat &&
+            !(data.readBy || []).includes(username)
+        ) {
+
+            batch.update(
+                item.ref,
+                {
+                    readBy: [
+                        ...(data.readBy || []),
+                        username
+                    ]
+                }
+            );
+
+            count++;
+        }
+
+    });
+
+
+    if (count > 0) {
+        await batch.commit();
+    }
+
 }
+
+
+// ==============================
+// 全メッセージ監視
+// 未読数用
+// ==============================
+
+function listenAllMessages() {
+
+    if (unsubscribeAllMessages) {
+        unsubscribeAllMessages();
+    }
+
+
+    const q =
+        query(
+            collection(db, "messages"),
+            orderBy("createdAt", "asc")
+        );
+
+
+    unsubscribeAllMessages =
+        onSnapshot(q, () => {
+
+            updateUnreadBadges();
+
+        });
+
+}
+
+
+// ==============================
+// 未読数
+// ==============================
+
+async function updateUnreadBadges() {
+
+    if (!username) return;
+
+
+    try {
+
+        const snapshot =
+            await getDocs(
+                collection(db, "messages")
+            );
+
+
+        const messages =
+            snapshot.docs.map(
+                item => ({
+                    id: item.id,
+                    ...item.data()
+                })
+            );
+
+
+        // 友達
+        document
+            .querySelectorAll(
+                ".friend-item"
+            )
+            .forEach((row, index) => {
+
+                const friend =
+                    friendsData[index];
+
+                if (!friend) return;
+
+
+                const badge =
+                    row.querySelector(
+                        ".unread-badge"
+                    );
+
+
+                if (!badge) return;
+
+
+                let count = 0;
+
+
+                messages.forEach(message => {
+
+                    const pair =
+                        message.sender ===
+                            friend.friendName &&
+                        message.receiver ===
+                            username;
+
+
+                    const sameFriendship =
+                        !friend.friendshipId ||
+                        message.friendshipId ===
+                            friend.friendshipId;
+
+
+                    if (
+                        pair &&
+                        sameFriendship &&
+                        !(message.readBy || [])
+                            .includes(username)
+                    ) {
+
+                        count++;
+
+                    }
+
+                });
+
+
+                if (count > 0) {
+
+                    badge.textContent =
+                        count > 99
+                            ? "99+"
+                            : count;
+
+                    badge.style.display =
+                        "inline-flex";
+
+                } else {
+
+                    badge.style.display =
+                        "none";
+
+                }
+
+            });
+
+
+    } catch (error) {
+
+        console.error(error);
+
+    }
+
+}
+
+
+// ==============================
+// 初期表示
+// ==============================
+
+messageInput.disabled = true;
+sendButton.disabled = true;
