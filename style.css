@@ -816,7 +816,7 @@ button {
 
     overflow-y: auto;
 
-    padding: 30px 18px;
+    padding: 20px 12px;
 
     background:
         linear-gradient(
@@ -829,31 +829,31 @@ button {
 
 .maintenance-card {
     width: 100%;
-    max-width: 650px;
+    max-width: 620px;
 
     margin: 0 auto;
 
-    padding: 35px 28px;
+    padding: 25px 22px;
 
     background: white;
 
-    border-radius: 26px;
+    border-radius: 22px;
 
     box-shadow:
-        0 20px 60px rgba(0,0,0,0.10);
+        0 15px 45px rgba(0,0,0,0.08);
 }
 
 .maintenance-icon {
-    width: 70px;
-    height: 70px;
+    width: 55px;
+    height: 55px;
 
-    margin: 0 auto 20px;
+    margin: 0 auto 12px;
 
     display: flex;
     align-items: center;
     justify-content: center;
 
-    border-radius: 22px;
+    border-radius: 17px;
 
     background:
         linear-gradient(
@@ -863,15 +863,15 @@ button {
             #ff5ca8
         );
 
-    font-size: 32px;
+    font-size: 26px;
 }
 
 .maintenance-card h1 {
-    margin: 0 0 18px;
+    margin: 0 0 12px;
 
     text-align: center;
 
-    font-size: 25px;
+    font-size: 21px;
 
     color: #222;
 }
@@ -879,15 +879,15 @@ button {
 .maintenance-card p {
     color: #666;
 
-    font-size: 14px;
+    font-size: 12px;
 
-    line-height: 1.8;
+    line-height: 1.6;
 }
 
 .maintenance-intro {
-    text-align: center;
+    margin: 0;
 
-    margin-bottom: 8px;
+    text-align: center;
 }
 
 .maintenance-intro strong {
@@ -895,17 +895,17 @@ button {
 }
 
 .maintenance-section {
-    margin-top: 28px;
+    margin-top: 18px;
 }
 
 .maintenance-section h2 {
-    margin: 0 0 15px;
+    margin: 0 0 10px;
 
-    padding-bottom: 10px;
+    padding-bottom: 7px;
 
-    border-bottom: 2px solid #eee;
+    border-bottom: 1px solid #eee;
 
-    font-size: 18px;
+    font-size: 15px;
 
     color: #333;
 }
@@ -915,13 +915,13 @@ button {
 
     flex-direction: column;
 
-    gap: 10px;
+    gap: 6px;
 }
 
 .maintenance-item {
-    padding: 13px 15px;
+    padding: 8px 11px;
 
-    border-radius: 14px;
+    border-radius: 11px;
 
     background: #f8f8fc;
 
@@ -931,9 +931,9 @@ button {
 .maintenance-item strong {
     display: block;
 
-    margin-bottom: 4px;
+    margin-bottom: 2px;
 
-    font-size: 13px;
+    font-size: 11px;
 
     color: #333;
 }
@@ -941,21 +941,21 @@ button {
 .maintenance-item span {
     display: block;
 
-    font-size: 12px;
+    font-size: 10px;
 
-    line-height: 1.6;
+    line-height: 1.45;
 
     color: #777;
 }
 
 .maintenance-date {
-    margin-top: 25px;
+    margin-top: 17px;
 
-    padding: 18px;
+    padding: 13px;
 
     text-align: center;
 
-    border-radius: 16px;
+    border-radius: 13px;
 
     background: #f5f0ff;
 
@@ -963,9 +963,9 @@ button {
 }
 
 .maintenance-date div {
-    margin-bottom: 5px;
+    margin-bottom: 3px;
 
-    font-size: 13px;
+    font-size: 11px;
 
     font-weight: 700;
 
@@ -975,7 +975,7 @@ button {
 .maintenance-date strong {
     display: block;
 
-    font-size: 18px;
+    font-size: 15px;
 
     color: #333;
 }
@@ -983,54 +983,85 @@ button {
 .maintenance-date small {
     display: block;
 
-    margin-top: 7px;
+    margin-top: 4px;
+
+    font-size: 9px;
+
+    color: #999;
+}
+
+.maintenance-end {
+    margin: 15px 0 0;
+
+    text-align: center;
+}
+
+.maintenance-developer {
+    margin-top: 15px;
+
+    padding-top: 10px;
+
+    border-top: 1px solid #eee;
+
+    text-align: center;
 
     font-size: 10px;
 
     color: #999;
 }
 
-.maintenance-end {
-    margin-top: 25px;
 
-    text-align: center;
-}
-
-.maintenance-developer {
-    margin-top: 25px;
-
-    padding-top: 15px;
-
-    border-top: 1px solid #eee;
-
-    text-align: center;
-
-    font-size: 12px;
-
-    color: #999;
-}
-
-
-/* スマホ */
+/* =========================
+   スマホ
+========================= */
 
 @media (max-width: 600px) {
 
     #maintenanceScreen {
-        padding: 15px 10px;
+        padding: 10px 8px;
     }
 
     .maintenance-card {
-        padding: 28px 18px;
+        padding: 20px 15px;
 
-        border-radius: 22px;
+        border-radius: 18px;
+    }
+
+    .maintenance-icon {
+        width: 48px;
+        height: 48px;
+
+        margin-bottom: 9px;
+
+        border-radius: 14px;
+
+        font-size: 22px;
     }
 
     .maintenance-card h1 {
-        font-size: 21px;
+        font-size: 18px;
+
+        margin-bottom: 9px;
+    }
+
+    .maintenance-section {
+        margin-top: 14px;
     }
 
     .maintenance-section h2 {
-        font-size: 16px;
+        font-size: 14px;
+    }
+
+    .maintenance-item {
+        padding: 7px 9px;
+    }
+
+    .maintenance-item strong {
+        font-size: 10px;
+    }
+
+    .maintenance-item span {
+        font-size: 9px;
     }
 
 }
