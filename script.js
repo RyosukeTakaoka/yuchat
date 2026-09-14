@@ -2875,64 +2875,53 @@ function createFriendCheckbox(
 // 友達選択
 // ==================================================
 
-async function selectFriend(
-    friendName
-) {
-
+async function selectFriend(friendName) {
     try {
+        console.log("① 友達を選択:", friendName);
 
         const friendshipId =
-            await ensureFriendshipId(
-                friendName
-            );
+            await ensureFriendshipId(friendName);
 
+        console.log("② friendshipId:", friendshipId);
 
-        selectedChat =
-            friendName;
+        selectedChat = friendName;
+        selectedChatType = "friend";
+        selectedFriendshipId = friendshipId;
 
-        selectedChatType =
-            "friend";
+        chatHeader.textContent = friendName;
 
-        selectedFriendshipId =
-            friendshipId;
-
-
-        chatHeader.textContent =
-            friendName;
-
-
-        messageInput.disabled =
-            false;
-
-        sendButton.disabled =
-            false;
-
+        messageInput.disabled = false;
+        sendButton.disabled = false;
 
         messageInput.placeholder =
             `${friendName}さんにメッセージ`;
 
-
         cancelReply();
 
+        console.log("③ チャット画面設定完了");
 
         listenMessages();
 
+        console.log("④ メッセージ監視開始");
 
-        await markFriendMessagesAsRead();
+        try {
+            await markFriendMessagesAsRead();
+            console.log("⑤ 既読処理完了");
+        } catch (readError) {
+            console.error("既読処理エラー:", readError);
+        }
 
-
-        renderCurrentMessages();
+        console.log("⑥ チャットを開く処理完了");
 
     } catch (error) {
-
-        console.error(error);
+        console.error("チャットを開くエラー:", error);
 
         alert(
-            "チャットを開けませんでした。"
+            "チャットを開けませんでした。\n\n" +
+            "エラー内容:\n" +
+            (error.message || error)
         );
-
     }
-
 }
 
 
