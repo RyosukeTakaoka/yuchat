@@ -87,7 +87,7 @@ const messaging =
 // ==================================================
 
 const VAPID_KEY =
-    "ここにFirebaseのWeb Push公開鍵を入れる";
+    "BNKlLucsJnYok43m4muAEkcQq8cOcNrUKFyNYkCeo2jKhm1RwJVAU6tC7p3PjoaidOU08Hh7oEeRz43S8X73Ppw";
 
 
 // ==================================================
