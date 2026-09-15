@@ -18,6 +18,15 @@ import {
     writeBatch
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
+// ==================================================
+// Firebase Cloud Messaging
+// ==================================================
+
+import {
+    getMessaging,
+    getToken,
+    onMessage
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-messaging.js";
 import {
     getAuth,
     GoogleAuthProvider,
@@ -40,6 +49,85 @@ const firebaseConfig = {
     messagingSenderId: "89509274877",
     appId: "1:89509274877:web:978a6179645ce88c3d4a94"
 };
+
+const VAPID_PUBLIC_KEY =
+    "BNKlLucsJnYok43m4muAEkcQq8cOcNrUKFyNYkCeo2jKhm1RwJVAU6tC7p3PjoaidOU08Hh7oEeRz43S8X73Ppw";
+
+let messaging = null;
+let notificationsInitialized = false;
+
+async function initializeNotifications() {
+    if (notificationsInitialized) return;
+
+    if (
+        typeof Notification === "undefined" ||
+        !("serviceWorker" in navigator)
+    ) {
+        console.log("この環境では通知に対応していません。");
+        return;
+    }
+
+    try {
+        messaging = getMessaging(firebaseApp);
+
+        const registration =
+            await navigator.serviceWorker.register(
+                "./firebase-messaging-sw.js"
+            );
+
+        const permission =
+            await Notification.requestPermission();
+
+        if (permission !== "granted") {
+            console.log("通知が許可されませんでした。");
+            return;
+        }
+
+        const token = await getToken(messaging, {
+            vapidKey: VAPID_PUBLIC_KEY,
+            serviceWorkerRegistration: registration
+        });
+
+        if (token && username) {
+            await setDoc(
+                doc(db, "users", username),
+                {
+                    fcmToken: token,
+                    notificationsEnabled: true
+                },
+                { merge: true }
+            );
+
+            console.log("通知トークンを保存しました。");
+        }
+
+        onMessage(messaging, payload => {
+            console.log("通知を受信:", payload);
+
+            const title =
+                payload.notification?.title ||
+                "ゆうChat";
+
+            const body =
+                payload.notification?.body ||
+                "新しいメッセージが届きました。";
+
+            if (Notification.permission === "granted") {
+                new Notification(title, {
+                    body: body
+                });
+            }
+        });
+
+        notificationsInitialized = true;
+
+    } catch (error) {
+        console.error(
+            "通知の初期化に失敗しました:",
+            error
+        );
+    }
+}
 
 const firebaseApp = initializeApp(firebaseConfig);
 
@@ -443,6 +531,7 @@ async function startApp() {
     myName.textContent =
         username;
 
+await initializeNotifications();
 
     await updateOnline();
 
