@@ -1,4 +1,39 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+/* =========================================================
+   ゆうChat
+   script.js 完全置換版①
+
+   ・Firebaseログイン
+   ・Googleログイン
+   ・ゲストログイン
+   ・名前設定 / 名前変更
+   ・プロフィール画像
+   ・オンライン状態
+   ・友達追加 / 削除
+   ・グループ作成
+   ・グループ管理
+   ・1対1チャット
+   ・グループチャット
+   ・返信
+   ・リアクション
+   ・送信取り消し
+   ・既読
+   ・未読
+   ・通知
+   ・レーススコア
+   ・本日のランキング
+   ・今までのランキング
+
+   ※レーススコアは賭けには使用しません。
+========================================================= */
+
+
+/* =========================================================
+   Firebase import
+========================================================= */
+
+import {
+    initializeApp
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
 
 import {
     getFirestore,
@@ -15,18 +50,16 @@ import {
     onSnapshot,
     orderBy,
     serverTimestamp,
-    writeBatch
+    writeBatch,
+    runTransaction
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
-
-// ==================================================
-// Firebase Cloud Messaging
-// ==================================================
 
 import {
     getMessaging,
     getToken,
     onMessage
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-messaging.js";
+
 import {
     getAuth,
     GoogleAuthProvider,
@@ -37,12 +70,12 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 
 
-// ==================================================
-// Firebase
-// ==================================================
+/* =========================================================
+   Firebase設定
+========================================================= */
 
 const firebaseConfig = {
-    apiKey: "AIzaSyDJFat47USz6KKaGuvj1dVjfELhRmH_2Tw",
+    apiKey: "AIzaSyDJFat47USzK6KaGuvj1dVjfELhRmH_2Tw",
     authDomain: "yuuchat-be666.firebaseapp.com",
     projectId: "yuuchat-be666",
     storageBucket: "yuuchat-be666.firebasestorage.app",
@@ -53,121 +86,46 @@ const firebaseConfig = {
 const VAPID_PUBLIC_KEY =
     "BNKlLucsJnYok43m4muAEkcQq8cOcNrUKFyNYkCeo2jKhm1RwJVAU6tC7p3PjoaidOU08Hh7oEeRz43S8X73Ppw";
 
+
+const firebaseApp =
+    initializeApp(firebaseConfig);
+
+const db =
+    getFirestore(firebaseApp);
+
+const auth =
+    getAuth(firebaseApp);
+
 let messaging = null;
-let notificationsInitialized = false;
-
-async function initializeNotifications() {
-    if (notificationsInitialized) return;
-
-    if (
-        typeof Notification === "undefined" ||
-        !("serviceWorker" in navigator)
-    ) {
-        console.log("この環境では通知に対応していません。");
-        return;
-    }
-
-    try {
-        messaging = getMessaging(firebaseApp);
-
-        const registration =
-            await navigator.serviceWorker.register(
-                "./firebase-messaging-sw.js"
-            );
-
-        const permission =
-            await Notification.requestPermission();
-
-        if (permission !== "granted") {
-            console.log("通知が許可されませんでした。");
-            return;
-        }
-
-        const token = await getToken(messaging, {
-            vapidKey: VAPID_PUBLIC_KEY,
-            serviceWorkerRegistration: registration
-        });
-
-        if (token && username) {
-            await setDoc(
-                doc(db, "users", username),
-                {
-                    fcmToken: token,
-                    notificationsEnabled: true
-                },
-                { merge: true }
-            );
-
-            console.log("通知トークンを保存しました。");
-        }
-
-        onMessage(messaging, payload => {
-            console.log("通知を受信:", payload);
-
-            const title =
-                payload.notification?.title ||
-                "ゆうChat";
-
-            const body =
-                payload.notification?.body ||
-                "新しいメッセージが届きました。";
-
-            if (Notification.permission === "granted") {
-                new Notification(title, {
-                    body: body
-                });
-            }
-        });
-
-        notificationsInitialized = true;
-
-    } catch (error) {
-        console.error(
-            "通知の初期化に失敗しました:",
-            error
-        );
-    }
-}
-
-const firebaseApp = initializeApp(firebaseConfig);
-
-const db = getFirestore(firebaseApp);
-
-const auth = getAuth(firebaseApp);
 
 
-// ==================================================
-// アプリの状態
-// ==================================================
+/* =========================================================
+   アプリ状態
+========================================================= */
 
 let currentUser = null;
-
 let username = null;
 
 let friendsData = [];
-
 let groupsData = [];
 
 let selectedChat = null;
-
 let selectedChatType = null;
-
 let selectedFriendshipId = null;
 
 let replyingMessage = null;
 
 let unsubscribeFriends = null;
-
 let unsubscribeGroups = null;
-
 let unsubscribeMessages = null;
-
 let unsubscribeAllMessages = null;
 
+let notificationsInitialized = false;
 
-// ==================================================
-// HTML取得
-// ==================================================
+
+/* =========================================================
+   HTML取得
+========================================================= */
 
 const loginScreen =
     document.getElementById("loginScreen");
@@ -251,9 +209,81 @@ const changeNameButton =
     document.getElementById("changeNameButton");
 
 
-// ==================================================
-// ログイン
-// ==================================================
+/* =========================================================
+   共通関数
+========================================================= */
+
+function showError(element, text) {
+    if (element) {
+        element.textContent = text || "";
+    }
+}
+
+
+function escapeHTML(value) {
+    const div =
+        document.createElement("div");
+
+    div.textContent =
+        value ?? "";
+
+    return div.innerHTML;
+}
+
+
+function getJapanDateString() {
+
+    const now = new Date();
+
+    const parts =
+        new Intl.DateTimeFormat(
+            "ja-JP",
+            {
+                timeZone: "Asia/Tokyo",
+                year: "numeric",
+                month: "2-digit",
+                day: "2-digit"
+            }
+        ).formatToParts(now);
+
+    const year =
+        parts.find(
+            item => item.type === "year"
+        )?.value;
+
+    const month =
+        parts.find(
+            item => item.type === "month"
+        )?.value;
+
+    const day =
+        parts.find(
+            item => item.type === "day"
+        )?.value;
+
+    return `${year}-${month}-${day}`;
+}
+
+
+function makeFriendshipId() {
+
+    if (
+        typeof crypto !== "undefined" &&
+        crypto.randomUUID
+    ) {
+        return crypto.randomUUID();
+    }
+
+    return (
+        Date.now().toString(36) +
+        Math.random().toString(36).slice(2)
+    );
+}
+
+
+/* =========================================================
+   ログイン
+========================================================= */
 
 googleLoginButton?.addEventListener(
     "click",
@@ -261,7 +291,7 @@ googleLoginButton?.addEventListener(
 
         try {
 
-            loginError.textContent = "";
+            showError(loginError, "");
 
             const provider =
                 new GoogleAuthProvider();
@@ -273,11 +303,15 @@ googleLoginButton?.addEventListener(
 
         } catch (error) {
 
-            console.error(error);
+            console.error(
+                "Googleログインエラー:",
+                error
+            );
 
-            loginError.textContent =
-                "ログインに失敗しました。";
-
+            showError(
+                loginError,
+                "ログインに失敗しました。"
+            );
         }
 
     }
@@ -290,34 +324,39 @@ guestLoginButton?.addEventListener(
 
         try {
 
-            loginError.textContent = "";
+            showError(loginError, "");
 
             await signInAnonymously(auth);
 
         } catch (error) {
 
-            console.error(error);
+            console.error(
+                "ゲストログインエラー:",
+                error
+            );
 
-            loginError.textContent =
-                "ゲストログインに失敗しました。";
-
+            showError(
+                loginError,
+                "ゲストログインに失敗しました。"
+            );
         }
 
     }
 );
 
 
-// ==================================================
-// 認証状態
-// ==================================================
+/* =========================================================
+   Firebase認証状態
+========================================================= */
 
 onAuthStateChanged(
     auth,
-    async (user) => {
+    async user => {
 
         if (!user) {
 
             currentUser = null;
+            username = null;
 
             loginScreen?.classList.remove(
                 "hidden"
@@ -352,23 +391,30 @@ onAuthStateChanged(
             !suggestedName &&
             user.displayName
         ) {
-
             suggestedName =
                 user.displayName;
-
         }
 
 
-        if (suggestedName) {
+        if (!suggestedName) {
+
+            showNameScreen();
+
+            return;
+        }
+
+
+        try {
+
+            const userRef =
+                doc(
+                    db,
+                    "users",
+                    suggestedName
+                );
 
             const userDoc =
-                await getDoc(
-                    doc(
-                        db,
-                        "users",
-                        suggestedName
-                    )
-                );
+                await getDoc(userRef);
 
 
             if (
@@ -389,28 +435,36 @@ onAuthStateChanged(
 
             } else {
 
-                nameInput.value = "";
-
-                nameError.textContent =
-                    "この名前はすでに使われています。別の名前を入力してください。";
+                showError(
+                    nameError,
+                    "この名前はすでに使われています。別の名前を入力してください。"
+                );
 
                 showNameScreen();
-
             }
 
-        } else {
+        } catch (error) {
+
+            console.error(
+                "ユーザー確認エラー:",
+                error
+            );
+
+            showError(
+                nameError,
+                "ユーザー情報の確認に失敗しました。"
+            );
 
             showNameScreen();
-
         }
 
     }
 );
 
 
-// ==================================================
-// 名前入力画面
-// ==================================================
+/* =========================================================
+   名前画面
+========================================================= */
 
 function showNameScreen() {
 
@@ -425,26 +479,27 @@ function showNameScreen() {
     nameScreen?.classList.remove(
         "hidden"
     );
-
 }
 
 
-// ==================================================
-// 名前決定
-// ==================================================
+/* =========================================================
+   名前決定
+========================================================= */
 
 startChatButton?.addEventListener(
     "click",
     async () => {
 
         const newName =
-            nameInput.value.trim();
+            nameInput?.value.trim();
 
 
         if (!newName) {
 
-            nameError.textContent =
-                "名前を入力してください。";
+            showError(
+                nameError,
+                "名前を入力してください。"
+            );
 
             return;
         }
@@ -452,8 +507,10 @@ startChatButton?.addEventListener(
 
         if (newName.length > 20) {
 
-            nameError.textContent =
-                "名前は20文字以内にしてください。";
+            showError(
+                nameError,
+                "名前は20文字以内にしてください。"
+            );
 
             return;
         }
@@ -461,24 +518,27 @@ startChatButton?.addEventListener(
 
         try {
 
-            const existingUser =
-                await getDoc(
-                    doc(
-                        db,
-                        "users",
-                        newName
-                    )
+            const userRef =
+                doc(
+                    db,
+                    "users",
+                    newName
                 );
+
+            const existing =
+                await getDoc(userRef);
 
 
             if (
-                existingUser.exists() &&
-                existingUser.data().uid &&
-                existingUser.data().uid !== currentUser.uid
+                existing.exists() &&
+                existing.data().uid &&
+                existing.data().uid !== currentUser.uid
             ) {
 
-                nameError.textContent =
-                    "その名前はすでに使われています。";
+                showError(
+                    nameError,
+                    "その名前はすでに使われています。"
+                );
 
                 return;
             }
@@ -486,7 +546,6 @@ startChatButton?.addEventListener(
 
             username =
                 newName;
-
 
             localStorage.setItem(
                 "yuuchat_username",
@@ -500,18 +559,19 @@ startChatButton?.addEventListener(
 
             console.error(error);
 
-            nameError.textContent =
-                "名前の設定に失敗しました。";
-
+            showError(
+                nameError,
+                "名前の設定に失敗しました。"
+            );
         }
 
     }
 );
 
 
-// ==================================================
-// アプリ開始
-// ==================================================
+/* =========================================================
+   アプリ開始
+========================================================= */
 
 async function startApp() {
 
@@ -528,10 +588,11 @@ async function startApp() {
     );
 
 
-    myName.textContent =
-        username;
+    if (myName) {
+        myName.textContent =
+            username;
+    }
 
-await initializeNotifications();
 
     await updateOnline();
 
@@ -543,12 +604,16 @@ await initializeNotifications();
 
     listenAllMessages();
 
+    initializeNotifications();
+
+    initializeRaceSystem();
+
 }
 
 
-// ==================================================
-// オンライン状態
-// ==================================================
+/* =========================================================
+   オンライン状態
+========================================================= */
 
 async function updateOnline() {
 
@@ -566,7 +631,7 @@ async function updateOnline() {
                 username
             ),
             {
-                username: username,
+                username,
                 uid: currentUser.uid,
                 online: true,
                 lastSeen: serverTimestamp()
@@ -578,28 +643,28 @@ async function updateOnline() {
 
 
         if (statusElement) {
-
             statusElement.textContent =
                 "🟢 オンライン";
-
         }
 
     } catch (error) {
 
-        console.error(error);
-
+        console.error(
+            "オンライン状態更新エラー:",
+            error
+        );
     }
-
 }
 
 
 setInterval(
     () => {
 
-        if (currentUser && username) {
-
+        if (
+            currentUser &&
+            username
+        ) {
             updateOnline();
-
         }
 
     },
@@ -607,9 +672,9 @@ setInterval(
 );
 
 
-// ==================================================
-// ログアウト
-// ==================================================
+/* =========================================================
+   ログアウト
+========================================================= */
 
 logoutButton?.addEventListener(
     "click",
@@ -633,17 +698,23 @@ logoutButton?.addEventListener(
                         merge: true
                     }
                 );
-
             }
 
         } catch (error) {
 
             console.error(error);
-
         }
 
 
-        await signOut(auth);
+        try {
+
+            await signOut(auth);
+
+        } catch (error) {
+
+            console.error(error);
+        }
+
 
         location.reload();
 
@@ -651,19 +722,28 @@ logoutButton?.addEventListener(
 );
 
 
-// ==================================================
-// プロフィール画像
-// ==================================================
+/* =========================================================
+   プロフィール画像
+========================================================= */
 
 profileImageInput?.addEventListener(
     "change",
     () => {
 
         const file =
-            profileImageInput.files[0];
-
+            profileImageInput.files?.[0];
 
         if (!file) {
+            return;
+        }
+
+
+        if (!file.type.startsWith("image/")) {
+
+            alert(
+                "画像ファイルを選択してください。"
+            );
+
             return;
         }
 
@@ -681,7 +761,6 @@ profileImageInput?.addEventListener(
                 );
 
                 loadProfileImage();
-
             };
 
 
@@ -704,7 +783,10 @@ function loadProfileImage() {
         );
 
 
-    if (imageData) {
+    if (
+        imageData &&
+        myProfileImage
+    ) {
 
         myProfileImage.src =
             imageData;
@@ -712,25 +794,29 @@ function loadProfileImage() {
         myProfileImage.style.display =
             "block";
 
-        profileImagePlaceholder.style.display =
-            "none";
+        if (profileImagePlaceholder) {
+            profileImagePlaceholder.style.display =
+                "none";
+        }
 
     } else {
 
-        myProfileImage.style.display =
-            "none";
+        if (myProfileImage) {
+            myProfileImage.style.display =
+                "none";
+        }
 
-        profileImagePlaceholder.style.display =
-            "block";
-
+        if (profileImagePlaceholder) {
+            profileImagePlaceholder.style.display =
+                "block";
+        }
     }
-
 }
 
 
-// ==================================================
-// 名前変更
-// ==================================================
+/* =========================================================
+   名前変更
+========================================================= */
 
 changeNameButton?.addEventListener(
     "click",
@@ -748,19 +834,21 @@ changeNameButton?.addEventListener(
         }
 
 
-        const trimmedName =
+        const trimmed =
             newName.trim();
 
 
-        if (
-            !trimmedName ||
-            trimmedName === username
-        ) {
+        if (!trimmed) {
             return;
         }
 
 
-        if (trimmedName.length > 20) {
+        if (trimmed === username) {
+            return;
+        }
+
+
+        if (trimmed.length > 20) {
 
             alert(
                 "名前は20文字以内にしてください。"
@@ -772,19 +860,20 @@ changeNameButton?.addEventListener(
 
         try {
 
-            const newUserDoc =
-                await getDoc(
-                    doc(
-                        db,
-                        "users",
-                        trimmedName
-                    )
+            const newUserRef =
+                doc(
+                    db,
+                    "users",
+                    trimmed
                 );
+
+            const existing =
+                await getDoc(newUserRef);
 
 
             if (
-                newUserDoc.exists() &&
-                newUserDoc.data().uid !== currentUser.uid
+                existing.exists() &&
+                existing.data().uid !== currentUser.uid
             ) {
 
                 alert(
@@ -797,12 +886,12 @@ changeNameButton?.addEventListener(
 
             await renameUser(
                 username,
-                trimmedName
+                trimmed
             );
 
 
             username =
-                trimmedName;
+                trimmed;
 
 
             localStorage.setItem(
@@ -811,13 +900,16 @@ changeNameButton?.addEventListener(
             );
 
 
-            myName.textContent =
-                username;
+            if (myName) {
+                myName.textContent =
+                    username;
+            }
 
 
             alert(
                 "名前を変更しました。"
             );
+
 
         } catch (error) {
 
@@ -826,16 +918,15 @@ changeNameButton?.addEventListener(
             alert(
                 "名前変更に失敗しました。"
             );
-
         }
 
     }
 );
 
 
-// ==================================================
-// 名前変更処理
-// ==================================================
+/* =========================================================
+   名前変更処理
+========================================================= */
 
 async function renameUser(
     oldName,
@@ -879,7 +970,6 @@ async function renameUser(
             const data =
                 item.data();
 
-
             if (
                 data.owner === oldName ||
                 data.friendName === oldName
@@ -899,7 +989,6 @@ async function renameUser(
                                 : data.friendName
                     }
                 );
-
             }
 
         }
@@ -921,22 +1010,16 @@ async function renameUser(
             const data =
                 item.data();
 
+            const members =
+                Array.isArray(data.members)
+                    ? data.members
+                    : [];
+
 
             if (
                 data.owner === oldName ||
-                (data.members || [])
-                    .includes(oldName)
+                members.includes(oldName)
             ) {
-
-                const members =
-                    (data.members || [])
-                        .map(
-                            member =>
-                                member === oldName
-                                    ? newName
-                                    : member
-                        );
-
 
                 batch.update(
                     item.ref,
@@ -946,10 +1029,15 @@ async function renameUser(
                                 ? newName
                                 : data.owner,
 
-                        members: members
+                        members:
+                            members.map(
+                                member =>
+                                    member === oldName
+                                        ? newName
+                                        : member
+                            )
                     }
                 );
-
             }
 
         }
@@ -965,21 +1053,23 @@ async function renameUser(
         );
 
 
+    const messageUpdates = [];
+
+
     messagesSnapshot.forEach(
         item => {
 
             const data =
                 item.data();
 
-
             if (
                 data.sender === oldName ||
                 data.receiver === oldName
             ) {
 
-                batch.update(
-                    item.ref,
-                    {
+                messageUpdates.push({
+                    ref: item.ref,
+                    data: {
                         sender:
                             data.sender === oldName
                                 ? newName
@@ -990,36 +1080,86 @@ async function renameUser(
                                 ? newName
                                 : data.receiver
                     }
-                );
-
+                });
             }
 
         }
     );
 
 
-    batch.delete(
-        doc(
-            db,
-            "users",
-            oldName
-        )
-    );
+    /*
+       Firestore batchには500件制限があるため、
+       メッセージは分割して更新する。
+    */
+
+    for (
+        let i = 0;
+        i < messageUpdates.length;
+        i += 450
+    ) {
+
+        const chunk =
+            messageUpdates.slice(
+                i,
+                i + 450
+            );
+
+        chunk.forEach(
+            item => {
+                batch.update(
+                    item.ref,
+                    item.data
+                );
+            }
+        );
+
+        if (
+            i ===
+            Math.floor(
+                (messageUpdates.length - 1) / 450
+            ) * 450
+        ) {
+            batch.delete(
+                doc(
+                    db,
+                    "users",
+                    oldName
+                )
+            );
+        }
+
+        await batch.commit();
+    }
 
 
-    await batch.commit();
+    if (messageUpdates.length === 0) {
 
+        batch.delete(
+            doc(
+                db,
+                "users",
+                oldName
+            )
+        );
+
+        await batch.commit();
+    }
 }
 
 
-// ==================================================
-// 友達一覧監視
-// ==================================================
+/* =========================================================
+   友達一覧監視
+========================================================= */
 
 function listenFriends() {
 
     if (unsubscribeFriends) {
         unsubscribeFriends();
+    }
+
+
+    if (!username) {
+        return;
     }
 
 
@@ -1042,46 +1182,52 @@ function listenFriends() {
             q,
             snapshot => {
 
-                friendsData = [];
-
-
-                snapshot.forEach(
-                    item => {
-
-                        friendsData.push({
+                friendsData =
+                    snapshot.docs.map(
+                        item => ({
                             id: item.id,
                             ...item.data()
-                        });
-
-                    }
-                );
+                        })
+                    );
 
 
                 friendsData.sort(
                     (a, b) =>
-                        (a.friendName || "")
-                            .localeCompare(
-                                b.friendName || "",
-                                "ja"
-                            )
+                        (
+                            a.friendName || ""
+                        ).localeCompare(
+                            b.friendName || "",
+                            "ja"
+                        )
                 );
 
 
                 renderFriends();
 
+            },
+            error => {
+                console.error(
+                    "友達監視エラー:",
+                    error
+                );
             }
         );
-
 }
 
 
-// ==================================================
-// 友達一覧表示
-// ==================================================
+/* =========================================================
+   友達一覧表示
+========================================================= */
 
 function renderFriends() {
 
-    friendsList.innerHTML = "";
+    if (!friendsList) {
+        return;
+    }
+
+
+    friendsList.innerHTML =
+        "";
 
 
     if (friendsData.length === 0) {
@@ -1090,7 +1236,6 @@ function renderFriends() {
             `<div class="empty-message">友達がいません</div>`;
 
         return;
-
     }
 
 
@@ -1102,7 +1247,6 @@ function renderFriends() {
                     "div"
                 );
 
-
             row.className =
                 "friend-item";
 
@@ -1112,7 +1256,6 @@ function renderFriends() {
                     "button"
                 );
 
-
             mainButton.className =
                 "friend-main-button";
 
@@ -1121,10 +1264,15 @@ function renderFriends() {
                 `🟢 <span class="friend-name"></span>`;
 
 
-            mainButton.querySelector(
-                ".friend-name"
-            ).textContent =
-                friend.friendName;
+            const nameElement =
+                mainButton.querySelector(
+                    ".friend-name"
+                );
+
+            if (nameElement) {
+                nameElement.textContent =
+                    friend.friendName;
+            }
 
 
             const unread =
@@ -1132,10 +1280,8 @@ function renderFriends() {
                     "span"
                 );
 
-
             unread.className =
                 "unread-badge";
-
 
             unread.style.display =
                 "none";
@@ -1163,14 +1309,11 @@ function renderFriends() {
                     "button"
                 );
 
-
             deleteButton.className =
                 "friend-delete-button";
 
-
             deleteButton.textContent =
                 "×";
-
 
             deleteButton.title =
                 "友達を削除";
@@ -1198,7 +1341,6 @@ function renderFriends() {
                 deleteButton
             );
 
-
             friendsList.appendChild(
                 row
             );
@@ -1208,22 +1350,30 @@ function renderFriends() {
 
 
     updateUnreadBadges();
-
 }
 
 
-// ==================================================
-// 友達追加
-// ==================================================
+/* =========================================================
+   友達追加
+========================================================= */
 
 addFriendButton?.addEventListener(
     "click",
     async () => {
 
-        const friendName =
+        const input =
             prompt(
                 "追加したい友達の名前を入力してください"
             );
+
+
+        if (!input) {
+            return;
+        }
+
+
+        const friendName =
+            input.trim();
 
 
         if (!friendName) {
@@ -1231,16 +1381,7 @@ addFriendButton?.addEventListener(
         }
 
 
-        const trimmedName =
-            friendName.trim();
-
-
-        if (!trimmedName) {
-            return;
-        }
-
-
-        if (trimmedName === username) {
+        if (friendName === username) {
 
             alert(
                 "自分自身は友達に追加できません。"
@@ -1252,48 +1393,21 @@ addFriendButton?.addEventListener(
 
         try {
 
-            // 本当に存在するアカウントか確認
-            const userSnapshot =
-                await getDoc(
-                    doc(
-                        db,
-                        "users",
-                        trimmedName
-                    )
+            const userRef =
+                doc(
+                    db,
+                    "users",
+                    friendName
                 );
+
+            const userSnapshot =
+                await getDoc(userRef);
 
 
             if (!userSnapshot.exists()) {
 
                 alert(
                     "その名前のユーザーは存在しません。"
-                );
-
-                return;
-            }
-
-
-            const userData =
-                userSnapshot.data();
-
-
-            if (!userData.uid) {
-
-                alert(
-                    "そのユーザーを確認できません。"
-                );
-
-                return;
-            }
-
-
-            if (
-                userData.uid ===
-                currentUser.uid
-            ) {
-
-                alert(
-                    "自分自身は追加できません。"
                 );
 
                 return;
@@ -1314,18 +1428,18 @@ addFriendButton?.addEventListener(
                     where(
                         "friendName",
                         "==",
-                        trimmedName
+                        friendName
                     )
                 );
 
 
-            const existingSnapshot =
+            const existing =
                 await getDocs(
                     existingQuery
                 );
 
 
-            if (!existingSnapshot.empty) {
+            if (!existing.empty) {
 
                 alert(
                     "すでに友達です。"
@@ -1336,14 +1450,14 @@ addFriendButton?.addEventListener(
 
 
             const friendshipId =
-                crypto.randomUUID();
+                makeFriendshipId();
 
 
             const batch =
                 writeBatch(db);
 
 
-            const myFriendRef =
+            const myRef =
                 doc(
                     collection(
                         db,
@@ -1352,7 +1466,7 @@ addFriendButton?.addEventListener(
                 );
 
 
-            const theirFriendRef =
+            const theirRef =
                 doc(
                     collection(
                         db,
@@ -1362,23 +1476,25 @@ addFriendButton?.addEventListener(
 
 
             batch.set(
-                myFriendRef,
+                myRef,
                 {
                     owner: username,
-                    friendName: trimmedName,
-                    friendshipId: friendshipId,
-                    createdAt: serverTimestamp()
+                    friendName,
+                    friendshipId,
+                    createdAt:
+                        serverTimestamp()
                 }
             );
 
 
             batch.set(
-                theirFriendRef,
+                theirRef,
                 {
-                    owner: trimmedName,
+                    owner: friendName,
                     friendName: username,
-                    friendshipId: friendshipId,
-                    createdAt: serverTimestamp()
+                    friendshipId,
+                    createdAt:
+                        serverTimestamp()
                 }
             );
 
@@ -1387,27 +1503,28 @@ addFriendButton?.addEventListener(
 
 
             alert(
-                `${trimmedName}さんを友達に追加しました！`
+                `${friendName}さんを友達に追加しました！`
             );
-
 
         } catch (error) {
 
-            console.error(error);
+            console.error(
+                "友達追加エラー:",
+                error
+            );
 
             alert(
                 "友達追加に失敗しました。"
             );
-
         }
 
     }
 );
 
 
-// ==================================================
-// 友達削除
-// ==================================================
+/* =========================================================
+   友達削除
+========================================================= */
 
 async function deleteFriend(
     friendName
@@ -1415,7 +1532,7 @@ async function deleteFriend(
 
     const ok =
         confirm(
-            `${friendName}さんを友達から削除しますか？\n\nお互いの友達一覧から削除されます。\n再追加すると新しいチャットになります。`
+            `${friendName}さんを友達から削除しますか？\n\nお互いの友達一覧から削除されます。`
         );
 
 
@@ -1469,7 +1586,6 @@ async function deleteFriend(
                 myQuery
             );
 
-
         const theirSnapshot =
             await getDocs(
                 theirQuery
@@ -1482,22 +1598,18 @@ async function deleteFriend(
 
         mySnapshot.forEach(
             item => {
-
                 batch.delete(
                     item.ref
                 );
-
             }
         );
 
 
         theirSnapshot.forEach(
             item => {
-
                 batch.delete(
                     item.ref
                 );
-
             }
         );
 
@@ -1509,9 +1621,7 @@ async function deleteFriend(
             selectedChat ===
             friendName
         ) {
-
             resetChat();
-
         }
 
 
@@ -1519,29 +1629,29 @@ async function deleteFriend(
             "友達を削除しました。"
         );
 
-
     } catch (error) {
 
-        console.error(error);
+        console.error(
+            "友達削除エラー:",
+            error
+        );
 
         alert(
             "友達の削除に失敗しました。"
         );
-
     }
-
 }
 
 
-// ==================================================
-// 友達のチャットID確認
-// ==================================================
+/* =========================================================
+   Friendship ID
+========================================================= */
 
 async function ensureFriendshipId(
     friendName
 ) {
 
-    const currentFriend =
+    const current =
         friendsData.find(
             friend =>
                 friend.friendName ===
@@ -1549,16 +1659,12 @@ async function ensureFriendshipId(
         );
 
 
-    if (
-        currentFriend?.friendshipId
-    ) {
-
-        return currentFriend.friendshipId;
-
+    if (current?.friendshipId) {
+        return current.friendshipId;
     }
 
 
-    const myQuery =
+    const q =
         query(
             collection(
                 db,
@@ -1577,215 +1683,38 @@ async function ensureFriendshipId(
         );
 
 
-    const theirQuery =
-        query(
-            collection(
-                db,
-                "friends"
-            ),
-            where(
-                "owner",
-                "==",
-                friendName
-            ),
-            where(
-                "friendName",
-                "==",
-                username
-            )
+    const snapshot =
+        await getDocs(q);
+
+
+    if (!snapshot.empty) {
+
+        return (
+            snapshot.docs[0]
+                .data()
+                .friendshipId ||
+            null
         );
-
-
-    const mySnapshot =
-        await getDocs(
-            myQuery
-        );
-
-
-    const theirSnapshot =
-        await getDocs(
-            theirQuery
-        );
-
-
-    let friendshipId =
-        null;
-
-
-    mySnapshot.forEach(
-        item => {
-
-            if (!friendshipId) {
-
-                friendshipId =
-                    item.data().friendshipId ||
-                    null;
-
-            }
-
-        }
-    );
-
-
-    theirSnapshot.forEach(
-        item => {
-
-            if (!friendshipId) {
-
-                friendshipId =
-                    item.data().friendshipId ||
-                    null;
-
-            }
-
-        }
-    );
-
-
-    if (!friendshipId) {
-
-        friendshipId =
-            crypto.randomUUID();
-
     }
 
 
-    const batch =
-        writeBatch(db);
-
-
-    mySnapshot.forEach(
-        item => {
-
-            batch.update(
-                item.ref,
-                {
-                    friendshipId:
-                        friendshipId
-                }
-            );
-
-        }
-    );
-
-
-    theirSnapshot.forEach(
-        item => {
-
-            batch.update(
-                item.ref,
-                {
-                    friendshipId:
-                        friendshipId
-                }
-            );
-
-        }
-    );
-
-
-    await batch.commit();
-
-
-    // 古いメッセージにチャットIDを付ける
-    const messagesSnapshot =
-        await getDocs(
-            collection(
-                db,
-                "messages"
-            )
-        );
-
-
-    const oldMessages = [];
-
-
-    messagesSnapshot.forEach(
-        item => {
-
-            const data =
-                item.data();
-
-
-            const isPair =
-                (
-                    data.sender === username &&
-                    data.receiver === friendName
-                ) ||
-                (
-                    data.sender === friendName &&
-                    data.receiver === username
-                );
-
-
-            if (
-                isPair &&
-                !data.friendshipId &&
-                data.chatType !== "group"
-            ) {
-
-                oldMessages.push(
-                    item
-                );
-
-            }
-
-        }
-    );
-
-
-    for (
-        let i = 0;
-        i < oldMessages.length;
-        i += 450
-    ) {
-
-        const chunk =
-            oldMessages.slice(
-                i,
-                i + 450
-            );
-
-
-        const messageBatch =
-            writeBatch(db);
-
-
-        chunk.forEach(
-            item => {
-
-                messageBatch.update(
-                    item.ref,
-                    {
-                        friendshipId:
-                            friendshipId
-                    }
-                );
-
-            }
-        );
-
-
-        await messageBatch.commit();
-
-    }
-
-
-    return friendshipId;
-
+    return null;
 }
 
 
-// ==================================================
-// グループ一覧監視
-// ==================================================
+/* =========================================================
+   グループ一覧監視
+========================================================= */
 
 function listenGroups() {
 
     if (unsubscribeGroups) {
-
         unsubscribeGroups();
+    }
 
+
+    if (!username) {
+        return;
     }
 
 
@@ -1808,36 +1737,53 @@ function listenGroups() {
             q,
             snapshot => {
 
-                groupsData = [];
-
-
-                snapshot.forEach(
-                    item => {
-
-                        groupsData.push({
+                groupsData =
+                    snapshot.docs.map(
+                        item => ({
                             id: item.id,
                             ...item.data()
-                        });
+                        })
+                    );
 
-                    }
+
+                groupsData.sort(
+                    (a, b) =>
+                        (
+                            a.name || ""
+                        ).localeCompare(
+                            b.name || "",
+                            "ja"
+                        )
                 );
 
 
                 renderGroups();
 
+            },
+            error => {
+
+                console.error(
+                    "グループ監視エラー:",
+                    error
+                );
             }
         );
-
 }
 
 
-// ==================================================
-// グループ表示
-// ==================================================
+/* =========================================================
+   グループ表示
+========================================================= */
 
 function renderGroups() {
 
-    groupsList.innerHTML = "";
+    if (!groupsList) {
+        return;
+    }
+
+
+    groupsList.innerHTML =
+        "";
 
 
     if (groupsData.length === 0) {
@@ -1846,7 +1792,6 @@ function renderGroups() {
             `<div class="empty-message">グループがありません</div>`;
 
         return;
-
     }
 
 
@@ -1858,7 +1803,6 @@ function renderGroups() {
                     "div"
                 );
 
-
             row.className =
                 "group-item";
 
@@ -1868,10 +1812,8 @@ function renderGroups() {
                     "button"
                 );
 
-
             mainButton.className =
                 "group-main-button";
-
 
             mainButton.textContent =
                 `👥 ${group.name}`;
@@ -1894,17 +1836,11 @@ function renderGroups() {
                     "button"
                 );
 
-
             manageButton.className =
                 "group-manage-button";
 
-
             manageButton.textContent =
                 "⋯";
-
-
-            manageButton.title =
-                "グループ管理";
 
 
             manageButton.addEventListener(
@@ -1925,11 +1861,9 @@ function renderGroups() {
                 mainButton
             );
 
-
             row.appendChild(
                 manageButton
             );
-
 
             groupsList.appendChild(
                 row
@@ -1937,22 +1871,30 @@ function renderGroups() {
 
         }
     );
-
 }
 
 
-// ==================================================
-// グループ作成
-// ==================================================
+/* =========================================================
+   グループ作成
+========================================================= */
 
 createGroupButton?.addEventListener(
     "click",
     async () => {
 
-        const groupName =
+        const input =
             prompt(
                 "グループ名を入力してください"
             );
+
+
+        if (!input) {
+            return;
+        }
+
+
+        const groupName =
+            input.trim();
 
 
         if (!groupName) {
@@ -1960,745 +1902,195 @@ createGroupButton?.addEventListener(
         }
 
 
-        // 友達一覧から選ぶ
-        if (friendsData.length === 0) {
+        if (groupName.length > 50) {
 
-            try {
-
-                await addDoc(
-                    collection(
-                        db,
-                        "groups"
-                    ),
-                    {
-                        name:
-                            groupName.trim(),
-
-                        owner:
-                            username,
-
-                        members:
-                            [username],
-
-                        createdAt:
-                            serverTimestamp()
-                    }
-                );
-
-
-                alert(
-                    "グループを作成しました！"
-                );
-
-
-            } catch (error) {
-
-                console.error(error);
-
-                alert(
-                    "グループ作成に失敗しました。"
-                );
-
-            }
+            alert(
+                "グループ名は50文字以内にしてください。"
+            );
 
             return;
-
         }
 
 
-        showCreateGroupMemberPicker(
-            groupName.trim()
+        const members =
+            [username];
+
+
+        const selectedFriends = [];
+
+
+        if (friendsData.length > 0) {
+
+            const list =
+                friendsData
+                    .map(
+                        friend =>
+                            friend.friendName
+                    )
+                    .join("\n");
+
+
+            const selected =
+                prompt(
+                    "追加する友達の名前を入力してください。\n\n複数人の場合はカンマ（,）で区切れます。\n\n友達一覧:\n" +
+                    list
+                );
+
+
+            if (selected) {
+
+                selected
+                    .split(",")
+                    .map(
+                        item =>
+                            item.trim()
+                    )
+                    .filter(Boolean)
+                    .forEach(
+                        name => {
+
+                            if (
+                                name !== username &&
+                                friendsData.some(
+                                    friend =>
+                                        friend.friendName === name
+                                ) &&
+                                !selectedFriends.includes(name)
+                            ) {
+                                selectedFriends.push(
+                                    name
+                                );
+                            }
+
+                        }
+                    );
+            }
+        }
+
+
+        members.push(
+            ...selectedFriends
         );
+
+
+        try {
+
+            await addDoc(
+                collection(
+                    db,
+                    "groups"
+                ),
+                {
+                    name: groupName,
+                    owner: username,
+                    members,
+                    createdAt:
+                        serverTimestamp()
+                }
+            );
+
+
+            alert(
+                "グループを作成しました！"
+            );
+
+        } catch (error) {
+
+            console.error(
+                "グループ作成エラー:",
+                error
+            );
+
+            alert(
+                "グループ作成に失敗しました。"
+            );
+        }
 
     }
 );
 
 
-// ==================================================
-// グループ作成メンバー選択画面
-// ==================================================
-
-function showCreateGroupMemberPicker(
-    groupName
-) {
-
-    const overlay =
-        createModalOverlay();
-
-
-    const panel =
-        createModalPanel();
-
-
-    const title =
-        document.createElement(
-            "h2"
-        );
-
-
-    title.textContent =
-        `👥 ${groupName}`;
-
-
-    const info =
-        document.createElement(
-            "p"
-        );
-
-
-    info.textContent =
-        "参加させる友達を選択してください。";
-
-
-    panel.appendChild(
-        title
-    );
-
-
-    panel.appendChild(
-        info
-    );
-
-
-    const list =
-        document.createElement(
-            "div"
-        );
-
-
-    list.style.display =
-        "flex";
-
-    list.style.flexDirection =
-        "column";
-
-    list.style.gap =
-        "8px";
-
-    list.style.maxHeight =
-        "300px";
-
-    list.style.overflowY =
-        "auto";
-
-
-    friendsData.forEach(
-        friend => {
-
-            const label =
-                createFriendCheckbox(
-                    friend.friendName
-                );
-
-
-            list.appendChild(
-                label
-            );
-
-        }
-    );
-
-
-    panel.appendChild(
-        list
-    );
-
-
-    const createButton =
-        createModalButton(
-            "グループを作成"
-        );
-
-
-    createButton.style.background =
-        "#6c63ff";
-
-    createButton.style.color =
-        "white";
-
-
-    createButton.addEventListener(
-        "click",
-        async () => {
-
-            const selected =
-                [
-                    ...list.querySelectorAll(
-                        "input:checked"
-                    )
-                ].map(
-                    input =>
-                        input.value
-                );
-
-
-            const members =
-                [
-                    username,
-                    ...selected
-                ];
-
-
-            try {
-
-                await addDoc(
-                    collection(
-                        db,
-                        "groups"
-                    ),
-                    {
-                        name:
-                            groupName,
-
-                        owner:
-                            username,
-
-                        members:
-                            [...new Set(members)],
-
-                        createdAt:
-                            serverTimestamp()
-                    }
-                );
-
-
-                overlay.remove();
-
-
-                alert(
-                    "グループを作成しました！"
-                );
-
-
-            } catch (error) {
-
-                console.error(error);
-
-                alert(
-                    "グループ作成に失敗しました。"
-                );
-
-            }
-
-        }
-    );
-
-
-    panel.appendChild(
-        createButton
-    );
-
-
-    const cancelButton =
-        createModalButton(
-            "キャンセル"
-        );
-
-
-    cancelButton.addEventListener(
-        "click",
-        () => {
-
-            overlay.remove();
-
-        }
-    );
-
-
-    panel.appendChild(
-        cancelButton
-    );
-
-
-    overlay.appendChild(
-        panel
-    );
-
-
-    document.body.appendChild(
-        overlay
-    );
-
-}
-
-
-// ==================================================
-// グループ管理画面
-// ==================================================
-
-function showGroupManagement(
+/* =========================================================
+   グループ管理
+========================================================= */
+
+async function showGroupManagement(
     group
 ) {
 
-    const overlay =
-        createModalOverlay();
-
-
-    const panel =
-        createModalPanel();
-
-
-    const title =
-        document.createElement(
-            "h2"
-        );
-
-
-    title.textContent =
-        `👥 ${group.name}`;
-
-
-    const info =
-        document.createElement(
-            "p"
-        );
-
-
-    info.textContent =
-        `${(group.members || []).length}人が参加中`;
-
-
-    panel.appendChild(
-        title
-    );
-
-
-    panel.appendChild(
-        info
-    );
-
-
-    // メンバー追加
-    const addButton =
-        createModalButton(
-            "👤  メンバーを追加"
-        );
-
-
-    addButton.addEventListener(
-        "click",
-        () => {
-
-            overlay.remove();
-
-            showAddMembersScreen(
-                group
-            );
-
-        }
-    );
-
-
-    panel.appendChild(
-        addButton
-    );
-
-
-    // 退会
-    const leaveButton =
-        createModalButton(
-            "🚪  グループから退会"
-        );
-
-
-    leaveButton.style.background =
-        "#fff0f0";
-
-    leaveButton.style.color =
-        "#e53935";
-
-
-    leaveButton.addEventListener(
-        "click",
-        async () => {
-
-            const ok =
-                confirm(
-                    `「${group.name}」から退会しますか？`
-                );
-
-
-            if (!ok) {
-                return;
-            }
-
-
-            await leaveGroup(
-                group,
-                overlay
-            );
-
-        }
-    );
-
-
-    panel.appendChild(
-        leaveButton
-    );
-
-
-    // キャンセル
-    const cancelButton =
-        createModalButton(
-            "キャンセル"
-        );
-
-
-    cancelButton.addEventListener(
-        "click",
-        () => {
-
-            overlay.remove();
-
-        }
-    );
-
-
-    panel.appendChild(
-        cancelButton
-    );
-
-
-    overlay.appendChild(
-        panel
-    );
-
-
-    document.body.appendChild(
-        overlay
-    );
-
-}
-
-
-// ==================================================
-// グループ メンバー追加画面
-// ==================================================
-
-function showAddMembersScreen(
-    group
-) {
-
-    const overlay =
-        createModalOverlay();
-
-
-    const panel =
-        createModalPanel();
-
-
-    const title =
-        document.createElement(
-            "h2"
-        );
-
-
-    title.textContent =
-        "👤 メンバーを追加";
-
-
-    const info =
-        document.createElement(
-            "p"
-        );
-
-
-    info.textContent =
-        "追加したい友達を選択してください。";
-
-
-    panel.appendChild(
-        title
-    );
-
-
-    panel.appendChild(
-        info
-    );
-
-
-    const availableFriends =
-        friendsData.filter(
-            friend =>
-                !(group.members || [])
-                    .includes(
-                        friend.friendName
-                    )
-        );
-
-
-    if (
-        availableFriends.length === 0
-    ) {
-
-        const empty =
-            document.createElement(
-                "div"
-            );
-
-
-        empty.textContent =
-            "追加できる友達がいません。";
-
-
-        empty.style.padding =
-            "20px";
-
-        empty.style.textAlign =
-            "center";
-
-        empty.style.background =
-            "#f5f5f5";
-
-        empty.style.borderRadius =
-            "12px";
-
-
-        panel.appendChild(
-            empty
-        );
-
-    } else {
-
-        const list =
-            document.createElement(
-                "div"
-            );
-
-
-        list.style.display =
-            "flex";
-
-        list.style.flexDirection =
-            "column";
-
-        list.style.gap =
-            "8px";
-
-        list.style.maxHeight =
-            "300px";
-
-        list.style.overflowY =
-            "auto";
-
-
-        availableFriends.forEach(
-            friend => {
-
-                list.appendChild(
-                    createFriendCheckbox(
-                        friend.friendName
-                    )
-                );
-
-            }
-        );
-
-
-        panel.appendChild(
-            list
-        );
-
-
-        const addButton =
-            createModalButton(
-                "追加する"
-            );
-
-
-        addButton.style.background =
-            "#6c63ff";
-
-        addButton.style.color =
-            "white";
-
-
-        addButton.addEventListener(
-            "click",
-            async () => {
-
-                const selected =
-                    [
-                        ...list.querySelectorAll(
-                            "input:checked"
-                        )
-                    ].map(
-                        input =>
-                            input.value
-                    );
-
-
-                if (
-                    selected.length === 0
-                ) {
-
-                    alert(
-                        "追加する友達を選択してください。"
-                    );
-
-                    return;
-
-                }
-
-
-                const newMembers =
-                    [
-                        ...(group.members || [])
-                    ];
-
-
-                selected.forEach(
-                    name => {
-
-                        if (
-                            !newMembers.includes(
-                                name
-                            )
-                        ) {
-
-                            newMembers.push(
-                                name
-                            );
-
-                        }
-
-                    }
-                );
-
-
-                try {
-
-                    await updateDoc(
-                        doc(
-                            db,
-                            "groups",
-                            group.id
-                        ),
-                        {
-                            members:
-                                newMembers
-                        }
-                    );
-
-
-                    overlay.remove();
-
-
-                    alert(
-                        `${selected.length}人を追加しました！`
-                    );
-
-
-                } catch (error) {
-
-                    console.error(error);
-
-                    alert(
-                        "メンバー追加に失敗しました。"
-                    );
-
-                }
-
-            }
-        );
-
-
-        panel.appendChild(
-            addButton
-        );
-
+    if (!group) {
+        return;
     }
 
 
-    const backButton =
-        createModalButton(
-            "← 戻る"
-        );
+    const members =
+        Array.isArray(group.members)
+            ? group.members
+            : [];
 
 
-    backButton.addEventListener(
-        "click",
-        () => {
+    let text =
+        `グループ「${group.name}」\n\n` +
+        `メンバー:\n` +
+        members.join("\n");
 
-            overlay.remove();
 
-            showGroupManagement(
-                group
+    if (group.owner === username) {
+
+        text +=
+            "\n\nOK → メンバー追加\nキャンセル → 閉じる";
+
+
+        const add =
+            confirm(text);
+
+
+        if (!add) {
+            return;
+        }
+
+
+        const input =
+            prompt(
+                "追加する友達の名前を入力してください"
             );
 
+
+        if (!input) {
+            return;
         }
-    );
 
 
-    panel.appendChild(
-        backButton
-    );
+        const name =
+            input.trim();
 
 
-    overlay.appendChild(
-        panel
-    );
-
-
-    document.body.appendChild(
-        overlay
-    );
-
-}
-
-
-// ==================================================
-// グループ退会
-// ==================================================
-
-async function leaveGroup(
-    group,
-    overlay
-) {
-
-    try {
-
-        const remainingMembers =
-            (group.members || [])
-                .filter(
-                    member =>
-                        member !== username
-                );
-
-
-        // 自分しかいなかった
         if (
-            remainingMembers.length === 0
+            !friendsData.some(
+                friend =>
+                    friend.friendName === name
+            )
         ) {
 
-            await deleteDoc(
-                doc(
-                    db,
-                    "groups",
-                    group.id
-                )
+            alert(
+                "友達一覧にいる人だけ追加できます。"
             );
 
-        } else {
-
-            const updateData = {
-
-                members:
-                    remainingMembers
-
-            };
+            return;
+        }
 
 
-            // オーナーだった場合
-            if (
-                group.owner === username
-            ) {
+        if (members.includes(name)) {
 
-                updateData.owner =
-                    remainingMembers[0];
+            alert(
+                "すでにメンバーです。"
+            );
 
-            }
+            return;
+        }
 
+
+        try {
 
             await updateDoc(
                 doc(
@@ -2706,317 +2098,166 @@ async function leaveGroup(
                     "groups",
                     group.id
                 ),
-                updateData
+                {
+                    members: [
+                        ...members,
+                        name
+                    ]
+                }
             );
 
+
+            alert(
+                "メンバーを追加しました。"
+            );
+
+        } catch (error) {
+
+            console.error(error);
+
+            alert(
+                "メンバー追加に失敗しました。"
+            );
         }
 
 
-        if (
-            selectedChat === group.id &&
-            selectedChatType === "group"
-        ) {
+    } else {
 
-            resetChat();
+        const leave =
+            confirm(
+                text +
+                "\n\nこのグループから退会しますか？"
+            );
 
+
+        if (!leave) {
+            return;
         }
 
-
-        overlay.remove();
-
-
-        alert(
-            "グループから退会しました。"
-        );
-
-
-    } catch (error) {
-
-        console.error(error);
-
-        alert(
-            "グループ退会に失敗しました。"
-        );
-
-    }
-
-}
-
-
-// ==================================================
-// モーダル部品
-// ==================================================
-
-function createModalOverlay() {
-
-    const overlay =
-        document.createElement(
-            "div"
-        );
-
-
-    overlay.style.position =
-        "fixed";
-
-    overlay.style.inset =
-        "0";
-
-    overlay.style.background =
-        "rgba(0,0,0,0.35)";
-
-    overlay.style.display =
-        "flex";
-
-    overlay.style.alignItems =
-        "center";
-
-    overlay.style.justifyContent =
-        "center";
-
-    overlay.style.padding =
-        "20px";
-
-    overlay.style.zIndex =
-        "99999";
-
-
-    overlay.addEventListener(
-        "click",
-        event => {
-
-            if (
-                event.target === overlay
-            ) {
-
-                overlay.remove();
-
-            }
-
-        }
-    );
-
-
-    return overlay;
-
-}
-
-
-function createModalPanel() {
-
-    const panel =
-        document.createElement(
-            "div"
-        );
-
-
-    panel.style.width =
-        "min(420px, 100%)";
-
-    panel.style.maxHeight =
-        "85vh";
-
-    panel.style.overflowY =
-        "auto";
-
-    panel.style.background =
-        "white";
-
-    panel.style.borderRadius =
-        "24px";
-
-    panel.style.padding =
-        "25px";
-
-    panel.style.boxShadow =
-        "0 20px 60px rgba(0,0,0,0.25)";
-
-    panel.style.boxSizing =
-        "border-box";
-
-
-    return panel;
-
-}
-
-
-function createModalButton(
-    text
-) {
-
-    const button =
-        document.createElement(
-            "button"
-        );
-
-
-    button.textContent =
-        text;
-
-
-    button.style.width =
-        "100%";
-
-    button.style.border =
-        "none";
-
-    button.style.padding =
-        "15px";
-
-    button.style.marginTop =
-        "10px";
-
-    button.style.borderRadius =
-        "14px";
-
-    button.style.background =
-        "#f1f2f6";
-
-    button.style.fontSize =
-        "16px";
-
-    button.style.cursor =
-        "pointer";
-
-
-    return button;
-
-}
-
-
-function createFriendCheckbox(
-    name
-) {
-
-    const label =
-        document.createElement(
-            "label"
-        );
-
-
-    label.style.display =
-        "flex";
-
-    label.style.alignItems =
-        "center";
-
-    label.style.gap =
-        "12px";
-
-    label.style.padding =
-        "14px";
-
-    label.style.background =
-        "#f6f6f8";
-
-    label.style.borderRadius =
-        "12px";
-
-    label.style.cursor =
-        "pointer";
-
-
-    const checkbox =
-        document.createElement(
-            "input"
-        );
-
-
-    checkbox.type =
-        "checkbox";
-
-    checkbox.value =
-        name;
-
-
-    checkbox.style.width =
-        "20px";
-
-    checkbox.style.height =
-        "20px";
-
-
-    const text =
-        document.createElement(
-            "span"
-        );
-
-
-    text.textContent =
-        `🟢 ${name}`;
-
-
-    label.appendChild(
-        checkbox
-    );
-
-
-    label.appendChild(
-        text
-    );
-
-
-    return label;
-
-}
-
-
-// ==================================================
-// 友達選択
-// ==================================================
-
-async function selectFriend(friendName) {
-    try {
-        console.log("① 友達を選択:", friendName);
-
-        const friendshipId =
-            await ensureFriendshipId(friendName);
-
-        console.log("② friendshipId:", friendshipId);
-
-        selectedChat = friendName;
-        selectedChatType = "friend";
-        selectedFriendshipId = friendshipId;
-
-        chatHeader.textContent = friendName;
-
-        messageInput.disabled = false;
-        sendButton.disabled = false;
-
-        messageInput.placeholder =
-            `${friendName}さんにメッセージ`;
-
-        cancelReply();
-
-        console.log("③ チャット画面設定完了");
-
-        listenMessages();
-
-        console.log("④ メッセージ監視開始");
 
         try {
-            await markFriendMessagesAsRead();
-            console.log("⑤ 既読処理完了");
-        } catch (readError) {
-            console.error("既読処理エラー:", readError);
+
+            const newMembers =
+                members.filter(
+                    member =>
+                        member !== username
+                );
+
+
+            if (newMembers.length === 0) {
+
+                await deleteDoc(
+                    doc(
+                        db,
+                        "groups",
+                        group.id
+                    )
+                );
+
+            } else {
+
+                await updateDoc(
+                    doc(
+                        db,
+                        "groups",
+                        group.id
+                    ),
+                    {
+                        members:
+                            newMembers
+                    }
+                );
+            }
+
+
+            if (
+                selectedChat ===
+                group.id
+            ) {
+                resetChat();
+            }
+
+
+            alert(
+                "グループから退会しました。"
+            );
+
+        } catch (error) {
+
+            console.error(error);
+
+            alert(
+                "退会に失敗しました。"
+            );
         }
-
-        console.log("⑥ チャットを開く処理完了");
-
-    } catch (error) {
-        console.error("チャットを開くエラー:", error);
-
-        alert(
-            "チャットを開けませんでした。\n\n" +
-            "エラー内容:\n" +
-            (error.message || error)
-        );
     }
 }
 
 
-// ==================================================
-// グループ選択
-// ==================================================
+/* =========================================================
+   友達チャット選択
+========================================================= */
+
+async function selectFriend(
+    friendName
+) {
+
+    const friend =
+        friendsData.find(
+            item =>
+                item.friendName ===
+                friendName
+        );
+
+
+    selectedChat =
+        friendName;
+
+    selectedChatType =
+        "friend";
+
+    selectedFriendshipId =
+        friend?.friendshipId ||
+        await ensureFriendshipId(
+            friendName
+        );
+
+
+    if (chatHeader) {
+        chatHeader.textContent =
+            friendName;
+    }
+
+
+    if (messageInput) {
+
+        messageInput.disabled =
+            false;
+
+        messageInput.placeholder =
+            `${friendName}にメッセージ`;
+    }
+
+
+    if (sendButton) {
+        sendButton.disabled =
+            false;
+    }
+
+
+    cancelReply();
+
+    listenMessages();
+
+    await markFriendMessagesAsRead();
+
+    await renderCurrentMessages();
+}
+
+
+/* =========================================================
+   グループ選択
+========================================================= */
 
 async function selectGroup(
     groupId
@@ -3044,38 +2285,41 @@ async function selectGroup(
         null;
 
 
-    chatHeader.textContent =
-        `👥 ${group.name}`;
+    if (chatHeader) {
+        chatHeader.textContent =
+            `👥 ${group.name}`;
+    }
 
 
-    messageInput.disabled =
-        false;
+    if (messageInput) {
 
-    sendButton.disabled =
-        false;
+        messageInput.disabled =
+            false;
+
+        messageInput.placeholder =
+            `${group.name}にメッセージ`;
+    }
 
 
-    messageInput.placeholder =
-        `${group.name}にメッセージ`;
+    if (sendButton) {
+        sendButton.disabled =
+            false;
+    }
 
 
     cancelReply();
 
-
     listenMessages();
-
 
     await markGroupMessagesAsRead();
 
-
-    renderCurrentMessages();
-
+    await renderCurrentMessages();
 }
 
 
-// ==================================================
-// チャットリセット
-// ==================================================
+/* =========================================================
+   チャットリセット
+========================================================= */
 
 function resetChat() {
 
@@ -3089,44 +2333,54 @@ function resetChat() {
         null;
 
 
-    chatHeader.textContent =
-        "相手を選択してください";
+    if (chatHeader) {
+        chatHeader.textContent =
+            "相手を選択してください";
+    }
 
 
-    messagesElement.innerHTML =
-        "";
+    if (messagesElement) {
+        messagesElement.innerHTML =
+            "";
+    }
 
 
-    messageInput.disabled =
-        true;
+    if (messageInput) {
 
-    sendButton.disabled =
-        true;
+        messageInput.disabled =
+            true;
+
+        messageInput.value =
+            "";
+
+        messageInput.placeholder =
+            "友達またはグループを選択してください";
+    }
 
 
-    messageInput.value =
-        "";
-
-
-    messageInput.placeholder =
-        "友達またはグループを選択してください";
+    if (sendButton) {
+        sendButton.disabled =
+            true;
+    }
 
 
     cancelReply();
-
 }
 
 
-// ==================================================
-// メッセージ監視
-// ==================================================
+/* =========================================================
+   メッセージ監視
+========================================================= */
 
 function listenMessages() {
 
     if (unsubscribeMessages) {
-
         unsubscribeMessages();
+    }
 
+
+    if (!selectedChat) {
+        return;
     }
 
 
@@ -3161,19 +2415,30 @@ function listenMessages() {
                     messages
                 );
 
+            },
+            error => {
+
+                console.error(
+                    "メッセージ監視エラー:",
+                    error
+                );
             }
         );
-
 }
 
 
-// ==================================================
-// メッセージ表示
-// ==================================================
+/* =========================================================
+   メッセージ表示
+========================================================= */
 
 function renderMessages(
     allMessages
 ) {
+
+    if (!messagesElement) {
+        return;
+    }
+
 
     let filtered = [];
 
@@ -3187,26 +2452,33 @@ function renderMessages(
             allMessages.filter(
                 message => {
 
-                    const pair =
+                    const samePair =
                         (
-                            message.sender === username &&
-                            message.receiver === selectedChat
+                            message.sender ===
+                                username &&
+                            message.receiver ===
+                                selectedChat
                         ) ||
                         (
-                            message.sender === selectedChat &&
-                            message.receiver === username
+                            message.sender ===
+                                selectedChat &&
+                            message.receiver ===
+                                username
                         );
 
 
                     return (
-                        pair &&
-                        message.friendshipId ===
-                            selectedFriendshipId
+                        samePair &&
+                        (
+                            !selectedFriendshipId ||
+                            message.friendshipId ===
+                                selectedFriendshipId
+                        ) &&
+                        message.chatType !==
+                            "group"
                     );
-
                 }
             );
-
     }
 
 
@@ -3223,7 +2495,6 @@ function renderMessages(
                     message.chatId ===
                         selectedChat
             );
-
     }
 
 
@@ -3244,17 +2515,21 @@ function renderMessages(
 
     messagesElement.scrollTop =
         messagesElement.scrollHeight;
-
 }
 
 
-// ==================================================
-// 1メッセージ
-// ==================================================
+/* =========================================================
+   1メッセージ表示
+========================================================= */
 
 function renderSingleMessage(
     message
 ) {
+
+    if (!messagesElement) {
+        return;
+    }
+
 
     const row =
         document.createElement(
@@ -3263,7 +2538,8 @@ function renderSingleMessage(
 
 
     const mine =
-        message.sender === username;
+        message.sender ===
+        username;
 
 
     row.className =
@@ -3285,7 +2561,8 @@ function renderSingleMessage(
 
 
     if (
-        selectedChatType === "group" &&
+        selectedChatType ===
+            "group" &&
         !mine
     ) {
 
@@ -3294,19 +2571,15 @@ function renderSingleMessage(
                 "div"
             );
 
-
         sender.className =
             "message-sender";
 
-
         sender.textContent =
-            message.sender;
-
+            message.sender || "";
 
         bubble.appendChild(
             sender
         );
-
     }
 
 
@@ -3317,19 +2590,15 @@ function renderSingleMessage(
                 "div"
             );
 
-
         reply.className =
             "message-reply";
-
 
         reply.textContent =
             `↩ ${message.replyToText}`;
 
-
         bubble.appendChild(
             reply
         );
-
     }
 
 
@@ -3337,7 +2606,6 @@ function renderSingleMessage(
         document.createElement(
             "div"
         );
-
 
     text.className =
         "message-text";
@@ -3355,7 +2623,6 @@ function renderSingleMessage(
 
         text.textContent =
             message.text || "";
-
     }
 
 
@@ -3364,11 +2631,41 @@ function renderSingleMessage(
     );
 
 
+    if (
+        message.imageData &&
+        !message.deleted
+    ) {
+
+        const image =
+            document.createElement(
+                "img"
+            );
+
+        image.src =
+            message.imageData;
+
+        image.alt =
+            "送信された画像";
+
+        image.style.maxWidth =
+            "240px";
+
+        image.style.borderRadius =
+            "12px";
+
+        image.style.marginTop =
+            "8px";
+
+        bubble.appendChild(
+            image
+        );
+    }
+
+
     const time =
         document.createElement(
             "div"
         );
-
 
     time.className =
         "message-time";
@@ -3390,7 +2687,6 @@ function renderSingleMessage(
                     minute: "2-digit"
                 }
             );
-
     }
 
 
@@ -3406,19 +2702,15 @@ function renderSingleMessage(
                 "div"
             );
 
-
         reaction.className =
             "message-reaction";
-
 
         reaction.textContent =
             message.reaction;
 
-
         bubble.appendChild(
             reaction
         );
-
     }
 
 
@@ -3429,7 +2721,6 @@ function renderSingleMessage(
                 "div"
             );
 
-
         actions.className =
             "message-actions";
 
@@ -3439,9 +2730,11 @@ function renderSingleMessage(
                 "button"
             );
 
-
         replyButton.textContent =
             "↩";
+
+        replyButton.title =
+            "返信";
 
 
         replyButton.addEventListener(
@@ -3458,9 +2751,11 @@ function renderSingleMessage(
                 "button"
             );
 
-
         reactionButton.textContent =
             "❤️";
+
+        reactionButton.title =
+            "リアクション";
 
 
         reactionButton.addEventListener(
@@ -3476,7 +2771,6 @@ function renderSingleMessage(
             replyButton
         );
 
-
         actions.appendChild(
             reactionButton
         );
@@ -3489,9 +2783,11 @@ function renderSingleMessage(
                     "button"
                 );
 
-
             deleteButton.textContent =
                 "🗑️";
+
+            deleteButton.title =
+                "送信取り消し";
 
 
             deleteButton.addEventListener(
@@ -3506,14 +2802,12 @@ function renderSingleMessage(
             actions.appendChild(
                 deleteButton
             );
-
         }
 
 
         bubble.appendChild(
             actions
         );
-
     }
 
 
@@ -3525,13 +2819,12 @@ function renderSingleMessage(
     messagesElement.appendChild(
         row
     );
-
 }
 
 
-// ==================================================
-// 送信
-// ==================================================
+/* =========================================================
+   メッセージ送信
+========================================================= */
 
 sendButton?.addEventListener(
     "click",
@@ -3544,11 +2837,19 @@ messageInput?.addEventListener(
     event => {
 
         if (
-            event.key === "Enter"
+            event.key ===
+            "Enter"
         ) {
 
-            sendMessage();
+            if (
+                event.shiftKey
+            ) {
+                return;
+            }
 
+            event.preventDefault();
+
+            sendMessage();
         }
 
     }
@@ -3558,10 +2859,13 @@ messageInput?.addEventListener(
 async function sendMessage() {
 
     const text =
-        messageInput.value.trim();
+        messageInput?.value.trim();
 
 
-    if (!text) {
+    if (
+        !text &&
+        !selectedChat
+    ) {
         return;
     }
 
@@ -3576,6 +2880,11 @@ async function sendMessage() {
     }
 
 
+    if (!text) {
+        return;
+    }
+
+
     try {
 
         const messageData = {
@@ -3583,8 +2892,7 @@ async function sendMessage() {
             sender:
                 username,
 
-            text:
-                text,
+            text,
 
             createdAt:
                 serverTimestamp(),
@@ -3594,7 +2902,6 @@ async function sendMessage() {
 
             readBy:
                 [username]
-
         };
 
 
@@ -3611,7 +2918,6 @@ async function sendMessage() {
 
             messageData.friendshipId =
                 selectedFriendshipId;
-
         }
 
 
@@ -3625,7 +2931,6 @@ async function sendMessage() {
 
             messageData.chatId =
                 selectedChat;
-
         }
 
 
@@ -3635,8 +2940,8 @@ async function sendMessage() {
                 replyingMessage.id;
 
             messageData.replyToText =
-                replyingMessage.text || "";
-
+                replyingMessage.text ||
+                "";
         }
 
 
@@ -3652,36 +2957,180 @@ async function sendMessage() {
         messageInput.value =
             "";
 
-
         cancelReply();
 
 
-        setTimeout(
-            () => {
-
-                messagesElement.scrollTop =
-                    messagesElement.scrollHeight;
-
-            },
-            100
-        );
-
     } catch (error) {
 
-        console.error(error);
+        console.error(
+            "メッセージ送信エラー:",
+            error
+        );
 
         alert(
             "メッセージ送信に失敗しました。"
         );
-
     }
-
 }
 
 
-// ==================================================
-// 返信
-// ==================================================
+/* =========================================================
+   画像送信
+========================================================= */
+
+const imageButton =
+    document.getElementById(
+        "imageButton"
+    );
+
+const imageInput =
+    document.getElementById(
+        "imageInput"
+    );
+
+
+imageButton?.addEventListener(
+    "click",
+    () => {
+        imageInput?.click();
+    }
+);
+
+
+imageInput?.addEventListener(
+    "change",
+    () => {
+
+        const file =
+            imageInput.files?.[0];
+
+        if (!file) {
+            return;
+        }
+
+
+        if (!selectedChat) {
+
+            alert(
+                "先にチャットを選択してください。"
+            );
+
+            imageInput.value =
+                "";
+
+            return;
+        }
+
+
+        if (!file.type.startsWith("image/")) {
+
+            alert(
+                "画像ファイルを選択してください。"
+            );
+
+            imageInput.value =
+                "";
+
+            return;
+        }
+
+
+        const reader =
+            new FileReader();
+
+
+        reader.onload =
+            async () => {
+
+                try {
+
+                    const messageData = {
+
+                        sender:
+                            username,
+
+                        text:
+                            "",
+
+                        imageData:
+                            reader.result,
+
+                        createdAt:
+                            serverTimestamp(),
+
+                        deleted:
+                            false,
+
+                        readBy:
+                            [username]
+                    };
+
+
+                    if (
+                        selectedChatType ===
+                        "friend"
+                    ) {
+
+                        messageData.receiver =
+                            selectedChat;
+
+                        messageData.chatType =
+                            "friend";
+
+                        messageData.friendshipId =
+                            selectedFriendshipId;
+                    }
+
+
+                    if (
+                        selectedChatType ===
+                        "group"
+                    ) {
+
+                        messageData.chatType =
+                            "group";
+
+                        messageData.chatId =
+                            selectedChat;
+                    }
+
+
+                    await addDoc(
+                        collection(
+                            db,
+                            "messages"
+                        ),
+                        messageData
+                    );
+
+
+                } catch (error) {
+
+                    console.error(
+                        "画像送信エラー:",
+                        error
+                    );
+
+                    alert(
+                        "画像の送信に失敗しました。"
+                    );
+                }
+
+
+                imageInput.value =
+                    "";
+            };
+
+
+        reader.readAsDataURL(file);
+
+    }
+);
+
+
+/* =========================================================
+   返信
+========================================================= */
 
 function startReply(
     message
@@ -3699,13 +3148,12 @@ function startReply(
     if (replyText) {
 
         replyText.textContent =
-            message.text || "";
-
+            message.text ||
+            "画像";
     }
 
 
-    messageInput.focus();
-
+    messageInput?.focus();
 }
 
 
@@ -3727,18 +3175,15 @@ function cancelReply() {
 
 
     if (replyText) {
-
         replyText.textContent =
             "";
-
     }
-
 }
 
 
-// ==================================================
-// メッセージ削除
-// ==================================================
+/* =========================================================
+   メッセージ削除
+========================================================= */
 
 async function deleteMessage(
     messageId
@@ -3765,26 +3210,28 @@ async function deleteMessage(
             ),
             {
                 deleted: true,
-                text: ""
+                text: "",
+                imageData: null
             }
         );
 
     } catch (error) {
 
-        console.error(error);
+        console.error(
+            "メッセージ削除エラー:",
+            error
+        );
 
         alert(
             "メッセージ削除に失敗しました。"
         );
-
     }
-
 }
 
 
-// ==================================================
-// リアクション
-// ==================================================
+/* =========================================================
+   リアクション
+========================================================= */
 
 async function addReaction(
     messageId
@@ -3805,177 +3252,226 @@ async function addReaction(
 
     } catch (error) {
 
-        console.error(error);
-
+        console.error(
+            "リアクションエラー:",
+            error
+        );
     }
-
 }
 
 
-// ==================================================
-// 友達既読
-// ==================================================
+/* =========================================================
+   友達チャット既読
+========================================================= */
 
 async function markFriendMessagesAsRead() {
 
-    if (!selectedFriendshipId) {
+    if (
+        !selectedFriendshipId ||
+        !selectedChat ||
+        !username
+    ) {
         return;
     }
 
 
-    const snapshot =
-        await getDocs(
-            collection(
-                db,
-                "messages"
-            )
+    try {
+
+        const q =
+            query(
+                collection(
+                    db,
+                    "messages"
+                ),
+                where(
+                    "friendshipId",
+                    "==",
+                    selectedFriendshipId
+                )
+            );
+
+
+        const snapshot =
+            await getDocs(q);
+
+
+        const batch =
+            writeBatch(db);
+
+
+        let count =
+            0;
+
+
+        snapshot.forEach(
+            item => {
+
+                const data =
+                    item.data();
+
+
+                const incoming =
+                    data.sender ===
+                        selectedChat &&
+                    data.receiver ===
+                        username;
+
+
+                const read =
+                    Array.isArray(
+                        data.readBy
+                    )
+                        ? data.readBy
+                        : [];
+
+
+                if (
+                    incoming &&
+                    !read.includes(
+                        username
+                    )
+                ) {
+
+                    batch.update(
+                        item.ref,
+                        {
+                            readBy: [
+                                ...read,
+                                username
+                            ]
+                        }
+                    );
+
+                    count++;
+                }
+
+            }
         );
 
 
-    const batch =
-        writeBatch(db);
-
-
-    let count =
-        0;
-
-
-    snapshot.forEach(
-        item => {
-
-            const data =
-                item.data();
-
-
-            const isIncoming =
-                data.sender ===
-                    selectedChat &&
-                data.receiver ===
-                    username;
-
-
-            if (
-                isIncoming &&
-                data.friendshipId ===
-                    selectedFriendshipId &&
-                !(data.readBy || [])
-                    .includes(
-                        username
-                    )
-            ) {
-
-                batch.update(
-                    item.ref,
-                    {
-                        readBy: [
-                            ...(data.readBy || []),
-                            username
-                        ]
-                    }
-                );
-
-
-                count++;
-
-            }
-
+        if (count > 0) {
+            await batch.commit();
         }
-    );
 
+    } catch (error) {
 
-    if (count > 0) {
-
-        await batch.commit();
-
+        console.error(
+            "既読更新エラー:",
+            error
+        );
     }
-
 }
 
 
-// ==================================================
-// グループ既読
-// ==================================================
+/* =========================================================
+   グループ既読
+========================================================= */
 
 async function markGroupMessagesAsRead() {
 
-    if (!selectedChat) {
+    if (
+        !selectedChat ||
+        !username
+    ) {
         return;
     }
 
 
-    const snapshot =
-        await getDocs(
-            collection(
-                db,
-                "messages"
-            )
+    try {
+
+        const q =
+            query(
+                collection(
+                    db,
+                    "messages"
+                ),
+                where(
+                    "chatType",
+                    "==",
+                    "group"
+                ),
+                where(
+                    "chatId",
+                    "==",
+                    selectedChat
+                )
+            );
+
+
+        const snapshot =
+            await getDocs(q);
+
+
+        const batch =
+            writeBatch(db);
+
+
+        let count =
+            0;
+
+
+        snapshot.forEach(
+            item => {
+
+                const data =
+                    item.data();
+
+
+                const read =
+                    Array.isArray(
+                        data.readBy
+                    )
+                        ? data.readBy
+                        : [];
+
+
+                if (
+                    data.sender !==
+                        username &&
+                    !read.includes(
+                        username
+                    )
+                ) {
+
+                    batch.update(
+                        item.ref,
+                        {
+                            readBy: [
+                                ...read,
+                                username
+                            ]
+                        }
+                    );
+
+                    count++;
+                }
+
+            }
         );
 
 
-    const batch =
-        writeBatch(db);
-
-
-    let count =
-        0;
-
-
-    snapshot.forEach(
-        item => {
-
-            const data =
-                item.data();
-
-
-            if (
-                data.chatType ===
-                    "group" &&
-                data.chatId ===
-                    selectedChat &&
-                !(data.readBy || [])
-                    .includes(
-                        username
-                    )
-            ) {
-
-                batch.update(
-                    item.ref,
-                    {
-                        readBy: [
-                            ...(data.readBy || []),
-                            username
-                        ]
-                    }
-                );
-
-
-                count++;
-
-            }
-
+        if (count > 0) {
+            await batch.commit();
         }
-    );
 
+    } catch (error) {
 
-    if (count > 0) {
-
-        await batch.commit();
-
+        console.error(
+            "グループ既読エラー:",
+            error
+        );
     }
-
 }
 
 
-// ==================================================
-// 未読監視
-// ==================================================
+/* =========================================================
+   全メッセージ監視
+========================================================= */
 
 function listenAllMessages() {
 
     if (unsubscribeAllMessages) {
-
         unsubscribeAllMessages();
-
     }
 
 
@@ -3999,15 +3495,21 @@ function listenAllMessages() {
 
                 updateUnreadBadges();
 
+            },
+            error => {
+
+                console.error(
+                    "未読監視エラー:",
+                    error
+                );
             }
         );
-
 }
 
 
-// ==================================================
-// 未読バッジ
-// ==================================================
+/* =========================================================
+   未読バッジ
+========================================================= */
 
 async function updateUnreadBadges() {
 
@@ -4083,17 +3585,21 @@ async function updateUnreadBadges() {
                                     friend.friendshipId;
 
 
+                            const read =
+                                Array.isArray(
+                                    message.readBy
+                                ) &&
+                                message.readBy.includes(
+                                    username
+                                );
+
+
                             if (
                                 incoming &&
                                 sameChat &&
-                                !(message.readBy || [])
-                                    .includes(
-                                        username
-                                    )
+                                !read
                             ) {
-
                                 count++;
-
                             }
 
                         }
@@ -4114,7 +3620,6 @@ async function updateUnreadBadges() {
 
                         badge.style.display =
                             "none";
-
                     }
 
                 }
@@ -4122,16 +3627,17 @@ async function updateUnreadBadges() {
 
     } catch (error) {
 
-        console.error(error);
-
+        console.error(
+            "未読更新エラー:",
+            error
+        );
     }
-
 }
 
 
-// ==================================================
-// 現在のチャット再描画
-// ==================================================
+/* =========================================================
+   現在のチャット再描画
+========================================================= */
 
 async function renderCurrentMessages() {
 
@@ -4140,40 +3646,1562 @@ async function renderCurrentMessages() {
     }
 
 
-    const snapshot =
-        await getDocs(
-            collection(
-                db,
-                "messages"
-            )
+    try {
+
+        const snapshot =
+            await getDocs(
+                collection(
+                    db,
+                    "messages"
+                )
+            );
+
+
+        const messages =
+            snapshot.docs.map(
+                item => ({
+                    id: item.id,
+                    ...item.data()
+                })
+            );
+
+
+        renderMessages(
+            messages
         );
 
+    } catch (error) {
 
-    const messages =
-        snapshot.docs.map(
-            item => ({
-                id: item.id,
-                ...item.data()
-            })
+        console.error(
+            "チャット再描画エラー:",
+            error
         );
-
-
-    renderMessages(
-        messages
-    );
-
+    }
 }
 
 
-// ==================================================
-// 初期状態
-// ==================================================
+/* =========================================================
+   通知
+========================================================= */
+
+async function initializeNotifications() {
+
+    if (
+        notificationsInitialized
+    ) {
+        return;
+    }
+
+
+    if (
+        typeof Notification ===
+            "undefined" ||
+        !(
+            "serviceWorker" in
+            navigator
+        )
+    ) {
+
+        console.log(
+            "この環境では通知に対応していません。"
+        );
+
+        return;
+    }
+
+
+    try {
+
+        messaging =
+            getMessaging(
+                firebaseApp
+            );
+
+
+        const registration =
+            await navigator
+                .serviceWorker
+                .register(
+                    "./firebase-messaging-sw.js"
+                );
+
+
+        const permission =
+            await Notification.requestPermission();
+
+
+        if (
+            permission !==
+            "granted"
+        ) {
+
+            console.log(
+                "通知が許可されませんでした。"
+            );
+
+            return;
+        }
+
+
+        const token =
+            await getToken(
+                messaging,
+                {
+                    vapidKey:
+                        VAPID_PUBLIC_KEY,
+
+                    serviceWorkerRegistration:
+                        registration
+                }
+            );
+
+
+        if (
+            token &&
+            username
+        ) {
+
+            await setDoc(
+                doc(
+                    db,
+                    "users",
+                    username
+                ),
+                {
+                    fcmToken:
+                        token,
+
+                    notificationsEnabled:
+                        true
+                },
+                {
+                    merge: true
+                }
+            );
+        }
+
+
+        onMessage(
+            messaging,
+            payload => {
+
+                console.log(
+                    "通知を受信:",
+                    payload
+                );
+
+
+                const title =
+                    payload
+                        .notification
+                        ?.title ||
+                    "ゆうChat";
+
+
+                const body =
+                    payload
+                        .notification
+                        ?.body ||
+                    "新しいメッセージが届きました。";
+
+
+                if (
+                    Notification.permission ===
+                    "granted"
+                ) {
+
+                    new Notification(
+                        title,
+                        {
+                            body
+                        }
+                    );
+                }
+
+            }
+        );
+
+
+        notificationsInitialized =
+            true;
+
+
+    } catch (error) {
+
+        console.error(
+            "通知初期化エラー:",
+            error
+        );
+    }
+}
+
+
+/* =========================================================
+   =========================================================
+   レースシステム
+   =========================================================
+========================================================= */
+
+
+/* ---------------------------------------------------------
+   固定10頭
+--------------------------------------------------------- */
+
+const RACE_HORSES = [
+
+    {
+        number: 1,
+        name: "ユウウキ",
+        reading: "勇気"
+    },
+
+    {
+        number: 2,
+        name: "ユウセイ",
+        reading: "流星"
+    },
+
+    {
+        number: 3,
+        name: "ユウヤン",
+        reading: "夕闇"
+    },
+
+    {
+        number: 4,
+        name: "ユウチュウ",
+        reading: "宇宙"
+    },
+
+    {
+        number: 5,
+        name: "ユウガ",
+        reading: "優雅"
+    },
+
+    {
+        number: 6,
+        name: "ユウバエ",
+        reading: "夕映え"
+    },
+
+    {
+        number: 7,
+        name: "ユウキカイ",
+        reading: "勇気カイ"
+    },
+
+    {
+        number: 8,
+        name: "ユウマグレ",
+        reading: "まぐれ"
+    },
+
+    {
+        number: 9,
+        name: "ユウジン",
+        reading: "友人"
+    },
+
+    {
+        number: 10,
+        name: "ユウシャ",
+        reading: "勇者"
+    }
+
+];
+
+
+/* ---------------------------------------------------------
+   レース状態
+--------------------------------------------------------- */
+
+const RACE_START_SCORE =
+    1000;
+
+let currentRaceId =
+    null;
+
+let currentRaceScore =
+    RACE_START_SCORE;
+
+let raceResult =
+    null;
+
+let raceTimer =
+    null;
+
+
+/* ---------------------------------------------------------
+   決定論的乱数
+--------------------------------------------------------- */
+
+function seededRandom(
+    seed
+) {
+
+    let value =
+        Number(seed) >>> 0;
+
+
+    value =
+        (
+            value *
+                1664525 +
+            1013904223
+        ) >>> 0;
+
+
+    return value /
+        4294967296;
+}
+
+
+/* ---------------------------------------------------------
+   レースシード
+--------------------------------------------------------- */
+
+function createRaceSeed(
+    raceId
+) {
+
+    let hash =
+        2166136261;
+
+
+    for (
+        let i = 0;
+        i < raceId.length;
+        i++
+    ) {
+
+        hash ^=
+            raceId.charCodeAt(i);
+
+        hash =
+            Math.imul(
+                hash,
+                16777619
+            );
+    }
+
+
+    return hash >>> 0;
+}
+
+
+/* ---------------------------------------------------------
+   レースID
+--------------------------------------------------------- */
+
+function makeRaceId() {
+
+    return (
+        getJapanDateString() +
+        "_" +
+        Date.now()
+    );
+}
+
+
+/* ---------------------------------------------------------
+   レース結果生成
+--------------------------------------------------------- */
+
+function generateRaceResult(
+    raceId
+) {
+
+    const seed =
+        createRaceSeed(
+            raceId
+        );
+
+
+    const horses =
+        RACE_HORSES.map(
+            horse => {
+
+                const random =
+                    seededRandom(
+                        seed +
+                        horse.number * 7919
+                    );
+
+
+                const condition =
+                    Math.floor(
+                        random * 31
+                    ) - 15;
+
+
+                const ability =
+                    70 +
+                    Math.floor(
+                        seededRandom(
+                            seed +
+                            horse.number *
+                                15485863
+                        ) * 31
+                    );
+
+
+                const score =
+                    ability +
+                    condition +
+                    Math.floor(
+                        seededRandom(
+                            seed +
+                            horse.number *
+                                32452843
+                        ) * 20
+                    );
+
+
+                return {
+                    ...horse,
+
+                    ability,
+
+                    condition,
+
+                    score
+                };
+
+            }
+        );
+
+
+    horses.sort(
+        (a, b) =>
+            b.score -
+            a.score
+    );
+
+
+    return {
+
+        raceId,
+
+        date:
+            getJapanDateString(),
+
+        seed,
+
+        finishOrder:
+            horses.map(
+                horse =>
+                    horse.number
+            ),
+
+        horses
+
+    };
+}
+
+
+/* ---------------------------------------------------------
+   レース初期化
+--------------------------------------------------------- */
+
+async function initializeRaceSystem() {
+
+    const raceView =
+        document.getElementById(
+            "derbyView"
+        );
+
+
+    if (!raceView) {
+        return;
+    }
+
+
+    await loadCurrentRace();
+
+    await loadRaceRankings();
+
+    renderRaceInfo();
+}
+
+
+/* ---------------------------------------------------------
+   現在のレース
+--------------------------------------------------------- */
+
+async function loadCurrentRace() {
+
+    if (!username) {
+        return;
+    }
+
+
+    /*
+       版①では日付ごとの共通レースを使用。
+       同じ日なら同じ結果を見る。
+    */
+
+    const today =
+        getJapanDateString();
+
+
+    const raceRef =
+        doc(
+            db,
+            "derbyRaces",
+            today
+        );
+
+
+    try {
+
+        const snapshot =
+            await getDoc(
+                raceRef
+            );
+
+
+        if (
+            snapshot.exists()
+        ) {
+
+            raceResult =
+                snapshot.data();
+
+            currentRaceId =
+                raceResult.raceId;
+
+        } else {
+
+            currentRaceId =
+                `${today}_daily`;
+
+            raceResult =
+                generateRaceResult(
+                    currentRaceId
+                );
+
+
+            await setDoc(
+                raceRef,
+                raceResult
+            );
+        }
+
+
+        currentRaceScore =
+            RACE_START_SCORE;
+
+
+        await createRaceScoreRecord();
+
+
+        renderRaceInfo();
+
+
+    } catch (error) {
+
+        console.error(
+            "レース読み込みエラー:",
+            error
+        );
+    }
+}
+
+
+/* ---------------------------------------------------------
+   レーススコア記録
+--------------------------------------------------------- */
+
+async function createRaceScoreRecord() {
+
+    if (
+        !username ||
+        !currentRaceId
+    ) {
+        return;
+    }
+
+
+    const ref =
+        doc(
+            db,
+            "raceScores",
+            `${currentRaceId}_${username}`
+        );
+
+
+    try {
+
+        const existing =
+            await getDoc(ref);
+
+
+        if (
+            existing.exists()
+        ) {
+
+            const data =
+                existing.data();
+
+
+            currentRaceScore =
+                Number(
+                    data.finalScore ??
+                    RACE_START_SCORE
+                );
+
+
+            return;
+        }
+
+
+        await setDoc(
+            ref,
+            {
+                username,
+
+                raceId:
+                    currentRaceId,
+
+                date:
+                    getJapanDateString(),
+
+                startScore:
+                    RACE_START_SCORE,
+
+                finalScore:
+                    RACE_START_SCORE,
+
+                scoreChange:
+                    0,
+
+                finished:
+                    false,
+
+                createdAt:
+                    serverTimestamp(),
+
+                updatedAt:
+                    serverTimestamp()
+            }
+        );
+
+
+    } catch (error) {
+
+        console.error(
+            "レーススコア作成エラー:",
+            error
+        );
+    }
+}
+
+
+/* ---------------------------------------------------------
+   レーススコア変更
+--------------------------------------------------------- */
+
+async function changeRaceScore(
+    amount
+) {
+
+    if (
+        !username ||
+        !currentRaceId
+    ) {
+        return;
+    }
+
+
+    const ref =
+        doc(
+            db,
+            "raceScores",
+            `${currentRaceId}_${username}`
+        );
+
+
+    try {
+
+        await runTransaction(
+            db,
+            async transaction => {
+
+                const snapshot =
+                    await transaction.get(
+                        ref
+                    );
+
+
+                if (
+                    !snapshot.exists()
+                ) {
+
+                    transaction.set(
+                        ref,
+                        {
+                            username,
+
+                            raceId:
+                                currentRaceId,
+
+                            date:
+                                getJapanDateString(),
+
+                            startScore:
+                                RACE_START_SCORE,
+
+                            finalScore:
+                                RACE_START_SCORE +
+                                amount,
+
+                            scoreChange:
+                                amount,
+
+                            finished:
+                                false,
+
+                            createdAt:
+                                serverTimestamp(),
+
+                            updatedAt:
+                                serverTimestamp()
+                        }
+                    );
+
+
+                    return;
+                }
+
+
+                const data =
+                    snapshot.data();
+
+
+                const oldScore =
+                    Number(
+                        data.finalScore ??
+                        RACE_START_SCORE
+                    );
+
+
+                const newScore =
+                    oldScore +
+                    Number(amount);
+
+
+                transaction.update(
+                    ref,
+                    {
+                        finalScore:
+                            newScore,
+
+                        scoreChange:
+                            newScore -
+                            RACE_START_SCORE,
+
+                        updatedAt:
+                            serverTimestamp()
+                    }
+                );
+
+            }
+        );
+
+
+        currentRaceScore +=
+            Number(amount);
+
+
+        updateRaceScoreDisplay();
+
+
+    } catch (error) {
+
+        console.error(
+            "レーススコア更新エラー:",
+            error
+        );
+    }
+}
+
+
+/* ---------------------------------------------------------
+   レース終了
+--------------------------------------------------------- */
+
+async function finishRaceScore() {
+
+    if (
+        !username ||
+        !currentRaceId
+    ) {
+        return;
+    }
+
+
+    const ref =
+        doc(
+            db,
+            "raceScores",
+            `${currentRaceId}_${username}`
+        );
+
+
+    try {
+
+        await updateDoc(
+            ref,
+            {
+                finalScore:
+                    currentRaceScore,
+
+                scoreChange:
+                    currentRaceScore -
+                    RACE_START_SCORE,
+
+                finished:
+                    true,
+
+                finishedAt:
+                    serverTimestamp(),
+
+                updatedAt:
+                    serverTimestamp()
+            }
+        );
+
+
+        await loadRaceRankings();
+
+
+    } catch (error) {
+
+        console.error(
+            "レース終了処理エラー:",
+            error
+        );
+    }
+}
+
+
+/* ---------------------------------------------------------
+   スコア表示
+--------------------------------------------------------- */
+
+function updateRaceScoreDisplay() {
+
+    const elements = [
+
+        document.getElementById(
+            "raceScore"
+        ),
+
+        document.getElementById(
+            "currentRaceScore"
+        )
+
+    ];
+
+
+    elements.forEach(
+        element => {
+
+            if (!element) {
+                return;
+            }
+
+
+            element.textContent =
+                currentRaceScore
+                    .toLocaleString();
+
+        }
+    );
+}
+
+
+/* ---------------------------------------------------------
+   レース情報表示
+--------------------------------------------------------- */
+
+function renderRaceInfo() {
+
+    if (!raceResult) {
+        return;
+    }
+
+
+    const raceInfo =
+        document.getElementById(
+            "raceInfo"
+        );
+
+
+    if (!raceInfo) {
+        return;
+    }
+
+
+    raceInfo.innerHTML =
+        "";
+
+
+    const title =
+        document.createElement(
+            "h3"
+        );
+
+    title.textContent =
+        "今回のレース結果";
+
+
+    raceInfo.appendChild(
+        title
+    );
+
+
+    const order =
+        document.createElement(
+            "div"
+        );
+
+
+    order.className =
+        "race-result-order";
+
+
+    raceResult.finishOrder
+        .forEach(
+            (number, index) => {
+
+                const horse =
+                    RACE_HORSES.find(
+                        item =>
+                            item.number ===
+                            number
+                    );
+
+
+                if (!horse) {
+                    return;
+                }
+
+
+                const row =
+                    document.createElement(
+                        "div"
+                    );
+
+
+                row.className =
+                    "race-result-row";
+
+
+                row.textContent =
+                    `${index + 1}着　${horse.number}番 ${horse.name}`;
+
+
+                order.appendChild(
+                    row
+                );
+
+            }
+        );
+
+
+    raceInfo.appendChild(
+        order
+    );
+
+
+    updateRaceScoreDisplay();
+}
+
+
+/* =========================================================
+   本日のランキング
+========================================================= */
+
+async function loadTodayRaceRanking() {
+
+    const element =
+        document.getElementById(
+            "raceTodayRanking"
+        );
+
+
+    if (!element) {
+        return;
+    }
+
+
+    try {
+
+        const today =
+            getJapanDateString();
+
+
+        const q =
+            query(
+                collection(
+                    db,
+                    "raceScores"
+                ),
+                where(
+                    "date",
+                    "==",
+                    today
+                )
+            );
+
+
+        const snapshot =
+            await getDocs(q);
+
+
+        const ranking =
+            {};
+
+
+        snapshot.forEach(
+            item => {
+
+                const data =
+                    item.data();
+
+
+                if (!data.username) {
+                    return;
+                }
+
+
+                if (
+                    !ranking[
+                        data.username
+                    ]
+                ) {
+
+                    ranking[
+                        data.username
+                    ] = 0;
+                }
+
+
+                ranking[
+                    data.username
+                ] +=
+                    Number(
+                        data.scoreChange ||
+                        0
+                    );
+
+            }
+        );
+
+
+        const sorted =
+            Object.entries(
+                ranking
+            ).sort(
+                (a, b) =>
+                    b[1] -
+                    a[1]
+            );
+
+
+        renderRaceRanking(
+            element,
+            sorted,
+            "本日のランキング"
+        );
+
+
+    } catch (error) {
+
+        console.error(
+            "本日ランキングエラー:",
+            error
+        );
+    }
+}
+
+
+/* =========================================================
+   今までのランキング
+========================================================= */
+
+async function loadAllTimeRaceRanking() {
+
+    const element =
+        document.getElementById(
+            "raceAllTimeRanking"
+        );
+
+
+    if (!element) {
+        return;
+    }
+
+
+    try {
+
+        const snapshot =
+            await getDocs(
+                collection(
+                    db,
+                    "raceScores"
+                )
+            );
+
+
+        const ranking =
+            {};
+
+
+        snapshot.forEach(
+            item => {
+
+                const data =
+                    item.data();
+
+
+                if (!data.username) {
+                    return;
+                }
+
+
+                if (
+                    !ranking[
+                        data.username
+                    ]
+                ) {
+
+                    ranking[
+                        data.username
+                    ] = 0;
+                }
+
+
+                ranking[
+                    data.username
+                ] +=
+                    Number(
+                        data.scoreChange ||
+                        0
+                    );
+
+            }
+        );
+
+
+        const sorted =
+            Object.entries(
+                ranking
+            ).sort(
+                (a, b) =>
+                    b[1] -
+                    a[1]
+            );
+
+
+        renderRaceRanking(
+            element,
+            sorted,
+            "今までのランキング"
+        );
+
+
+    } catch (error) {
+
+        console.error(
+            "歴代ランキングエラー:",
+            error
+        );
+    }
+}
+
+
+/* =========================================================
+   ランキング読み込み
+========================================================= */
+
+async function loadRaceRankings() {
+
+    await Promise.all([
+        loadTodayRaceRanking(),
+        loadAllTimeRaceRanking()
+    ]);
+}
+
+
+/* =========================================================
+   ランキング表示
+========================================================= */
+
+function renderRaceRanking(
+    container,
+    ranking,
+    title
+) {
+
+    if (!container) {
+        return;
+    }
+
+
+    container.innerHTML =
+        "";
+
+
+    const titleElement =
+        document.createElement(
+            "div"
+        );
+
+    titleElement.className =
+        "race-ranking-title";
+
+    titleElement.textContent =
+        title;
+
+
+    container.appendChild(
+        titleElement
+    );
+
+
+    if (
+        ranking.length === 0
+    ) {
+
+        const empty =
+            document.createElement(
+                "div"
+            );
+
+        empty.className =
+            "empty-state";
+
+        empty.textContent =
+            "まだレース記録がありません。";
+
+
+        container.appendChild(
+            empty
+        );
+
+        return;
+    }
+
+
+    ranking.forEach(
+        ([name, score], index) => {
+
+            const item =
+                document.createElement(
+                    "div"
+                );
+
+            item.className =
+                "race-ranking-item";
+
+
+            const number =
+                document.createElement(
+                    "div"
+                );
+
+            number.className =
+                "race-ranking-number";
+
+            number.textContent =
+                index + 1;
+
+
+            const usernameElement =
+                document.createElement(
+                    "div"
+                );
+
+            usernameElement.className =
+                "race-ranking-name";
+
+            usernameElement.textContent =
+                name;
+
+
+            const scoreElement =
+                document.createElement(
+                    "div"
+                );
+
+            scoreElement.className =
+                "race-ranking-score";
+
+
+            const numericScore =
+                Number(score);
+
+
+            scoreElement.textContent =
+                numericScore >= 0
+                    ? `+${numericScore.toLocaleString()}`
+                    : numericScore.toLocaleString();
+
+
+            item.appendChild(
+                number
+            );
+
+            item.appendChild(
+                usernameElement
+            );
+
+            item.appendChild(
+                scoreElement
+            );
+
+
+            container.appendChild(
+                item
+            );
+
+        }
+    );
+}
+
+
+/* =========================================================
+   レースランキングタブ
+========================================================= */
+
+window.showRaceRanking =
+    function(type) {
+
+        const today =
+            document.getElementById(
+                "raceTodayRanking"
+            );
+
+
+        const all =
+            document.getElementById(
+                "raceAllTimeRanking"
+            );
+
+
+        const tabs =
+            document.querySelectorAll(
+                ".ranking-tab"
+            );
+
+
+        if (
+            type ===
+            "today"
+        ) {
+
+            if (today) {
+                today.style.display =
+                    "block";
+            }
+
+            if (all) {
+                all.style.display =
+                    "none";
+            }
+
+
+            tabs[0]?.classList.add(
+                "active"
+            );
+
+            tabs[1]?.classList.remove(
+                "active"
+            );
+
+        } else {
+
+            if (today) {
+                today.style.display =
+                    "none";
+            }
+
+            if (all) {
+                all.style.display =
+                    "block";
+            }
+
+
+            tabs[0]?.classList.remove(
+                "active"
+            );
+
+            tabs[1]?.classList.add(
+                "active"
+            );
+        }
+
+
+        loadRaceRankings();
+
+    };
+
+
+/* =========================================================
+   レースを開始
+========================================================= */
+
+window.startDailyRace =
+    async function() {
+
+        if (!raceResult) {
+
+            await loadCurrentRace();
+        }
+
+
+        const track =
+            document.getElementById(
+                "raceTrack"
+            );
+
+
+        if (!track) {
+            return;
+        }
+
+
+        track.innerHTML =
+            "";
+
+
+        raceResult.finishOrder
+            .forEach(
+                (number, index) => {
+
+                    const horse =
+                        RACE_HORSES.find(
+                            item =>
+                                item.number ===
+                                number
+                        );
+
+
+                    if (!horse) {
+                        return;
+                    }
+
+
+                    const lane =
+                        document.createElement(
+                            "div"
+                        );
+
+                    lane.className =
+                        "race-lane";
+
+
+                    lane.innerHTML =
+                        `
+                        <span class="horse-number">
+                            ${horse.number}
+                        </span>
+
+                        <span class="race-horse">
+                            🐎 ${horse.name}
+                        </span>
+                        `;
+
+
+                    track.appendChild(
+                        lane
+                    );
+
+
+                    setTimeout(
+                        () => {
+
+                            lane.classList.add(
+                                "finished"
+                            );
+
+                        },
+                        1000 +
+                        index * 500
+                    );
+
+                }
+            );
+
+
+        setTimeout(
+            () => {
+
+                finishRaceScore();
+
+            },
+            6000
+        );
+
+    };
+
+
+/* =========================================================
+   外部から使えるようにする
+========================================================= */
+
+window.startRaceScore =
+    async function(
+        raceId = null
+    ) {
+
+        currentRaceId =
+            raceId ||
+            makeRaceId();
+
+
+        currentRaceScore =
+            RACE_START_SCORE;
+
+
+        await createRaceScoreRecord();
+
+        updateRaceScoreDisplay();
+
+    };
+
+
+window.changeRaceScore =
+    changeRaceScore;
+
+
+window.finishRaceScore =
+    finishRaceScore;
+
+
+window.loadRaceRankings =
+    loadRaceRankings;
+
+
+window.loadTodayRaceRanking =
+    loadTodayRaceRanking;
+
+
+window.loadAllTimeRaceRanking =
+    loadAllTimeRaceRanking;
+
+
+/* =========================================================
+   初期状態
+========================================================= */
 
 if (messageInput) {
 
     messageInput.disabled =
         true;
-
 }
 
 
@@ -4181,5 +5209,9 @@ if (sendButton) {
 
     sendButton.disabled =
         true;
-
 }
+
+
+console.log(
+    "ゆうChat script.js 版① 起動完了"
+);
