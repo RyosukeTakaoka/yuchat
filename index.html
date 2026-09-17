@@ -3,25 +3,47 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    >
 
     <title>ゆうChat</title>
 
-    <link rel="stylesheet" href="./style.css">
+    <meta
+        name="theme-color"
+        content="#ffffff"
+    >
 
-    <meta name="theme-color" content="#ffffff">
+    <meta
+        name="description"
+        content="友達とつながるチャットアプリ ゆうChat"
+    >
+
+    <link
+        rel="manifest"
+        href="./manifest.json"
+    >
+
+    <link
+        rel="stylesheet"
+        href="./style.css"
+    >
 </head>
+
 
 <body>
 
 
-<!-- =========================
+<!-- ==================================================
      ログイン画面
-========================= -->
+================================================== -->
 
-<div
+<section
     id="loginScreen"
-    class="login-screen">
+    class="login-screen"
+>
 
     <div class="login-card">
 
@@ -37,39 +59,42 @@
             友達とつながろう
         </p>
 
+
         <button
             id="googleLoginButton"
-            class="login-button google-login">
-
+            class="primary"
+        >
             🔵 Googleでログイン
-
         </button>
+
 
         <button
             id="guestLoginButton"
-            class="login-button guest-login">
-
+            class="secondary"
+        >
             👤 ゲストとして始める
-
         </button>
+
 
         <div
             id="loginError"
-            class="login-error">
-        </div>
+            class="error"
+        ></div>
 
     </div>
 
-</div>
+</section>
 
 
-<!-- =========================
-     ゲスト名設定画面
-========================= -->
 
-<div
+<!-- ==================================================
+     名前設定画面
+================================================== -->
+
+<section
     id="nameScreen"
-    class="login-screen hidden">
+    class="login-screen hidden"
+>
 
     <div class="login-card">
 
@@ -85,72 +110,89 @@
             ゆうChatで使う名前を入力してください
         </p>
 
+
         <input
             id="nameInput"
-            class="name-input"
             type="text"
             maxlength="20"
-            placeholder="名前を入力">
+            placeholder="名前を入力"
+            autocomplete="off"
+        >
+
 
         <button
             id="startChatButton"
-            class="login-button guest-login">
-
+            class="secondary"
+        >
             ゆうChatを始める
-
         </button>
+
 
         <div
             id="nameError"
-            class="login-error">
-        </div>
+            class="error"
+        ></div>
 
     </div>
 
-</div>
+</section>
 
 
-<!-- =========================
+
+<!-- ==================================================
      アプリ本体
-========================= -->
+================================================== -->
 
 <div
     id="app"
-    class="app hidden">
+    class="app hidden"
+>
 
-    <!-- ヘッダー -->
+
+    <!-- ==================================================
+         ヘッダー
+    ================================================== -->
 
     <header class="header">
+
+
+        <!-- プロフィール -->
 
         <div class="profile-area">
 
             <label
                 for="profileImageInput"
-                class="profile-image-button">
+                class="avatar"
+            >
 
                 <img
                     id="myProfileImage"
-                    src=""
-                    alt="プロフィール画像">
+                    alt="プロフィール画像"
+                >
 
                 <span
-                    id="profileImagePlaceholder">
+                    id="profileImagePlaceholder"
+                >
                     👤
                 </span>
 
             </label>
 
+
             <input
                 id="profileImageInput"
                 type="file"
                 accept="image/*"
-                hidden>
+                hidden
+            >
 
-            <div class="profile-info">
+
+            <div>
 
                 <button
                     id="changeNameButton"
-                    class="name-button">
+                    class="name-button"
+                >
 
                     <span id="myName">
                         ゆうた
@@ -160,12 +202,12 @@
 
                 </button>
 
+
                 <div
                     id="status"
-                    class="status">
-
+                    class="status"
+                >
                     🟢 オンライン
-
                 </div>
 
             </div>
@@ -173,30 +215,62 @@
         </div>
 
 
+
+        <!-- ヘッダーボタン -->
+
         <div class="header-buttons">
+
+
+            <!-- ユーコイン -->
+
+            <button
+                id="coinButton"
+                class="coin"
+                type="button"
+            >
+
+                🪙
+
+                <span id="coinBalance">
+                    0
+                </span>
+
+            </button>
+
+
+            <!-- 友達追加 -->
 
             <button
                 id="addFriendButton"
-                class="header-button">
-
+                class="icon-btn"
+                type="button"
+                title="友達追加"
+            >
                 ＋
-
             </button>
+
+
+            <!-- グループ作成 -->
 
             <button
                 id="createGroupButton"
-                class="header-button">
-
+                class="icon-btn"
+                type="button"
+                title="グループ作成"
+            >
                 👥
-
             </button>
+
+
+            <!-- ログアウト -->
 
             <button
                 id="logoutButton"
-                class="header-button logout-button">
-
+                class="icon-btn"
+                type="button"
+                title="ログアウト"
+            >
                 🚪
-
             </button>
 
         </div>
@@ -204,114 +278,650 @@
     </header>
 
 
-    <!-- 友達 -->
 
-    <section class="friends-section">
+    <!-- ==================================================
+         メインタブ
+    ================================================== -->
 
-        <div class="section-title">
-            友達
-        </div>
-
-        <div
-            id="friendsList"
-            class="friends-list">
-        </div>
-
-    </section>
+    <nav class="tabs">
 
 
-    <!-- グループ -->
-
-    <section class="groups-section">
-
-        <div class="section-title">
-            グループ
-        </div>
-
-        <div
-            id="groupsList"
-            class="groups-list">
-        </div>
-
-    </section>
+        <button
+            data-view="chat"
+            class="active"
+            type="button"
+        >
+            💬
+            <span>
+                チャット
+            </span>
+        </button>
 
 
-    <!-- チャットヘッダー -->
+        <button
+            data-view="derby"
+            type="button"
+        >
+            🏇
+            <span>
+                ダービー
+            </span>
+        </button>
 
-    <div
-        id="chatHeader"
-        class="chat-header">
 
-        相手を選択してください
+        <button
+            data-view="games"
+            type="button"
+        >
+            🎮
+            <span>
+                ゲーム
+            </span>
+        </button>
 
-    </div>
+
+        <button
+            data-view="mypage"
+            type="button"
+        >
+            👤
+            <span>
+                マイページ
+            </span>
+        </button>
+
+    </nav>
 
 
-    <!-- 返信 -->
 
-    <div
-        id="replyBar"
-        class="reply-bar hidden">
+    <!-- ==================================================
+         ワークスペース
+    ================================================== -->
 
-        <div>
+    <div class="workspace">
 
-            <div class="reply-title">
-                返信中
+
+        <!-- ==================================================
+             左サイドバー
+        ================================================== -->
+
+        <aside class="sidebar">
+
+
+            <!-- 友達 -->
+
+            <div class="section-title">
+                友達
             </div>
+
 
             <div
-                id="replyText"
-                class="reply-text">
+                id="friendsList"
+                class="chips"
+            ></div>
+
+
+
+            <!-- グループ -->
+
+            <div class="section-title">
+                グループ
             </div>
 
-        </div>
 
-        <button
-            id="cancelReplyButton">
+            <div
+                id="groupsList"
+                class="chips"
+            ></div>
 
-            ×
-
-        </button>
-
-    </div>
+        </aside>
 
 
-    <!-- メッセージ -->
 
-    <main
-        id="messages"
-        class="messages">
-    </main>
+        <!-- ==================================================
+             メインコンテンツ
+        ================================================== -->
+
+        <main class="content">
 
 
-    <!-- 入力 -->
+            <!-- ==================================================
+                 チャット
+            ================================================== -->
 
-    <div class="input-area">
+            <section
+                id="chatView"
+                class="view active"
+            >
 
-        <input
-            id="messageInput"
-            type="text"
-            placeholder="友達またはグループを選択してください"
-            autocomplete="off"
-            disabled>
 
-        <button
-            id="sendButton"
-            disabled>
+                <!-- チャットヘッダー -->
 
-            送信
+                <div
+                    id="chatHeader"
+                    class="chat-header"
+                >
+                    相手を選択してください
+                </div>
 
-        </button>
+
+
+                <!-- 返信中 -->
+
+                <div
+                    id="replyBar"
+                    class="reply-bar hidden"
+                >
+
+                    <div>
+
+                        <b>
+                            返信中
+                        </b>
+
+                        <div id="replyText"></div>
+
+                    </div>
+
+
+                    <button
+                        id="cancelReplyButton"
+                        type="button"
+                    >
+                        ×
+                    </button>
+
+                </div>
+
+
+
+                <!-- メッセージ一覧 -->
+
+                <main
+                    id="messages"
+                    class="messages"
+                ></main>
+
+
+
+                <!-- メッセージ入力 -->
+
+                <div class="input-area">
+
+
+                    <!-- 画像送信 -->
+
+                    <button
+                        id="imageButton"
+                        class="small-btn"
+                        type="button"
+                        title="画像を送る"
+                    >
+                        🖼️
+                    </button>
+
+
+                    <input
+                        id="imageInput"
+                        type="file"
+                        accept="image/*"
+                        hidden
+                    >
+
+
+                    <!-- メッセージ -->
+
+                    <input
+                        id="messageInput"
+                        type="text"
+                        placeholder="メッセージを入力"
+                        autocomplete="off"
+                        disabled
+                    >
+
+
+                    <!-- 送信 -->
+
+                    <button
+                        id="sendButton"
+                        type="button"
+                        disabled
+                    >
+                        送信
+                    </button>
+
+                </div>
+
+            </section>
+
+
+
+            <!-- ==================================================
+                 ゆうダービー
+            ================================================== -->
+
+            <section
+                id="derbyView"
+                class="view"
+            >
+
+                <div class="panel">
+
+
+                    <!-- タイトル -->
+
+                    <div class="panel-head">
+
+                        <div>
+
+                            <h2>
+                                🏇 ゆうダービー
+                            </h2>
+
+                            <p>
+                                毎日15:02開催・締切14:52
+                            </p>
+
+                            <small>
+                                ※ゲーム内ユーコインのみ
+                            </small>
+
+                        </div>
+
+
+                        <div
+                            id="derbyCountdown"
+                            class="countdown"
+                        >
+                            --:--
+                        </div>
+
+                    </div>
+
+
+
+                    <!-- レース場 -->
+
+                    <div
+                        id="raceTrack"
+                        class="race-track"
+                    ></div>
+
+
+
+                    <!-- レース情報 -->
+
+                    <div
+                        id="raceInfo"
+                        class="race-info"
+                    ></div>
+
+
+
+                    <!-- オッズ -->
+
+                    <div class="bet-box">
+
+                        <h3>
+                            オッズ
+                        </h3>
+
+
+                        <div
+                            id="oddsList"
+                            class="odds-list"
+                        ></div>
+
+                    </div>
+
+
+
+                    <!-- 投票 -->
+
+                    <div class="bet-box">
+
+                        <h3>
+                            投票
+                        </h3>
+
+
+                        <div class="bet-controls">
+
+
+                            <label>
+                                券種
+                            </label>
+
+
+                            <select
+                                id="betType"
+                            >
+
+                                <option value="win">
+                                    単勝
+                                </option>
+
+                                <option value="place">
+                                    複勝
+                                </option>
+
+                                <option value="quinella">
+                                    馬連
+                                </option>
+
+                                <option value="trio">
+                                    三連複
+                                </option>
+
+                                <option value="trifecta">
+                                    三連単
+                                </option>
+
+                            </select>
+
+
+
+                            <label>
+                                馬番号
+                            </label>
+
+
+                            <input
+                                id="betHorses"
+                                type="text"
+                                placeholder="例：1 または 1,2,3"
+                                autocomplete="off"
+                            >
+
+
+
+                            <label>
+                                投票額
+                            </label>
+
+
+                            <input
+                                id="betAmount"
+                                type="number"
+                                min="10"
+                                step="10"
+                                value="10"
+                            >
+
+
+
+                            <button
+                                id="betButton"
+                                type="button"
+                            >
+                                🪙 投票する
+                            </button>
+
+                        </div>
+
+                    </div>
+
+
+
+                    <!-- 馬情報 -->
+
+                    <div class="bet-box">
+
+                        <h3>
+                            🐎 出走馬
+                        </h3>
+
+
+                        <div
+                            id="horseList"
+                            class="horse-list"
+                        ></div>
+
+                    </div>
+
+                </div>
+
+            </section>
+
+
+
+            <!-- ==================================================
+                 ゲーム
+            ================================================== -->
+
+            <section
+                id="gamesView"
+                class="view"
+            >
+
+                <div class="panel">
+
+
+                    <div class="panel-head">
+
+                        <div>
+
+                            <h2>
+                                🎮 リアルタイムゲーム
+                            </h2>
+
+                            <p>
+                                友達と同じルームで遊べます
+                            </p>
+
+                        </div>
+
+
+                        <button
+                            id="createGameRoom"
+                            type="button"
+                        >
+                            ＋ ルーム作成
+                        </button>
+
+                    </div>
+
+
+
+                    <!-- ゲーム種類 -->
+
+                    <div class="game-type-selector">
+
+
+                        <button
+                            class="game-type active"
+                            data-game="daifugo"
+                            type="button"
+                        >
+                            🃏 大富豪
+                        </button>
+
+
+                        <button
+                            class="game-type"
+                            data-game="othello"
+                            type="button"
+                        >
+                            ⚫ オセロ
+                        </button>
+
+
+                        <button
+                            class="game-type"
+                            data-game="shogi"
+                            type="button"
+                        >
+                            ♟️ 将棋
+                        </button>
+
+                    </div>
+
+
+
+                    <!-- ルーム一覧 -->
+
+                    <div
+                        id="gameRooms"
+                        class="room-list"
+                    ></div>
+
+
+
+                    <!-- ゲーム画面 -->
+
+                    <div
+                        id="gameArea"
+                        class="game-area"
+                    ></div>
+
+                </div>
+
+            </section>
+
+
+
+            <!-- ==================================================
+                 マイページ
+            ================================================== -->
+
+            <section
+                id="mypageView"
+                class="view"
+            >
+
+                <div class="panel">
+
+
+                    <h2>
+                        👤 マイページ
+                    </h2>
+
+
+
+                    <!-- コイン残高 -->
+
+                    <div class="coin-card">
+
+                        <span>
+                            現在のユーコイン
+                        </span>
+
+                        <strong>
+                            🪙
+                            <span id="myCoinLarge">
+                                0
+                            </span>
+                        </strong>
+
+                    </div>
+
+
+
+                    <!-- 統計 -->
+
+                    <div class="stats">
+
+
+                        <div>
+
+                            <b id="myBetCount">
+                                0
+                            </b>
+
+                            <span>
+                                投票回数
+                            </span>
+
+                        </div>
+
+
+                        <div>
+
+                            <b id="myHitCount">
+                                0
+                            </b>
+
+                            <span>
+                                的中回数
+                            </span>
+
+                        </div>
+
+
+                        <div>
+
+                            <b id="myProfit">
+                                0
+                            </b>
+
+                            <span>
+                                損益
+                            </span>
+
+                        </div>
+
+                    </div>
+
+
+
+                    <!-- コインランキング -->
+
+                    <h3>
+                        🏆 ユーコインランキング
+                    </h3>
+
+
+                    <div
+                        id="ranking"
+                        class="ranking"
+                    ></div>
+
+
+
+                    <!-- 投票履歴 -->
+
+                    <h3>
+                        📋 投票履歴
+                    </h3>
+
+
+                    <div
+                        id="history"
+                        class="history"
+                    ></div>
+
+                </div>
+
+            </section>
+
+
+        </main>
 
     </div>
 
 </div>
 
 
+
+<!-- ==================================================
+     モーダル
+================================================== -->
+
+<div
+    id="modal"
+    class="modal hidden"
+></div>
+
+
+
+<!-- ==================================================
+     JavaScript
+================================================== -->
+
 <script
     type="module"
-    src="./script.js">
-</script>
+    src="./script.js"
+></script>
 
 
 </body>
