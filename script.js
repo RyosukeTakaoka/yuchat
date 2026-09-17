@@ -75,7 +75,7 @@ import {
 ========================================================= */
 
 const firebaseConfig = {
-    apiKey: "AIzaSyDJFat47USzK6AaGuvj1dVjfELhRmH_2Tw",
+    apiKey: "AIzaSyDJFat47USz6KKaGuvj1dVjfELhRmH_2Tw",
     authDomain: "yuuchat-be666.firebaseapp.com",
     projectId: "yuuchat-be666",
     storageBucket: "yuuchat-be666.firebasestorage.app",
