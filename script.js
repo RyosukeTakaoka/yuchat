@@ -51,6 +51,7 @@ const auth = getAuth(firebaseApp);
 
 let currentUser = null;
 let username = null;
+let pendingRecovery = false;
 
 let friendsData = [];
 let groupsData = [];
@@ -87,11 +88,24 @@ const appElement = document.getElementById("app");
 
 const googleLoginButton = document.getElementById("googleLoginButton");
 const guestLoginButton = document.getElementById("guestLoginButton");
+const existingLoginButton = document.getElementById("existingLoginButton");
 const loginError = document.getElementById("loginError");
 
 const nameInput = document.getElementById("nameInput");
 const startChatButton = document.getElementById("startChatButton");
 const nameError = document.getElementById("nameError");
+
+const recoverScreen = document.getElementById("recoverScreen");
+const recoverStepText = document.getElementById("recoverStepText");
+const recoverAuthStep = document.getElementById("recoverAuthStep");
+const recoverGoogleButton = document.getElementById("recoverGoogleButton");
+const recoverGuestButton = document.getElementById("recoverGuestButton");
+const recoverNameStep = document.getElementById("recoverNameStep");
+const recoverUsernameInput = document.getElementById("recoverUsernameInput");
+const recoverConfirmButton = document.getElementById("recoverConfirmButton");
+const recoverNewAccountButton = document.getElementById("recoverNewAccountButton");
+const recoverError = document.getElementById("recoverError");
+const recoverBackButton = document.getElementById("recoverBackButton");
 
 const myName = document.getElementById("myName");
 const statusElement = document.getElementById("status");
@@ -184,6 +198,116 @@ guestLoginButton?.addEventListener("click", async () => {
   } catch (error) {
     console.error("ゲストログインエラー:", error);
     showError(loginError, "ゲストログインに失敗しました。");
+  }
+});
+
+/* =========================================================
+   ログイン（既存アカウントを探す）
+   ・パスワードは使わず、Firebase Authの uid が一致する場合のみ
+     そのユーザー名のアカウントを復元できる仕組み
+   ・他人のユーザー名を入力しても uid が一致しなければ復元できない
+========================================================= */
+
+function showRecoverAuthStep() {
+  loginScreen?.classList.add("hidden");
+  nameScreen?.classList.add("hidden");
+  recoverScreen?.classList.remove("hidden");
+  recoverAuthStep?.classList.remove("hidden");
+  recoverNameStep?.classList.add("hidden");
+  if (recoverStepText) recoverStepText.textContent = "まずはログイン方法を選んでください";
+  showError(recoverError, "");
+  if (recoverUsernameInput) recoverUsernameInput.value = "";
+}
+
+function showRecoverNameStepIfReady() {
+  if (pendingRecovery && currentUser) {
+    recoverAuthStep?.classList.add("hidden");
+    recoverNameStep?.classList.remove("hidden");
+    if (recoverStepText) recoverStepText.textContent = "以前使っていた名前を入力してください";
+  }
+}
+
+existingLoginButton?.addEventListener("click", () => {
+  pendingRecovery = true;
+  showRecoverAuthStep();
+});
+
+recoverGoogleButton?.addEventListener("click", async () => {
+  try {
+    showError(recoverError, "");
+    pendingRecovery = true;
+    await signInWithPopup(auth, new GoogleAuthProvider());
+    showRecoverNameStepIfReady();
+  } catch (error) {
+    console.error("Googleログインエラー:", error);
+    showError(recoverError, "ログインに失敗しました。");
+  }
+});
+
+recoverGuestButton?.addEventListener("click", async () => {
+  try {
+    showError(recoverError, "");
+    pendingRecovery = true;
+    await signInAnonymously(auth);
+    showRecoverNameStepIfReady();
+  } catch (error) {
+    console.error("ゲストログインエラー:", error);
+    showError(recoverError, "ゲストログインに失敗しました。");
+  }
+});
+
+recoverConfirmButton?.addEventListener("click", async () => {
+  const name = recoverUsernameInput?.value.trim();
+  showError(recoverError, "");
+
+  if (!name) return showError(recoverError, "名前を入力してください。");
+  if (!currentUser) return showError(recoverError, "ログインが完了していません。");
+
+  try {
+    recoverConfirmButton.disabled = true;
+    const userDoc = await getDoc(doc(db, "users", name));
+
+    if (!userDoc.exists()) {
+      showError(recoverError, "そのアカウントは見つかりませんでした。");
+      return;
+    }
+
+    if (userDoc.data().uid !== currentUser.uid) {
+      showError(recoverError, "このアカウントの持ち主ではないため、ログインできません。");
+      return;
+    }
+
+    username = name;
+    localStorage.setItem("yuuchat_username", username);
+    pendingRecovery = false;
+    await saveUserProfile();
+    showApp();
+  } catch (error) {
+    console.error("アカウント確認エラー:", error);
+    showError(recoverError, "確認中にエラーが発生しました。");
+  } finally {
+    recoverConfirmButton.disabled = false;
+  }
+});
+
+recoverNewAccountButton?.addEventListener("click", () => {
+  pendingRecovery = false;
+  recoverScreen?.classList.add("hidden");
+  if (currentUser) {
+    showNameScreen();
+  } else {
+    showRecoverAuthStep();
+  }
+});
+
+recoverBackButton?.addEventListener("click", async () => {
+  pendingRecovery = false;
+  recoverScreen?.classList.add("hidden");
+
+  if (currentUser && !username) {
+    try { await signOut(auth); } catch (error) { console.error("サインアウトエラー:", error); }
+  } else {
+    loginScreen?.classList.remove("hidden");
   }
 });
 
