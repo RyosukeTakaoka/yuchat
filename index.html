@@ -76,6 +76,14 @@
         </button>
 
 
+        <button
+            id="existingLoginButton"
+            class="secondary"
+        >
+            🔑 ログイン（アカウントを探す）
+        </button>
+
+
         <div
             id="loginError"
             class="error"
@@ -140,6 +148,95 @@
 
 
 <!-- ==================================================
+     アカウントを探す画面（既存ログイン）
+================================================== -->
+
+<section
+    id="recoverScreen"
+    class="login-screen hidden"
+>
+
+    <div class="login-card">
+
+        <div class="login-logo">
+            🔑
+        </div>
+
+        <h1>
+            アカウントを探す
+        </h1>
+
+        <p id="recoverStepText">
+            まずはログイン方法を選んでください
+        </p>
+
+
+        <div id="recoverAuthStep">
+
+            <button
+                id="recoverGoogleButton"
+                class="primary"
+            >
+                🔵 Googleでログイン
+            </button>
+
+            <button
+                id="recoverGuestButton"
+                class="secondary"
+            >
+                👤 ゲストとして続ける（このデバイスのみ）
+            </button>
+
+        </div>
+
+
+        <div id="recoverNameStep" class="hidden">
+
+            <input
+                id="recoverUsernameInput"
+                type="text"
+                maxlength="20"
+                placeholder="以前使っていた名前を入力"
+                autocomplete="off"
+            >
+
+            <button
+                id="recoverConfirmButton"
+                class="secondary"
+            >
+                アカウントを探す
+            </button>
+
+            <button
+                id="recoverNewAccountButton"
+                class="secondary"
+            >
+                見つからない場合は新しく始める
+            </button>
+
+        </div>
+
+
+        <div
+            id="recoverError"
+            class="error"
+        ></div>
+
+
+        <button
+            id="recoverBackButton"
+            class="secondary"
+        >
+            戻る
+        </button>
+
+    </div>
+
+</section>
+
+
+
+<!-- ==================================================
      アプリ本体
 ================================================== -->
 
@@ -168,6 +265,7 @@
                 <img
                     id="myProfileImage"
                     alt="プロフィール画像"
+                    class="hidden"
                 >
 
                 <span
