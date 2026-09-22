@@ -319,13 +319,20 @@ onAuthStateChanged(auth, async (user) => {
   if (!user) {
     currentUser = null;
     username = null;
+    pendingRecovery = false;
     loginScreen?.classList.remove("hidden");
     nameScreen?.classList.add("hidden");
+    recoverScreen?.classList.add("hidden");
     appElement?.classList.add("hidden");
     return;
   }
 
   currentUser = user;
+
+  if (pendingRecovery) {
+    showRecoverNameStepIfReady();
+    return;
+  }
 
   const savedName = localStorage.getItem("yuuchat_username");
   let suggestedName = savedName || user.displayName || null;
@@ -770,7 +777,7 @@ function renderFriends() {
     name.textContent = friend.friend;
 
     const status = document.createElement("div");
-    status.className = "friend-status";
+    status.className = `friend-status ${friend.online ? "online" : "offline"}`;
     status.textContent = friend.online ? "オンライン" : "オフライン";
 
     info.append(name, status);
@@ -784,6 +791,12 @@ function renderFriends() {
 
     friendsList.appendChild(item);
   });
+
+  /* 選択中の友達チャットのヘッダーも最新のオンライン状態に更新 */
+  if (selectedChatType === "friend" && selectedChat) {
+    const current = friendsData.find((f) => f.friend === selectedChat);
+    if (current) renderChatHeaderForFriend(current);
+  }
 }
 
 addFriendButton?.addEventListener("click", async () => {
@@ -892,6 +905,11 @@ function renderGroups() {
     item.addEventListener("click", () => selectGroupChat(group));
     groupsList.appendChild(item);
   });
+
+  if (selectedChatType === "group" && selectedChat) {
+    const current = groupsData.find((g) => g.id === selectedChat);
+    if (current) renderChatHeaderForGroup(current);
+  }
 }
 
 createGroupButton?.addEventListener("click", async () => {
@@ -920,6 +938,78 @@ createGroupButton?.addEventListener("click", async () => {
 });
 
 /* =========================================================
+   アバター表示（友達一覧・チャットヘッダー・メッセージで共通利用）
+========================================================= */
+
+function buildAvatarElement(photo, fallbackText, extraClass) {
+  const el = document.createElement("div");
+  el.className = extraClass ? `avatar-circle ${extraClass}` : "avatar-circle";
+  if (photo) {
+    el.style.backgroundImage = `url("${photo}")`;
+  } else {
+    el.textContent = (fallbackText || "?").trim().charAt(0).toUpperCase() || "?";
+  }
+  return el;
+}
+
+/* =========================================================
+   チャットヘッダー（アバター＋名前＋状態）
+========================================================= */
+
+function renderChatHeaderForFriend(friend) {
+  if (!chatHeader || !friend) return;
+  chatHeader.innerHTML = "";
+
+  const wrap = document.createElement("div");
+  wrap.className = "chat-header-profile";
+
+  const avatar = buildAvatarElement(friend.photo, friend.friend, "avatar-circle--md");
+
+  const info = document.createElement("div");
+  info.className = "chat-header-info";
+
+  const name = document.createElement("div");
+  name.className = "chat-header-name";
+  name.textContent = friend.friend;
+
+  const status = document.createElement("div");
+  status.className = `chat-header-status ${friend.online ? "online" : "offline"}`;
+  status.textContent = friend.online ? "オンライン" : "オフライン";
+
+  info.append(name, status);
+  wrap.append(avatar, info);
+  chatHeader.appendChild(wrap);
+}
+
+function renderChatHeaderForGroup(group) {
+  if (!chatHeader || !group) return;
+  chatHeader.innerHTML = "";
+
+  const wrap = document.createElement("div");
+  wrap.className = "chat-header-profile";
+
+  const avatar = document.createElement("div");
+  avatar.className = "avatar-circle avatar-circle--md avatar-circle--group";
+  avatar.textContent = "👥";
+
+  const info = document.createElement("div");
+  info.className = "chat-header-info";
+
+  const name = document.createElement("div");
+  name.className = "chat-header-name";
+  name.textContent = group.name || "グループ";
+
+  const count = Array.isArray(group.members) ? group.members.length : 0;
+  const status = document.createElement("div");
+  status.className = "chat-header-status";
+  status.textContent = `メンバー ${count}人`;
+
+  info.append(name, status);
+  wrap.append(avatar, info);
+  chatHeader.appendChild(wrap);
+}
+
+/* =========================================================
    チャット選択
 ========================================================= */
 
@@ -930,7 +1020,7 @@ function selectFriendChat(friend) {
   selectedFriendshipId = friend.friendshipId;
   replyingMessage = null;
   updateReplyBar();
-  if (chatHeader) chatHeader.textContent = friend.friend;
+  renderChatHeaderForFriend(friend);
   if (messageInput) messageInput.disabled = false;
   if (sendButton) sendButton.disabled = false;
   renderFriends();
@@ -945,7 +1035,7 @@ function selectGroupChat(group) {
   selectedFriendshipId = null;
   replyingMessage = null;
   updateReplyBar();
-  if (chatHeader) chatHeader.textContent = group.name || "グループ";
+  renderChatHeaderForGroup(group);
   if (messageInput) messageInput.disabled = false;
   if (sendButton) sendButton.disabled = false;
   renderFriends();
@@ -1031,17 +1121,28 @@ function renderSelectedMessages(allMessages) {
     return;
   }
 
-  messages.forEach(renderMessage);
+  messages.forEach((message, index) => {
+    const row = renderMessage(message);
+    if (index === messages.length - 1) row.classList.add("new");
+    messagesElement.appendChild(row);
+  });
+
   requestAnimationFrame(() => { messagesElement.scrollTop = messagesElement.scrollHeight; });
 }
 
 function renderMessage(message) {
-  const wrapper = document.createElement("div");
-  wrapper.className = "message-wrapper";
+  const row = document.createElement("div");
+  row.className = "message-row";
 
   const senderName = message.sender || "";
   const isMine = senderName === username;
-  wrapper.classList.add(isMine ? "mine" : "other");
+  row.classList.add(isMine ? "mine" : "other");
+
+  /* 相手のメッセージにはアバターを表示（自分のメッセージは表示しない） */
+  if (!isMine) {
+    const avatar = buildAvatarElement(message.senderPhoto, senderName, "avatar-circle--sm");
+    row.appendChild(avatar);
+  }
 
   const bubble = document.createElement("div");
   bubble.className = "message-bubble";
@@ -1054,14 +1155,14 @@ function renderMessage(message) {
   } else {
     if (selectedChatType === "group" && senderName && senderName !== username) {
       const sender = document.createElement("div");
-      sender.className = "message-sender";
+      sender.className = "message-user";
       sender.textContent = senderName;
       bubble.appendChild(sender);
     }
 
     if (message.replyTo) {
       const reply = document.createElement("div");
-      reply.className = "message-reply";
+      reply.className = "reply-preview";
       reply.textContent = message.replyTo.text || "返信";
       bubble.appendChild(reply);
     }
@@ -1094,7 +1195,7 @@ function renderMessage(message) {
   }
 
   const meta = document.createElement("div");
-  meta.className = "message-meta";
+  meta.className = "message-time";
   meta.textContent = formatMessageTime(message.createdAt);
   bubble.appendChild(meta);
 
@@ -1125,8 +1226,8 @@ function renderMessage(message) {
     bubble.appendChild(actions);
   }
 
-  wrapper.appendChild(bubble);
-  messagesElement.appendChild(wrapper);
+  row.appendChild(bubble);
+  return row;
 }
 
 function formatMessageTime(timestamp) {
@@ -1186,7 +1287,7 @@ function renderReactions(bubble, message) {
     if (!Array.isArray(users) || users.length === 0) return;
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "reaction-item";
+    button.className = "reaction";
     button.textContent = `${emoji} ${users.length}`;
     button.addEventListener("click", () => toggleReaction(message, emoji));
     container.appendChild(button);
@@ -1282,6 +1383,7 @@ async function sendMessage() {
     const messageData = {
       sender: username,
       senderUid: currentUser.uid,
+      senderPhoto: localStorage.getItem("yuuchat_profile_image") || "",
       text,
       image,
       type: selectedChatType,
