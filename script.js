@@ -78,6 +78,19 @@ let selectedDaifugoCards = [];
 let selectedShogiPiece = null;
 let currentShogiPlayer = "sente";
 
+/* ゆうダービー関連の状態 */
+let myCoins = 0;
+let unsubscribeMyCoins = null;
+let unsubscribeTodayRace = null;
+let unsubscribeWinBets = null;
+let unsubscribeMyBetHistory = null;
+let raceCountdownTimer = null;
+let currentWinPool = {};
+let bettingLocked = false;
+let todayRaceResult = null;
+let todayRaceGenerationAttempted = false;
+let lastCheckedRaceId = null;
+
 /* =========================================================
    HTML要素取得（index.htmlのidと一致させています）
 ========================================================= */
@@ -158,6 +171,8 @@ const myBetCount = document.getElementById("myBetCount");
 const myHitCount = document.getElementById("myHitCount");
 const myProfit = document.getElementById("myProfit");
 const rankingEl = document.getElementById("ranking");
+const historyEl = document.getElementById("history");
+const coinBalanceEl = document.getElementById("coinBalance");
 
 /* =========================================================
    共通関数
@@ -448,6 +463,8 @@ async function startApp() {
     listenFriends();
     listenGroups();
     initializeNotifications();
+    listenMyCoins();
+    listenMyBetHistory();
     try { initializeSafeRace(); } catch (e) { console.error("レース初期化エラー:", e); }
   } catch (error) {
     console.error("アプリ起動エラー:", error);
@@ -1608,6 +1625,16 @@ logoutButton?.addEventListener("click", async () => {
     if (unsubscribeMessages) { unsubscribeMessages(); unsubscribeMessages = null; }
     if (unsubscribeGameRooms) { unsubscribeGameRooms(); unsubscribeGameRooms = null; }
     if (unsubscribeCurrentGame) { unsubscribeCurrentGame(); unsubscribeCurrentGame = null; }
+    if (unsubscribeMyCoins) { unsubscribeMyCoins(); unsubscribeMyCoins = null; }
+    if (unsubscribeTodayRace) { unsubscribeTodayRace(); unsubscribeTodayRace = null; }
+    if (unsubscribeWinBets) { unsubscribeWinBets(); unsubscribeWinBets = null; }
+    if (unsubscribeMyBetHistory) { unsubscribeMyBetHistory(); unsubscribeMyBetHistory = null; }
+    if (raceCountdownTimer) { clearInterval(raceCountdownTimer); raceCountdownTimer = null; }
+    lastCheckedRaceId = null;
+    todayRaceResult = null;
+    todayRaceGenerationAttempted = false;
+    currentWinPool = {};
+    myCoins = 0;
 
     await updateOnlineStatus(false);
     await signOut(auth);
@@ -1625,50 +1652,49 @@ async function loadMyPage() {
   if (!currentUser) return;
   if (myName) myName.textContent = username || "ゲスト";
   if (statusElement) statusElement.textContent = "🟢 オンライン";
-  if (myCoinLarge) myCoinLarge.textContent = "—";
 
   await loadMyPageStats();
-  await loadSafeRaceRanking();
+  await loadCoinRanking();
 }
 
 async function loadMyPageStats() {
   if (!currentUser || !username) return;
 
   try {
-    const snapshot = await getDocs(collection(db, "messages"));
-    let sentCount = 0;
+    const snapshot = await getDocs(query(collection(db, "raceBets"), where("uid", "==", currentUser.uid)));
+    let betCount = 0;
+    let hitCount = 0;
+    let profit = 0;
+
     snapshot.forEach((item) => {
-      const data = item.data();
-      if (data.sender === username && !data.deleted) sentCount++;
+      const bet = item.data();
+      betCount++;
+      if (bet.settled) {
+        if (bet.win) hitCount++;
+        profit += (bet.payout || 0) - Number(bet.amount || 0);
+      }
     });
 
-    if (myBetCount) myBetCount.textContent = sentCount;
-    if (myHitCount) myHitCount.textContent = "—";
-    if (myProfit) myProfit.textContent = "—";
+    if (myBetCount) myBetCount.textContent = betCount;
+    if (myHitCount) myHitCount.textContent = hitCount;
+    if (myProfit) myProfit.textContent = (profit >= 0 ? "+" : "") + profit;
   } catch (error) {
     console.error("マイページ統計エラー:", error);
   }
 }
 
-/* =========================================================
-   ゆうダービー（観戦用。賭け・コインは未実装のまま）
-========================================================= */
-
-async function loadSafeRaceRanking() {
+/* 「🏆 ユーコインランキング」の見出しに合わせ、実際のゆうcoin残高ランキングを表示 */
+async function loadCoinRanking() {
   if (!rankingEl) return;
   rankingEl.innerHTML = `<div class="loading">ランキングを読み込み中...</div>`;
 
   try {
-    const snapshot = await getDocs(collection(db, "raceParticipants"));
-    const counts = {};
+    const snapshot = await getDocs(query(collection(db, "users"), orderBy("coins", "desc")));
+    const list = snapshot.docs
+      .map((item) => ({ name: item.id, coins: item.data().coins }))
+      .filter((u) => typeof u.coins === "number")
+      .slice(0, 20);
 
-    snapshot.forEach((item) => {
-      const name = item.data().username;
-      if (!name) return;
-      counts[name] = (counts[name] || 0) + 1;
-    });
-
-    const list = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 20);
     rankingEl.innerHTML = "";
 
     if (list.length === 0) {
@@ -1676,14 +1702,14 @@ async function loadSafeRaceRanking() {
       return;
     }
 
-    list.forEach(([name, count], index) => {
+    list.forEach((user, index) => {
       const item = document.createElement("div");
       item.className = "ranking-item";
       item.innerHTML = `
         <div class="ranking-number">${index + 1}</div>
         <div class="ranking-info">
-          <div class="ranking-name">${escapeHTML(name)}</div>
-          <div class="ranking-score">観戦 ${count}回</div>
+          <div class="ranking-name">${escapeHTML(user.name)}</div>
+          <div class="ranking-score">🪙 ${user.coins}</div>
         </div>`;
       rankingEl.appendChild(item);
     });
@@ -1693,45 +1719,34 @@ async function loadSafeRaceRanking() {
   }
 }
 
-async function recordRaceParticipation(raceId) {
-  if (!currentUser || !username || !raceId) return;
-  try {
-    await setDoc(doc(db, "raceParticipants", `${raceId}_${currentUser.uid}`), {
-      username, uid: currentUser.uid, raceId, participatedAt: serverTimestamp()
-    }, { merge: true });
-  } catch (error) {
-    console.error("レース参加記録エラー:", error);
-  }
-}
+/* =========================================================
+   ゆうダービー：ゆうcoin・オッズ・投票・精算
+========================================================= */
+
+const YUU_START_COINS = 1000;
+const RACE_TAKEOUT_RATE = 0.8;
+const RACE_HOUR = 15;
+const RACE_MINUTE = 2;
+const RACE_CLOSE_MINUTES_BEFORE = 10;
 
 const SAFE_RACE_HORSES = [
-  { number: 1, name: "ユウウキ" }, { number: 2, name: "ユウセイ" },
-  { number: 3, name: "ユウヤン" }, { number: 4, name: "ユウチュウ" },
-  { number: 5, name: "ユウガ" }, { number: 6, name: "ユウバエ" },
-  { number: 7, name: "ユウキカイ" }, { number: 8, name: "ユウマグレ" },
-  { number: 9, name: "ユウジン" }, { number: 10, name: "ユウシャ" }
+  { number: 1, name: "ユウウキ", character: "気まぐれな逃げ馬", power: 6 },
+  { number: 2, name: "ユウセイ", character: "堅実な先行馬", power: 7 },
+  { number: 3, name: "ユウヤン", character: "末脚が鋭い差し馬", power: 8 },
+  { number: 4, name: "ユウチュウ", character: "スタミナ自慢の追込馬", power: 5 },
+  { number: 5, name: "ユウガ", character: "重賞実績もある実力馬", power: 9 },
+  { number: 6, name: "ユウバエ", character: "新人ながら期待の一頭", power: 4 },
+  { number: 7, name: "ユウキカイ", character: "安定感抜群のベテラン", power: 6 },
+  { number: 8, name: "ユウマグレ", character: "一発があるクセ馬", power: 3 },
+  { number: 9, name: "ユウジン", character: "人気先行のスター候補", power: 7 },
+  { number: 10, name: "ユウシャ", character: "底力のある大物", power: 8 }
 ];
 
-function generateSafeRaceResult() {
-  const result = SAFE_RACE_HORSES.map((h) => ({ ...h, random: Math.random() }));
-  result.sort((a, b) => b.random - a.random);
-  return result;
-}
+const BET_TYPE_NAMES = { win: "単勝", place: "複勝", quinella: "馬連", trio: "三連複", trifecta: "三連単" };
+const BET_TYPE_COUNT = { win: 1, place: 1, quinella: 2, trio: 3, trifecta: 3 };
 
-function renderSafeRaceTrack(result) {
-  if (!raceTrack) return;
-  raceTrack.innerHTML = "";
-
-  result.forEach((horse, index) => {
-    const lane = document.createElement("div");
-    lane.className = "race-lane";
-    lane.innerHTML = `<div class="horse-number">${horse.number}</div><div class="horse-body">${escapeHTML(horse.name)}</div>`;
-    raceTrack.appendChild(lane);
-
-    const body = lane.querySelector(".horse-body");
-    setTimeout(() => body.classList.add("running"), index * 100);
-  });
-}
+function getBetTypeName(type) { return BET_TYPE_NAMES[type] || type; }
+function getHorseName(number) { return SAFE_RACE_HORSES.find((h) => h.number === number)?.name || `${number}番`; }
 
 function getTodayRaceId() {
   const now = new Date();
@@ -1741,54 +1756,466 @@ function getTodayRaceId() {
   return `${year}-${month}-${day}`;
 }
 
-window.startSafeRace = async function () {
-  const raceId = getTodayRaceId();
-  await recordRaceParticipation(raceId);
+function getRaceScheduleForToday() {
+  const now = new Date();
+  const raceTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), RACE_HOUR, RACE_MINUTE, 0, 0);
+  const closeTime = new Date(raceTime.getTime() - RACE_CLOSE_MINUTES_BEFORE * 60000);
+  return { raceTime, closeTime };
+}
 
-  if (derbyCountdown) derbyCountdown.textContent = "レース開始！";
+function formatCountdown(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
 
-  const result = generateSafeRaceResult();
-  renderSafeRaceTrack(result);
+/* ----- ゆうcoin残高 ----- */
 
-  if (raceInfo) {
-    raceInfo.innerHTML = `
-      <strong>レース結果</strong><br>
-      1着：${escapeHTML(result[0].name)}<br>
-      2着：${escapeHTML(result[1].name)}<br>
-      3着：${escapeHTML(result[2].name)}`;
+function updateCoinDisplays(coins) {
+  myCoins = coins;
+  if (coinBalanceEl) coinBalanceEl.textContent = String(coins);
+  if (myCoinLarge) myCoinLarge.textContent = String(coins);
+}
+
+async function grantStartingCoinsIfNeeded() {
+  if (!username) return;
+  try {
+    await runTransaction(db, async (transaction) => {
+      const userRef = doc(db, "users", username);
+      const snap = await transaction.get(userRef);
+      if (!snap.exists()) return;
+      if (typeof snap.data().coins === "number") return;
+      transaction.update(userRef, { coins: YUU_START_COINS });
+    });
+  } catch (error) {
+    console.error("ゆうcoin初期付与エラー:", error);
   }
+}
 
-  if (horseList) {
-    horseList.innerHTML = "";
-    result.forEach((horse, index) => {
+function listenMyCoins() {
+  if (unsubscribeMyCoins) { unsubscribeMyCoins(); unsubscribeMyCoins = null; }
+  if (!username) return;
+
+  unsubscribeMyCoins = onSnapshot(
+    doc(db, "users", username),
+    async (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (typeof data.coins !== "number") {
+        await grantStartingCoinsIfNeeded();
+        return;
+      }
+      updateCoinDisplays(data.coins);
+    },
+    (error) => console.error("コイン監視エラー:", error)
+  );
+}
+
+/* ----- オッズ（賭けられている金額から計算） ----- */
+
+function computeWinOdds(horseNumber) {
+  const total = Object.values(currentWinPool).reduce((a, b) => a + b, 0);
+  const onHorse = currentWinPool[horseNumber] || 0;
+  if (total <= 0 || onHorse <= 0) return null;
+  return Math.max(1.1, (total * RACE_TAKEOUT_RATE) / onHorse);
+}
+
+function listenWinBets(raceId) {
+  if (unsubscribeWinBets) { unsubscribeWinBets(); unsubscribeWinBets = null; }
+
+  unsubscribeWinBets = onSnapshot(
+    query(collection(db, "raceBets"), where("raceId", "==", raceId), where("type", "==", "win")),
+    (snapshot) => {
+      const pool = {};
+      snapshot.forEach((item) => {
+        const bet = item.data();
+        const horse = bet.horses?.[0];
+        if (!horse) return;
+        pool[horse] = (pool[horse] || 0) + Number(bet.amount || 0);
+      });
+      currentWinPool = pool;
+      renderOdds();
+    },
+    (error) => console.error("オッズ監視エラー:", error)
+  );
+}
+
+function renderOdds() {
+  if (oddsList) {
+    oddsList.innerHTML = "";
+    SAFE_RACE_HORSES.forEach((horse) => {
+      const odds = computeWinOdds(horse.number);
       const item = document.createElement("div");
-      item.className = "horse-card";
-      item.textContent = `${index + 1}着　${horse.number}番 ${horse.name}`;
-      horseList.appendChild(item);
+      item.className = "odds-item";
+      item.innerHTML = `<strong>${horse.number} ${escapeHTML(horse.name)}</strong><span>${odds ? odds.toFixed(1) + "倍" : "---"}</span>`;
+      oddsList.appendChild(item);
     });
   }
-};
+  renderHorseList();
+}
+
+function renderHorseList() {
+  if (!horseList) return;
+
+  const withPopularity = SAFE_RACE_HORSES
+    .map((h) => ({ ...h, pool: currentWinPool[h.number] || 0 }))
+    .sort((a, b) => b.pool - a.pool);
+
+  horseList.innerHTML = "";
+  withPopularity.forEach((horse, index) => {
+    const odds = computeWinOdds(horse.number);
+    const item = document.createElement("div");
+    item.className = "horse-card";
+    item.innerHTML = `
+      <strong>${horse.number}番　${escapeHTML(horse.name)}</strong>
+      <span>${escapeHTML(horse.character)}</span>
+      <div style="margin-top:6px; font-size:11px; color:#777;">
+        人気 ${horse.pool > 0 ? index + 1 : "-"}位　オッズ ${odds ? odds.toFixed(1) + "倍" : "未定"}
+      </div>`;
+    horseList.appendChild(item);
+  });
+}
+
+/* ----- 投票フォームの有効/無効 ----- */
+
+function updateBetFormEnabled() {
+  const canBet = Boolean(currentUser && username) && !bettingLocked;
+  if (betType) betType.disabled = !canBet;
+  if (betHorses) betHorses.disabled = !canBet;
+  if (betAmount) betAmount.disabled = !canBet;
+  if (betButton) {
+    betButton.disabled = !canBet;
+    betButton.textContent = bettingLocked ? "🔒 本日の投票は締め切りました" : "🪙 投票する";
+  }
+}
+
+function parseBetHorses(text, type) {
+  const need = BET_TYPE_COUNT[type] || 1;
+  const nums = (text || "")
+    .split(/[,、\s]+/)
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= SAFE_RACE_HORSES.length);
+
+  const ordered = [];
+  nums.forEach((n) => { if (!ordered.includes(n)) ordered.push(n); });
+
+  if (ordered.length !== need) return null;
+  return type === "trifecta" ? ordered : [...ordered].sort((a, b) => a - b);
+}
+
+betButton?.addEventListener("click", async () => {
+  if (!currentUser || !username) return alert("ログインしてください。");
+  if (bettingLocked) return alert("本日の投票は締め切りました。");
+
+  const type = betType?.value || "win";
+  const amount = Number(betAmount?.value || 0);
+  const horses = parseBetHorses(betHorses?.value, type);
+
+  if (!horses) {
+    return alert(`${getBetTypeName(type)}は馬番号を${BET_TYPE_COUNT[type]}個、カンマ区切りで入力してください。`);
+  }
+  if (!Number.isInteger(amount) || amount < 10) {
+    return alert("投票額は10ゆうcoin以上で入力してください。");
+  }
+  if (amount > myCoins) {
+    return alert("ゆうcoinが足りません。");
+  }
+
+  try {
+    betButton.disabled = true;
+    const raceId = getTodayRaceId();
+
+    await runTransaction(db, async (transaction) => {
+      const userRef = doc(db, "users", username);
+      const userSnap = await transaction.get(userRef);
+      const coins = userSnap.exists() ? Number(userSnap.data().coins || 0) : 0;
+      if (coins < amount) throw new Error("NOT_ENOUGH_COINS");
+
+      transaction.update(userRef, { coins: coins - amount });
+
+      const betRef = doc(collection(db, "raceBets"));
+      transaction.set(betRef, {
+        raceId, uid: currentUser.uid, username, type, horses, amount,
+        settled: false, win: null, payout: null, createdAt: serverTimestamp()
+      });
+    });
+
+    alert("投票しました！");
+    if (betHorses) betHorses.value = "";
+  } catch (error) {
+    console.error("投票エラー:", error);
+    if (error.message === "NOT_ENOUGH_COINS") alert("ゆうcoinが足りません。");
+    else alert("投票に失敗しました。");
+  } finally {
+    updateBetFormEnabled();
+  }
+});
+
+/* ----- 結果判定・払い戻し（パリミュチュエル方式） ----- */
+
+function evaluateBetWin(bet, resultOrder) {
+  const top1 = resultOrder[0], top2 = resultOrder[1], top3 = resultOrder[2];
+  const top3set = [top1, top2, top3];
+  const horses = bet.horses || [];
+
+  if (bet.type === "win") return horses[0] === top1;
+  if (bet.type === "place") return top3set.includes(horses[0]);
+
+  if (bet.type === "quinella") {
+    if (horses.length !== 2) return false;
+    const a = [...horses].sort((x, y) => x - y);
+    const b = [top1, top2].sort((x, y) => x - y);
+    return a[0] === b[0] && a[1] === b[1];
+  }
+
+  if (bet.type === "trio") {
+    if (horses.length !== 3) return false;
+    const a = [...horses].sort((x, y) => x - y);
+    const b = [...top3set].sort((x, y) => x - y);
+    return a.every((n, i) => n === b[i]);
+  }
+
+  if (bet.type === "trifecta") {
+    return horses.length === 3 && horses[0] === top1 && horses[1] === top2 && horses[2] === top3;
+  }
+
+  return false;
+}
+
+async function computePoolPayout(raceId, bet, resultOrder) {
+  const snap = await getDocs(query(collection(db, "raceBets"), where("raceId", "==", raceId), where("type", "==", bet.type)));
+
+  let totalPool = 0;
+  let totalWinningStake = 0;
+
+  snap.forEach((d) => {
+    const data = d.data();
+    const amount = Number(data.amount || 0);
+    totalPool += amount;
+    if (evaluateBetWin(data, resultOrder)) totalWinningStake += amount;
+  });
+
+  if (totalWinningStake <= 0) return 0;
+  return Math.floor((Number(bet.amount || 0) / totalWinningStake) * totalPool * RACE_TAKEOUT_RATE);
+}
+
+function showRaceHitAnimation(bet, payout) {
+  const el = document.createElement("div");
+  el.className = "notification";
+  const title = document.createElement("div");
+  title.className = "notification-title";
+  title.textContent = "🎯 的中！";
+  const body = document.createElement("div");
+  body.className = "notification-body";
+  body.textContent = `${getBetTypeName(bet.type)}　+${payout} ゆうcoin`;
+  el.append(title, body);
+  document.body.appendChild(el);
+
+  requestAnimationFrame(() => el.classList.add("show"));
+  setTimeout(() => {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 300);
+  }, 4500);
+}
+
+async function settleMyBets(raceId, resultOrder) {
+  if (!currentUser || !username) return;
+
+  try {
+    const mySnap = await getDocs(query(
+      collection(db, "raceBets"),
+      where("raceId", "==", raceId),
+      where("uid", "==", currentUser.uid),
+      where("settled", "==", false)
+    ));
+    if (mySnap.empty) return;
+
+    for (const betDoc of mySnap.docs) {
+      const bet = betDoc.data();
+      const isWin = evaluateBetWin(bet, resultOrder);
+      const payout = isWin ? await computePoolPayout(raceId, bet, resultOrder) : 0;
+
+      await runTransaction(db, async (transaction) => {
+        const betRef = doc(db, "raceBets", betDoc.id);
+        const freshBet = await transaction.get(betRef);
+        if (!freshBet.exists() || freshBet.data().settled) return;
+
+        transaction.update(betRef, { settled: true, win: isWin, payout });
+
+        if (payout > 0) {
+          const userRef = doc(db, "users", username);
+          const userSnap = await transaction.get(userRef);
+          const coins = userSnap.exists() ? Number(userSnap.data().coins || 0) : 0;
+          transaction.update(userRef, { coins: coins + payout });
+        }
+      });
+
+      if (isWin && payout > 0) showRaceHitAnimation(bet, payout);
+    }
+
+    loadMyPageStats();
+  } catch (error) {
+    console.error("ベット精算エラー:", error);
+  }
+}
+
+/* ----- 投票履歴（マイページ） ----- */
+
+function listenMyBetHistory() {
+  if (unsubscribeMyBetHistory) { unsubscribeMyBetHistory(); unsubscribeMyBetHistory = null; }
+  if (!currentUser || !historyEl) return;
+
+  unsubscribeMyBetHistory = onSnapshot(
+    query(collection(db, "raceBets"), where("uid", "==", currentUser.uid), orderBy("createdAt", "desc")),
+    (snap) => renderBetHistory(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (error) => console.error("投票履歴監視エラー:", error)
+  );
+}
+
+function renderBetHistory(bets) {
+  if (!historyEl) return;
+  historyEl.innerHTML = "";
+
+  if (bets.length === 0) {
+    historyEl.innerHTML = `<div class="empty-state">まだ投票履歴がありません</div>`;
+    return;
+  }
+
+  bets.slice(0, 30).forEach((bet) => {
+    const separator = bet.type === "trifecta" ? "→" : "・";
+    const horsesText = (bet.horses || []).join(separator);
+
+    let resultText = "結果待ち";
+    if (bet.settled) resultText = bet.win ? `的中！ +${bet.payout || 0}coin` : "不的中";
+
+    const item = document.createElement("div");
+    item.className = "history-item";
+    item.innerHTML = `
+      <div><strong>${escapeHTML(getBetTypeName(bet.type))}</strong>　${escapeHTML(horsesText)}番　${bet.amount}coin</div>
+      <div style="font-size:11px; color:#888; margin-top:3px;">${escapeHTML(bet.raceId)}　${escapeHTML(resultText)}</div>`;
+    historyEl.appendChild(item);
+  });
+}
+
+/* ----- レース結果の抽選（発走時刻になった最初のクライアントが実行） ----- */
+
+function generateWeightedRaceOrder() {
+  const withKey = SAFE_RACE_HORSES.map((h) => {
+    const effectivePower = Math.max(0.1, h.power * (0.4 + Math.random() * 1.3));
+    const key = Math.pow(Math.random(), 1 / effectivePower);
+    return { number: h.number, key };
+  });
+  withKey.sort((a, b) => b.key - a.key);
+  return withKey.map((h) => h.number);
+}
+
+async function tryGenerateRaceResult(raceId) {
+  const raceRef = doc(db, "races", raceId);
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      const snap = await transaction.get(raceRef);
+      if (snap.exists()) return;
+
+      transaction.set(raceRef, {
+        raceId,
+        resultOrder: generateWeightedRaceOrder(),
+        status: "finished",
+        generatedAt: serverTimestamp()
+      });
+    });
+  } catch (error) {
+    console.error("レース抽選エラー:", error);
+  }
+}
+
+/* ----- 本日のレース監視・カウントダウン ----- */
+
+function listenTodayRace(raceId) {
+  if (unsubscribeTodayRace) { unsubscribeTodayRace(); unsubscribeTodayRace = null; }
+
+  unsubscribeTodayRace = onSnapshot(
+    doc(db, "races", raceId),
+    (snap) => {
+      if (snap.exists() && snap.data().status === "finished") {
+        todayRaceResult = snap.data();
+        settleMyBets(raceId, todayRaceResult.resultOrder);
+      } else {
+        todayRaceResult = null;
+      }
+      renderRaceInfo();
+    },
+    (error) => console.error("本日のレース監視エラー:", error)
+  );
+}
 
 function renderRaceInfo() {
-  if (raceInfo) {
-    raceInfo.innerHTML = `
-      <div><strong>本日のレース</strong></div>
-      <div>10頭の馬が出走します。</div>
-      <div>観戦用レースです。</div>`;
+  if (!raceInfo) return;
+
+  const { raceTime, closeTime } = getRaceScheduleForToday();
+  const now = new Date();
+  const timeText = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
+  let statusLine;
+  if (now < closeTime) statusLine = `投票受付中（締切 ${timeText(closeTime)}）`;
+  else if (now < raceTime) statusLine = "投票は締め切りました。まもなく発走です。";
+  else if (todayRaceResult) statusLine = "本日のレースは終了しました。";
+  else statusLine = "集計中です…";
+
+  raceInfo.innerHTML = `
+    <div><strong>本日のレース</strong>（発走 ${timeText(raceTime)}）</div>
+    <div>${escapeHTML(statusLine)}</div>
+    ${todayRaceResult ? `
+      <div style="margin-top:8px;">
+        <strong>結果</strong>　
+        1着：${escapeHTML(getHorseName(todayRaceResult.resultOrder[0]))}　
+        2着：${escapeHTML(getHorseName(todayRaceResult.resultOrder[1]))}　
+        3着：${escapeHTML(getHorseName(todayRaceResult.resultOrder[2]))}
+      </div>` : ""}`;
+}
+
+function refreshDerbySubscriptionsIfNeeded() {
+  const raceId = getTodayRaceId();
+  if (raceId === lastCheckedRaceId) return;
+
+  lastCheckedRaceId = raceId;
+  todayRaceResult = null;
+  todayRaceGenerationAttempted = false;
+
+  listenTodayRace(raceId);
+  listenWinBets(raceId);
+}
+
+function tickDerbyCountdown() {
+  refreshDerbySubscriptionsIfNeeded();
+
+  const raceId = getTodayRaceId();
+  const { raceTime, closeTime } = getRaceScheduleForToday();
+  const now = new Date();
+
+  const wasLocked = bettingLocked;
+  bettingLocked = now >= closeTime;
+  if (wasLocked !== bettingLocked) updateBetFormEnabled();
+
+  if (derbyCountdown) {
+    if (now < raceTime) derbyCountdown.textContent = formatCountdown(raceTime - now);
+    else derbyCountdown.textContent = todayRaceResult ? "本日終了" : "集計中";
   }
-  if (oddsList) {
-    oddsList.innerHTML = `<div class="empty-state">オッズ・ベット機能はありません</div>`;
+
+  if (now >= raceTime && !todayRaceGenerationAttempted) {
+    todayRaceGenerationAttempted = true;
+    tryGenerateRaceResult(raceId);
   }
-  if (betButton) betButton.disabled = true;
-  if (betType) betType.disabled = true;
-  if (betHorses) betHorses.disabled = true;
-  if (betAmount) betAmount.disabled = true;
 }
 
 function initializeSafeRace() {
-  if (!raceTrack) return;
-  renderSafeRaceTrack(SAFE_RACE_HORSES);
-  renderRaceInfo();
+  updateBetFormEnabled();
+  tickDerbyCountdown();
+  if (raceCountdownTimer) clearInterval(raceCountdownTimer);
+  raceCountdownTimer = setInterval(tickDerbyCountdown, 1000);
 }
 
 /* =========================================================
@@ -1871,6 +2298,8 @@ createGameRoomButton?.addEventListener("click", async () => {
 
   const type = currentGameType || "daifugo";
   try {
+    createGameRoomButton.disabled = true;
+
     const roomRef = await addDoc(collection(db, "gameRooms"), {
       gameType: type,
       owner: username,
@@ -1887,7 +2316,9 @@ createGameRoomButton?.addEventListener("click", async () => {
     joinGameRoom({ id: roomRef.id, gameType: type, members: [username], memberUids: [currentUser.uid] });
   } catch (error) {
     console.error("ゲームルーム作成エラー:", error);
-    alert("ゲームルームを作成できませんでした。");
+    alert(`ゲームルームを作成できませんでした。（${getGameTypeName(type)} / ${error.code || error.message || "不明なエラー"}）`);
+  } finally {
+    createGameRoomButton.disabled = false;
   }
 });
 
@@ -2735,6 +3166,27 @@ function getDaifugoRuleStatus(game) {
   return status.length ? status.join("　") : "通常状態";
 }
 
+function buildDaifugoCardElement(card, isSelected, interactive) {
+  const isRed = card.suit === "♥" || card.suit === "♦";
+  const el = document.createElement(interactive ? "button" : "div");
+  if (interactive) el.type = "button";
+  el.className = `playing-card daifugo-card ${isRed ? "red" : "black"}`;
+  if (card.isJoker) el.classList.add("joker");
+  if (isSelected) el.classList.add("selected");
+  if (!interactive) el.classList.add("daifugo-field-card");
+
+  const suit = document.createElement("span");
+  suit.className = "card-suit";
+  suit.textContent = card.suit;
+
+  const rank = document.createElement("span");
+  rank.className = "card-rank";
+  rank.textContent = card.label;
+
+  el.append(suit, rank);
+  return el;
+}
+
 function renderDaifugoGame(container, room) {
   if (!container) return;
   const game = applyDaifugoRules(room.gameState || createInitialGameState("daifugo"));
@@ -2776,28 +3228,49 @@ function renderDaifugoGame(container, room) {
 
   const field = document.createElement("div");
   field.className = "daifugo-field";
-  field.textContent = (game.lastPlayedCards || []).length
-    ? "場： " + game.lastPlayedCards.map((c) => `${c.suit}${c.label}`).join(" ")
-    : "場：なし";
+
+  if ((game.lastPlayedCards || []).length) {
+    const fieldLabel = document.createElement("div");
+    fieldLabel.className = "daifugo-field-label";
+    fieldLabel.textContent = "場";
+    field.appendChild(fieldLabel);
+
+    const fieldCards = document.createElement("div");
+    fieldCards.className = "daifugo-field-cards";
+    game.lastPlayedCards.forEach((c) => {
+      fieldCards.appendChild(buildDaifugoCardElement(c, false, false));
+    });
+    field.appendChild(fieldCards);
+  } else {
+    field.innerHTML = `<div class="daifugo-field-label">場</div><div class="daifugo-field-empty">まだ何も出ていません</div>`;
+  }
   wrapper.appendChild(field);
 
   const myHand = getMyDaifugoHand(room);
   const isMyTurn = game.currentPlayerUid === currentUser?.uid && !game.winner;
 
+  const handTitleRow = document.createElement("div");
+  handTitleRow.className = "daifugo-hand-title-row";
+
   const handTitle = document.createElement("h4");
   handTitle.textContent = `あなたの手札（${myHand.length}枚）`;
-  wrapper.appendChild(handTitle);
+  handTitleRow.appendChild(handTitle);
+
+  if (selectedDaifugoCards.length > 0) {
+    const selectedCount = document.createElement("span");
+    selectedCount.className = "daifugo-selected-count";
+    selectedCount.textContent = `${selectedDaifugoCards.length}枚 選択中`;
+    handTitleRow.appendChild(selectedCount);
+  }
+  wrapper.appendChild(handTitleRow);
 
   const hand = document.createElement("div");
   hand.className = "daifugo-hand";
 
   myHand.forEach((card) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "daifugo-card";
-    if (selectedDaifugoCards.includes(card.id)) button.classList.add("selected");
+    const isSelected = selectedDaifugoCards.includes(card.id);
+    const button = buildDaifugoCardElement(card, isSelected, true);
     button.disabled = !isMyTurn;
-    button.textContent = `${card.suit}${card.label}`;
     button.addEventListener("click", () => { toggleDaifugoCard(card.id); renderCurrentGame(room); });
     hand.appendChild(button);
   });
@@ -2808,9 +3281,10 @@ function renderDaifugoGame(container, room) {
 
   const playButton = document.createElement("button");
   playButton.type = "button";
-  playButton.className = "primary-button";
-  playButton.textContent = "カードを出す";
-  playButton.disabled = !isMyTurn;
+  playButton.className = "primary-button daifugo-play-button";
+  playButton.textContent = selectedDaifugoCards.length > 0 ? `このカードを出す（${selectedDaifugoCards.length}枚）` : "カードを出す";
+  playButton.disabled = !isMyTurn || selectedDaifugoCards.length === 0;
+  playButton.classList.toggle("is-ready", !playButton.disabled);
   playButton.addEventListener("click", () => playDaifugoCards(room.id));
 
   const passButton = document.createElement("button");
