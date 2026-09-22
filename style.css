@@ -2161,3 +2161,242 @@ button:disabled {
 .game-type {
     transition: transform .1s ease, background-color .15s ease;
 }
+
+
+/* ==================================================================
+   フェーズ③ 追加分
+   ・大富豪のカードUIを見やすく・かわいくする
+   ・ゲームルーム作成のボタン連打防止（JS側で対応済み）
+================================================================== */
+
+.daifugo-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+
+    padding: 18px;
+
+    border-radius: 20px;
+
+    background: linear-gradient(160deg, #fff6fa, #fdf1e8);
+
+    border: 1px solid #ffe1ec;
+}
+
+.daifugo-wrapper .game-status {
+    font-weight: 700;
+    font-size: 14px;
+}
+
+.daifugo-field {
+    padding: 14px;
+
+    border-radius: 14px;
+
+    background: rgba(255, 255, 255, 0.75);
+
+    border: 1px dashed #ffb8ce;
+
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.daifugo-field-label {
+    font-size: 11px;
+    font-weight: 700;
+
+    color: #ff6b9d;
+}
+
+.daifugo-field-cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.daifugo-field-empty {
+    font-size: 12px;
+
+    color: #b0a8ad;
+}
+
+.daifugo-hand-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    gap: 10px;
+}
+
+.daifugo-hand-title-row h4 {
+    font-size: 13px;
+
+    color: #555;
+}
+
+.daifugo-selected-count {
+    padding: 4px 10px;
+
+    border-radius: 20px;
+
+    background: var(--yuu-accent-2);
+    color: #fff;
+
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.daifugo-hand {
+    padding: 6px 2px 10px;
+}
+
+
+/* ----- トランプ本体（.playing-card を拡張） ----- */
+
+.playing-card {
+    width: 64px;
+    height: 90px;
+
+    border-radius: 12px;
+
+    flex-direction: column;
+    gap: 4px;
+
+    background: #ffffff;
+    border: 1.5px solid #e6e2df;
+
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.08);
+
+    transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+}
+
+.playing-card .card-suit {
+    font-size: 20px;
+    line-height: 1;
+}
+
+.playing-card .card-rank {
+    font-size: 14px;
+    font-weight: 800;
+    line-height: 1;
+}
+
+.playing-card.black {
+    color: #2a2a2a;
+}
+
+.playing-card.red {
+    color: #ff5178;
+}
+
+.playing-card.joker {
+    background: linear-gradient(160deg, #fff2f7, #fff);
+}
+
+.playing-card:not(:disabled):hover {
+    transform: translateY(-4px);
+
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.1);
+}
+
+.playing-card:not(:disabled):active {
+    transform: translateY(-2px) scale(.97);
+}
+
+.playing-card.selected {
+    transform: translateY(-14px);
+
+    border-color: var(--yuu-accent-2);
+
+    box-shadow: 0 10px 18px rgba(255, 107, 157, 0.35);
+
+    background: linear-gradient(160deg, #fff, #ffeef4);
+}
+
+.playing-card.selected .card-suit,
+.playing-card.selected .card-rank {
+    color: #ff3d78;
+}
+
+.playing-card.daifugo-field-card {
+    width: 52px;
+    height: 74px;
+
+    cursor: default;
+}
+
+.playing-card:disabled {
+    box-shadow: none;
+}
+
+
+/* ----- カードを出すボタン：出せる/出せないが分かる ----- */
+
+.daifugo-play-button {
+    position: relative;
+
+    background: #d9dde3;
+    color: #777;
+}
+
+.daifugo-play-button.is-ready {
+    background: linear-gradient(135deg, var(--yuu-accent-1), var(--yuu-accent-2));
+    color: #fff;
+
+    box-shadow: 0 4px 12px rgba(255, 107, 157, 0.35);
+}
+
+
+/* ----- プレイヤー一覧をかわいく ----- */
+
+.daifugo-players {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.daifugo-player {
+    padding: 8px 14px;
+
+    border-radius: 20px;
+
+    background: #fff;
+
+    border: 1px solid #ffe1ec;
+
+    font-size: 12px;
+}
+
+.daifugo-player.current {
+    background: linear-gradient(135deg, var(--yuu-accent-1), var(--yuu-accent-2));
+    color: #fff;
+
+    border-color: transparent;
+
+    font-weight: 700;
+}
+
+
+/* ----- スマホでもカードを操作しやすく ----- */
+
+@media (max-width: 700px) {
+
+    .playing-card {
+        width: 56px;
+        height: 80px;
+    }
+
+    .playing-card .card-suit {
+        font-size: 17px;
+    }
+
+    .playing-card .card-rank {
+        font-size: 12px;
+    }
+
+    .daifugo-hand {
+        gap: 8px;
+    }
+
+}
