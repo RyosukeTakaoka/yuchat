@@ -223,7 +223,9 @@ button {
     height: 100%;
 
     object-fit: cover;
+}
 
+.avatar img.hidden {
     display: none;
 }
 
@@ -1864,4 +1866,298 @@ button:disabled {
 
 .no-select {
     user-select: none;
+}
+
+
+/* ==================================================================
+   フェーズ② 追加分
+   ・自分/相手のメッセージをより分かりやすく（かわいい差し色）
+   ・友達一覧/グループ一覧/チャットヘッダーにアバター表示を追加
+   ・軽いアニメーション
+   既存のルールは変更せず、ここから下は追加のみです。
+================================================================== */
+
+:root {
+    --yuu-accent-1: #ff9bb3;
+    --yuu-accent-2: #ff6b9d;
+    --yuu-accent-soft: #ffe4ec;
+}
+
+
+/* ----- 共通アバター（丸アイコン。画像 or イニシャル） ----- */
+
+.avatar-circle {
+    flex-shrink: 0;
+
+    border-radius: 50%;
+
+    background-color: #d9dde3;
+    background-size: cover;
+    background-position: center;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    color: #fff;
+
+    font-weight: 700;
+
+    overflow: hidden;
+}
+
+.avatar-circle--sm {
+    width: 30px;
+    height: 30px;
+
+    font-size: 13px;
+}
+
+.avatar-circle--md {
+    width: 42px;
+    height: 42px;
+
+    font-size: 16px;
+}
+
+.avatar-circle--group {
+    background: linear-gradient(135deg, #cfd6de, #aab2bd);
+
+    font-size: 18px;
+}
+
+
+/* ----- 友達一覧・グループ一覧 ----- */
+
+.chips button.friend-item,
+.chips button.group-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    transition: background-color .15s ease, transform .1s ease;
+}
+
+.chips button.friend-item.active,
+.chips button.group-item.active {
+    background: #111;
+    color: #fff;
+}
+
+.chips button.friend-item.active .friend-status,
+.chips button.group-item.active .group-members {
+    color: #ddd;
+}
+
+.friend-avatar,
+.group-avatar {
+    width: 40px;
+    height: 40px;
+
+    flex-shrink: 0;
+
+    border-radius: 50%;
+
+    background-color: #d9dde3;
+    background-size: cover;
+    background-position: center;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    color: #fff;
+
+    font-weight: 700;
+
+    overflow: hidden;
+}
+
+.group-avatar {
+    background: linear-gradient(135deg, #cfd6de, #aab2bd);
+}
+
+.friend-info,
+.group-info {
+    min-width: 0;
+
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.friend-name,
+.group-name {
+    font-weight: 700;
+    font-size: 13px;
+
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.friend-status,
+.group-members {
+    font-size: 11px;
+
+    color: #999;
+
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.friend-status::before {
+    content: "";
+
+    width: 7px;
+    height: 7px;
+
+    border-radius: 50%;
+
+    background: #c7cad0;
+}
+
+.friend-status.online::before {
+    background: #31a24c;
+}
+
+.friend-status.offline::before {
+    background: #c7cad0;
+}
+
+
+/* ----- チャットヘッダー（アバター＋名前＋状態） ----- */
+
+.chat-header-profile {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    min-width: 0;
+}
+
+.chat-header-info {
+    min-width: 0;
+
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.chat-header-name {
+    font-weight: 700;
+    font-size: 14px;
+
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-header-status {
+    font-size: 11px;
+
+    color: #999;
+
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.chat-header-status::before {
+    content: "";
+
+    width: 7px;
+    height: 7px;
+
+    border-radius: 50%;
+
+    background: #c7cad0;
+}
+
+.chat-header-status.online::before {
+    background: #31a24c;
+}
+
+.chat-header-status.offline::before {
+    background: #c7cad0;
+}
+
+
+/* ----- メッセージ：自分/相手をよりはっきり ----- */
+
+.message-row {
+    gap: 8px;
+    align-items: flex-end;
+}
+
+.message-row.mine .message-bubble {
+    background: linear-gradient(135deg, var(--yuu-accent-1), var(--yuu-accent-2));
+
+    box-shadow: 0 3px 10px rgba(255, 107, 157, 0.25);
+}
+
+.message-row.other .message-bubble {
+    box-shadow: 0 2px 6px rgba(17, 17, 17, 0.04);
+}
+
+.reaction {
+    transition: transform .1s ease, background-color .15s ease;
+}
+
+.reaction:hover {
+    background: var(--yuu-accent-soft);
+}
+
+.message-reactions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.message-image {
+    transition: transform .15s ease;
+}
+
+.message-image:hover {
+    transform: scale(1.02);
+}
+
+
+/* ----- 軽いアニメーション ----- */
+
+@keyframes yuuMessagePop {
+    from {
+        opacity: 0;
+        transform: translateY(8px) scale(.97);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.message-row.new {
+    animation: yuuMessagePop .22s ease-out;
+}
+
+.chips button.friend-item:active,
+.chips button.group-item:active,
+.input-area button:active,
+.message-actions button:active,
+.reaction:active,
+.icon-btn:active,
+.coin:active,
+.room-card button:active,
+.game-type:active {
+    transform: scale(.95);
+}
+
+.input-area button,
+.message-actions button,
+.icon-btn,
+.coin,
+.room-card button,
+.game-type {
+    transition: transform .1s ease, background-color .15s ease;
 }
