@@ -81,16 +81,19 @@ let currentShogiPlayer = "sente";
 /* ゆうダービー関連の状態 */
 let myCoins = 0;
 let unsubscribeMyCoins = null;
-let unsubscribeTodayRace = null;
+let unsubscribeLiveRace = null;
 let unsubscribeWinBets = null;
 let unsubscribeMyBetHistory = null;
 let raceCountdownTimer = null;
 let currentWinPool = {};
-let bettingLocked = false;
-let todayRaceResult = null;
-let todayRaceGenerationAttempted = false;
-let lastCheckedRaceId = null;
+let liveRaceResult = null;
+let liveRaceGenerationAttemptedFor = null;
+let lastActiveBettingRaceId = null;
+let lastLiveRaceId = null;
 let selectedBetHorses = [];
+let myAllBets = [];
+let cachedPopularityForRaceId = null;
+let cachedPopularity = null;
 
 /* =========================================================
    HTML要素取得（index.htmlのidと一致させています）
@@ -1790,40 +1793,78 @@ async function loadMyPageStats() {
   }
 }
 
-/* 「🏆 ユーコインランキング」の見出しに合わせ、実際のゆうcoin残高ランキングを表示 */
-async function loadCoinRanking() {
-  if (!rankingEl) return;
-  rankingEl.innerHTML = `<div class="loading">ランキングを読み込み中...</div>`;
+/* 「🏆 ユーコインランキング」の見出しに合わせ、実際のゆうcoin残高ランキングを表示
+   （マイページ／ゆうダービー画面の両方から呼べる共通版。コインの仕組み自体は既存のまま） */
+async function renderCoinRankingInto(targetEl) {
+  if (!targetEl) return;
+  targetEl.innerHTML = `<div class="loading">ランキングを読み込み中...</div>`;
 
   try {
     const snapshot = await getDocs(query(collection(db, "users"), orderBy("coins", "desc")));
-    const list = snapshot.docs
+    const all = snapshot.docs
       .map((item) => ({ name: item.id, coins: item.data().coins }))
-      .filter((u) => typeof u.coins === "number")
-      .slice(0, 20);
+      .filter((u) => typeof u.coins === "number");
 
-    rankingEl.innerHTML = "";
-
-    if (list.length === 0) {
-      rankingEl.innerHTML = `<div class="empty-state">まだランキングデータがありません</div>`;
+    if (all.length === 0) {
+      targetEl.innerHTML = `<div class="empty-state">まだランキングデータがありません</div>`;
       return;
     }
 
-    list.forEach((user, index) => {
+    /* 同じコイン数のユーザーは同じ順位にする（一般的な競技順位方式） */
+    let currentRank = 0;
+    let previousCoins = null;
+    const ranked = all.map((user, index) => {
+      if (user.coins !== previousCoins) {
+        currentRank = index + 1;
+        previousCoins = user.coins;
+      }
+      return { ...user, rank: currentRank };
+    });
+
+    targetEl.innerHTML = "";
+
+    const top = ranked.slice(0, 20);
+    top.forEach((user) => {
       const item = document.createElement("div");
       item.className = "ranking-item";
+      if (user.rank <= 3) item.classList.add(`rank-${user.rank}`);
+      if (user.name === username) item.classList.add("me");
+
+      const medal = user.rank === 1 ? "🥇" : user.rank === 2 ? "🥈" : user.rank === 3 ? "🥉" : user.rank;
       item.innerHTML = `
-        <div class="ranking-number">${index + 1}</div>
+        <div class="ranking-number">${medal}</div>
         <div class="ranking-info">
-          <div class="ranking-name">${escapeHTML(user.name)}</div>
-          <div class="ranking-score">🪙 ${user.coins}</div>
+          <div class="ranking-name">${escapeHTML(user.name)}${user.name === username ? "（あなた）" : ""}</div>
+          <div class="ranking-score">🪙 ${user.coins.toLocaleString()}</div>
         </div>`;
-      rankingEl.appendChild(item);
+      targetEl.appendChild(item);
     });
+
+    /* 自分が上位20人に入っていない場合も、自分の順位が分かるようにする */
+    const myEntry = ranked.find((u) => u.name === username);
+    if (myEntry && myEntry.rank > top.length) {
+      const myRow = document.createElement("div");
+      myRow.className = "ranking-item me ranking-item-self";
+      myRow.innerHTML = `
+        <div class="ranking-number">${myEntry.rank}</div>
+        <div class="ranking-info">
+          <div class="ranking-name">${escapeHTML(username)}（あなた）</div>
+          <div class="ranking-score">🪙 ${myEntry.coins.toLocaleString()}</div>
+        </div>`;
+      targetEl.appendChild(myRow);
+    }
   } catch (error) {
     console.error("ランキング取得エラー:", error);
-    rankingEl.innerHTML = `<div class="empty-state">ランキングを取得できませんでした</div>`;
+    targetEl.innerHTML = `<div class="empty-state">ランキングを取得できませんでした</div>`;
   }
+}
+
+async function loadCoinRanking() {
+  await renderCoinRankingInto(rankingEl);
+}
+
+async function loadDerbyCoinRanking() {
+  await renderCoinRankingInto(document.getElementById("raceRankingPanel"));
 }
 
 /* =========================================================
@@ -1835,19 +1876,26 @@ const RACE_TAKEOUT_RATE = 0.8;
 const RACE_HOUR = 15;
 const RACE_MINUTE = 2;
 const RACE_CLOSE_MINUTES_BEFORE = 10;
+const ODDS_VIRTUAL_SEED_PER_HORSE = 20;
 
+/* style: start=逃げ / front=先行 / mid=差し / closer=追込 / stamina=スタミナ / longshot=大穴
+   （能力にはランダム性も加えるため「能力が高い＝必ず勝つ」にはならない） */
 const SAFE_RACE_HORSES = [
-  { number: 1, name: "ユウウキ", character: "気まぐれな逃げ馬", power: 6 },
-  { number: 2, name: "ユウセイ", character: "堅実な先行馬", power: 7 },
-  { number: 3, name: "ユウヤン", character: "末脚が鋭い差し馬", power: 8 },
-  { number: 4, name: "ユウチュウ", character: "スタミナ自慢の追込馬", power: 5 },
-  { number: 5, name: "ユウガ", character: "重賞実績もある実力馬", power: 9 },
-  { number: 6, name: "ユウバエ", character: "新人ながら期待の一頭", power: 4 },
-  { number: 7, name: "ユウキカイ", character: "安定感抜群のベテラン", power: 6 },
-  { number: 8, name: "ユウマグレ", character: "一発があるクセ馬", power: 3 },
-  { number: 9, name: "ユウジン", character: "人気先行のスター候補", power: 7 },
-  { number: 10, name: "ユウシャ", character: "底力のある大物", power: 8 }
+  { number: 1, name: "ユウウキ", character: "気まぐれな逃げ馬", power: 6, style: "start" },
+  { number: 2, name: "ユウセイ", character: "堅実な先行馬", power: 7, style: "front" },
+  { number: 3, name: "ユウヤン", character: "末脚が鋭い差し馬", power: 8, style: "mid" },
+  { number: 4, name: "ユウチュウ", character: "スタミナ自慢の追込馬", power: 5, style: "closer" },
+  { number: 5, name: "ユウガ", character: "重賞実績もある実力馬", power: 9, style: "stamina" },
+  { number: 6, name: "ユウバエ", character: "新人ながら期待の一頭", power: 4, style: "front" },
+  { number: 7, name: "ユウキカイ", character: "安定感抜群のベテラン", power: 6, style: "stamina" },
+  { number: 8, name: "ユウマグレ", character: "一発があるクセ馬", power: 3, style: "longshot" },
+  { number: 9, name: "ユウジン", character: "人気先行のスター候補", power: 7, style: "front" },
+  { number: 10, name: "ユウシャ", character: "底力のある大物", power: 8, style: "closer" }
 ];
+
+const RACE_STYLE_LABELS = {
+  start: "逃げ", front: "先行", mid: "差し", closer: "追込", stamina: "スタミナ", longshot: "大穴"
+};
 
 const BET_TYPE_NAMES = { win: "単勝", place: "複勝", quinella: "馬連", trio: "三連複", trifecta: "三連単" };
 const BET_TYPE_COUNT = { win: 1, place: 1, quinella: 2, trio: 3, trifecta: 3 };
@@ -1855,20 +1903,57 @@ const BET_TYPE_COUNT = { win: 1, place: 1, quinella: 2, trio: 3, trifecta: 3 };
 function getBetTypeName(type) { return BET_TYPE_NAMES[type] || type; }
 function getHorseName(number) { return SAFE_RACE_HORSES.find((h) => h.number === number)?.name || `${number}番`; }
 
-function getTodayRaceId() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
+function formatRaceId(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
-function getRaceScheduleForToday() {
-  const now = new Date();
-  const raceTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), RACE_HOUR, RACE_MINUTE, 0, 0);
+function getTodayRaceId() { return formatRaceId(new Date()); }
+
+function parseRaceIdToDate(raceId) {
+  const [y, m, d] = raceId.split("-").map(Number);
+  return new Date(y, m - 1, d, RACE_HOUR, RACE_MINUTE, 0, 0);
+}
+
+function getRaceScheduleFor(date) {
+  const raceTime = new Date(date.getFullYear(), date.getMonth(), date.getDate(), RACE_HOUR, RACE_MINUTE, 0, 0);
   const closeTime = new Date(raceTime.getTime() - RACE_CLOSE_MINUTES_BEFORE * 60000);
   return { raceTime, closeTime };
 }
+
+/* レースは毎日15:02に開催。締切(14:52)を過ぎたら、その瞬間から「次の日のレース」を
+   投票対象にする（＝1日のどこかの時間帯で投票が完全に止まることがないようにする） */
+function getActiveBettingRaceContext() {
+  const now = new Date();
+  const today = getRaceScheduleFor(now);
+
+  if (now < today.closeTime) {
+    return { raceId: formatRaceId(now), raceTime: today.raceTime, closeTime: today.closeTime };
+  }
+
+  const tomorrowDate = new Date(now);
+  tomorrowDate.setDate(tomorrowDate.getDate() + 1);
+  const tomorrow = getRaceScheduleFor(tomorrowDate);
+  return { raceId: formatRaceId(tomorrowDate), raceTime: tomorrow.raceTime, closeTime: tomorrow.closeTime };
+}
+
+/* 直近に発走した（または、まさに発走中の）レース。演出・結果表示・精算の対象。 */
+function getLiveRaceContext() {
+  const now = new Date();
+  const today = getRaceScheduleFor(now);
+
+  if (now >= today.raceTime) {
+    return { raceId: formatRaceId(now), raceTime: today.raceTime, closeTime: today.closeTime };
+  }
+
+  const yesterdayDate = new Date(now);
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterday = getRaceScheduleFor(yesterdayDate);
+  return { raceId: formatRaceId(yesterdayDate), raceTime: yesterday.raceTime, closeTime: yesterday.closeTime };
+}
+
 
 function formatCountdown(ms) {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -1924,10 +2009,16 @@ function listenMyCoins() {
 /* ----- オッズ（賭けられている金額から計算） ----- */
 
 function computeWinOdds(horseNumber) {
-  const total = Object.values(currentWinPool).reduce((a, b) => a + b, 0);
-  const onHorse = currentWinPool[horseNumber] || 0;
-  if (total <= 0 || onHorse <= 0) return null;
-  return Math.max(1.1, (total * RACE_TAKEOUT_RATE) / onHorse);
+  /* ユーザーがまだ少ない・誰も賭けていない場合でもオッズが必ず表示されるよう、
+     全馬に均等な「仮想の種銭」を敷いておく。実際の投票が増えるほど、その影響は
+     相対的に小さくなり、本物の人気投票（実際の賭け金）が支配的になっていく。 */
+  const virtualTotal = ODDS_VIRTUAL_SEED_PER_HORSE * SAFE_RACE_HORSES.length;
+  const realTotal = Object.values(currentWinPool).reduce((a, b) => a + b, 0);
+  const totalPool = virtualTotal + realTotal;
+  const onHorse = ODDS_VIRTUAL_SEED_PER_HORSE + (currentWinPool[horseNumber] || 0);
+
+  if (totalPool <= 0 || onHorse <= 0) return null;
+  return Math.max(1.1, (totalPool * RACE_TAKEOUT_RATE) / onHorse);
 }
 
 function listenWinBets(raceId) {
@@ -1978,7 +2069,7 @@ function renderHorseList() {
     item.className = "horse-card";
     item.innerHTML = `
       <strong>${horse.number}番　${escapeHTML(horse.name)}</strong>
-      <span>${escapeHTML(horse.character)}</span>
+      <span>${escapeHTML(horse.character)}（${escapeHTML(RACE_STYLE_LABELS[horse.style] || "")}）</span>
       <div style="margin-top:6px; font-size:11px; color:#777;">
         人気 ${horse.pool > 0 ? index + 1 : "-"}位　オッズ ${odds ? odds.toFixed(1) + "倍" : "未定"}
       </div>`;
@@ -1989,13 +2080,16 @@ function renderHorseList() {
 /* ----- 投票フォームの有効/無効 ----- */
 
 function updateBetFormEnabled() {
-  const canBet = Boolean(currentUser && username) && !bettingLocked;
+  /* 毎日15:02に開催される仕組み上、締切(14:52)を過ぎた瞬間から
+     投票対象が自動的に「次の日のレース」に切り替わるため、
+     ログインさえしていれば常に投票できる（投票自体が止まることはない） */
+  const canBet = Boolean(currentUser && username);
   if (betType) betType.disabled = !canBet;
   if (betHorsesPicker) betHorsesPicker.classList.toggle("disabled", !canBet);
   if (betAmount) betAmount.disabled = !canBet;
   if (betButton) {
     betButton.disabled = !canBet;
-    betButton.textContent = bettingLocked ? "🔒 本日の投票は締め切りました" : "🪙 投票する";
+    betButton.textContent = "🪙 投票する";
   }
 }
 
@@ -2088,7 +2182,6 @@ betType?.addEventListener("change", resetBetHorsesSelection);
 
 betButton?.addEventListener("click", async () => {
   if (!currentUser || !username) return alert("ログインしてください。");
-  if (bettingLocked) return alert("本日の投票は締め切りました。");
 
   const type = betType?.value || "win";
   const amount = Number(betAmount?.value || 0);
@@ -2108,7 +2201,7 @@ betButton?.addEventListener("click", async () => {
 
   try {
     betButton.disabled = true;
-    const raceId = getTodayRaceId();
+    const raceId = getActiveBettingRaceContext().raceId;
 
     await runTransaction(db, async (transaction) => {
       const userRef = doc(db, "users", username);
@@ -2135,6 +2228,7 @@ betButton?.addEventListener("click", async () => {
     updateBetFormEnabled();
   }
 });
+
 
 /* ----- 結果判定・払い戻し（パリミュチュエル方式） ----- */
 
@@ -2244,27 +2338,95 @@ async function settleMyBets(raceId, resultOrder) {
   }
 }
 
-/* ----- 投票履歴（マイページ）／今日の自分の馬の把握 ----- */
-
-let myTodayBetHorses = [];
+/* ----- 自分の投票（すべてのレース分）を一括管理。
+   ここから「購入した馬券」「コイン増減」「自分の馬ハイライト」などを組み立てる ----- */
 
 function listenMyBetHistory() {
   if (unsubscribeMyBetHistory) { unsubscribeMyBetHistory(); unsubscribeMyBetHistory = null; }
-  if (!currentUser || !historyEl) return;
+  if (!currentUser) return;
 
   unsubscribeMyBetHistory = onSnapshot(
     query(collection(db, "raceBets"), where("uid", "==", currentUser.uid), orderBy("createdAt", "desc")),
     (snap) => {
-      const bets = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      renderBetHistory(bets);
-
-      const raceId = getTodayRaceId();
-      const horses = new Set();
-      bets.filter((b) => b.raceId === raceId).forEach((b) => (b.horses || []).forEach((h) => horses.add(h)));
-      myTodayBetHorses = [...horses];
+      myAllBets = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderBetHistory(myAllBets);
+      renderMyActiveTickets();
     },
     (error) => console.error("投票履歴監視エラー:", error)
   );
+}
+
+function getMyBetsForRace(raceId) {
+  return myAllBets.filter((b) => b.raceId === raceId);
+}
+
+function getMyBetHorseNumbersForRace(raceId) {
+  const set = new Set();
+  getMyBetsForRace(raceId).forEach((b) => (b.horses || []).forEach((h) => set.add(h)));
+  return [...set];
+}
+
+function formatBetHorsesForTicket(bet) {
+  const names = (bet.horses || []).map((n) => `${n}番 ${getHorseName(n)}`);
+  return names.join(bet.type === "trifecta" ? " → " : "－");
+}
+
+/* 【① 購入した馬券】次のレースに賭けた内容を、発走前ならいつでも確認できるように表示 */
+function renderMyActiveTickets() {
+  const el = document.getElementById("raceMyTickets");
+  if (!el) return;
+
+  const raceId = getActiveBettingRaceContext().raceId;
+  const tickets = getMyBetsForRace(raceId);
+
+  if (tickets.length === 0) {
+    el.innerHTML = `
+      <div class="race-tickets-title">🎫 購入した馬券</div>
+      <div class="empty-state">まだこのレースには投票していません</div>`;
+    return;
+  }
+
+  let total = 0;
+  let html = `<div class="race-tickets-title">🎫 購入した馬券</div>`;
+  tickets.forEach((bet) => {
+    total += Number(bet.amount || 0);
+    html += `
+      <div class="race-ticket-item">
+        <span class="race-ticket-type">${escapeHTML(getBetTypeName(bet.type))}</span>
+        <span class="race-ticket-horses">${escapeHTML(formatBetHorsesForTicket(bet))}</span>
+        <span class="race-ticket-amount">${Number(bet.amount || 0).toLocaleString()}コイン</span>
+      </div>`;
+  });
+  html += `<div class="race-tickets-total">合計投票額：${total.toLocaleString()}コイン</div>`;
+  el.innerHTML = html;
+}
+
+/* 【② レース終了後のコイン増減】投票額→払戻→増減→現在の所持コイン、の順で表示 */
+function renderMyRaceResultSummary(raceId) {
+  const el = document.getElementById("raceMyResult");
+  if (!el) return;
+
+  const bets = getMyBetsForRace(raceId);
+  if (bets.length === 0) { el.innerHTML = ""; return; }
+
+  const allSettled = bets.every((b) => b.settled);
+  if (!allSettled) {
+    el.innerHTML = `<div class="race-my-result-pending">あなたの馬券を精算中です…</div>`;
+    return;
+  }
+
+  const totalBet = bets.reduce((a, b) => a + Number(b.amount || 0), 0);
+  const totalPayout = bets.reduce((a, b) => a + Number(b.payout || 0), 0);
+  const net = totalPayout - totalBet;
+
+  el.innerHTML = `
+    <div class="race-my-result ${net >= 0 ? "win" : "lose"}">
+      <div class="race-my-result-title">【今回のレース結果】</div>
+      <div class="race-my-result-row"><span>投票額</span><span>${totalBet.toLocaleString()}コイン</span></div>
+      <div class="race-my-result-row"><span>払戻</span><span>${totalPayout.toLocaleString()}コイン</span></div>
+      <div class="race-my-result-row net"><span>今回の増減</span><span>${net >= 0 ? "＋" : "－"}${Math.abs(net).toLocaleString()}コイン</span></div>
+      <div class="race-my-result-row balance"><span>現在の所持コイン</span><span>${myCoins.toLocaleString()}コイン</span></div>
+    </div>`;
 }
 
 function renderBetHistory(bets) {
@@ -2277,8 +2439,7 @@ function renderBetHistory(bets) {
   }
 
   bets.slice(0, 30).forEach((bet) => {
-    const separator = bet.type === "trifecta" ? "→" : "・";
-    const horsesText = (bet.horses || []).join(separator);
+    const horsesText = formatBetHorsesForTicket(bet);
 
     let resultText = "結果待ち";
     if (bet.settled) resultText = bet.win ? `的中！ +${bet.payout || 0}coin` : "不的中";
@@ -2286,16 +2447,17 @@ function renderBetHistory(bets) {
     const item = document.createElement("div");
     item.className = "history-item";
     item.innerHTML = `
-      <div><strong>${escapeHTML(getBetTypeName(bet.type))}</strong>　${escapeHTML(horsesText)}番　${bet.amount}coin</div>
+      <div><strong>${escapeHTML(getBetTypeName(bet.type))}</strong>　${escapeHTML(horsesText)}　${bet.amount}coin</div>
       <div style="font-size:11px; color:#888; margin-top:3px;">${escapeHTML(bet.raceId)}　${escapeHTML(resultText)}</div>`;
     historyEl.appendChild(item);
   });
 }
 
+
 /* ----- レース結果の抽選（発走時刻になった最初のクライアントが実行） ----- */
 
-const RACE_DURATION_SECONDS = 20;
-const RACE_SEGMENTS = 20;
+const RACE_DURATION_SECONDS = 60;
+const RACE_SEGMENTS = 48;
 
 function generateWeightedRaceOrder() {
   const withKey = SAFE_RACE_HORSES.map((h) => {
@@ -2307,21 +2469,39 @@ function generateWeightedRaceOrder() {
   return withKey.map((h) => h.number);
 }
 
+/* 脚質ごとに「レースのどのタイミングで伸びるか」の形を変える。
+   （順位を決めるのではなく、あくまで“進み方”だけを変えるので、
+    能力の高い馬が必ず勝つわけではない） */
+function getStyleCurveMultiplier(style, frac) {
+  switch (style) {
+    case "start": return frac < 0.3 ? 1.5 : (frac < 0.7 ? 1.0 : 0.7);
+    case "front": return frac < 0.5 ? 1.25 : 0.9;
+    case "mid": return frac < 0.3 ? 0.8 : (frac < 0.75 ? 1.2 : 1.1);
+    case "closer": return frac < 0.6 ? 0.65 : 1.6;
+    case "stamina": return 1.0;
+    case "longshot": return 0.5 + Math.random() * 1.3;
+    default: return 1.0;
+  }
+}
+
 /* 最終着順(resultOrder)と矛盾しないように、各馬の「経過時間ごとの進み具合」をあらかじめ作っておく。
    これをレース結果と一緒にFirestoreへ保存することで、あとから見るどの端末でも
    まったく同じレース展開を再現できる（サーバーを使わずに演出を同期させるための仕組み）。 */
 function buildRaceCheckpoints(resultOrder) {
-  const gapStep = 0.02 + Math.random() * 0.03;
+  const gapStep = 0.015 + Math.random() * 0.025;
   const finalProgress = {};
 
   resultOrder.forEach((horseNumber, rankIndex) => {
-    finalProgress[horseNumber] = Math.max(0.72, 1 - rankIndex * gapStep);
+    finalProgress[horseNumber] = Math.max(0.7, 1 - rankIndex * gapStep);
   });
   finalProgress[resultOrder[0]] = 1;
 
   const rawWeights = {};
   SAFE_RACE_HORSES.forEach((h) => {
-    rawWeights[h.number] = Array.from({ length: RACE_SEGMENTS }, () => 0.3 + Math.random());
+    rawWeights[h.number] = Array.from({ length: RACE_SEGMENTS }, (_, s) => {
+      const frac = s / RACE_SEGMENTS;
+      return getStyleCurveMultiplier(h.style, frac) * (0.3 + Math.random());
+    });
   });
 
   SAFE_RACE_HORSES.forEach((h) => {
@@ -2346,6 +2526,42 @@ function buildRaceCheckpoints(resultOrder) {
   return checkpoints;
 }
 
+/* 【⑥ 詳細結果】タイム・着差を、実況と矛盾しない自然な数値で作る */
+function formatRaceTime(totalSeconds) {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds - m * 60;
+  return `${m}:${s.toFixed(1).padStart(4, "0")}`;
+}
+
+function getMarginLabel(gapSeconds) {
+  if (gapSeconds < 0.05) return "ハナ";
+  if (gapSeconds < 0.12) return "アタマ";
+  if (gapSeconds < 0.2) return "クビ";
+  if (gapSeconds < 0.35) return "1/2馬身";
+  if (gapSeconds < 0.55) return "3/4馬身";
+  if (gapSeconds < 0.8) return "1馬身";
+  if (gapSeconds < 1.2) return "1馬身1/2";
+  if (gapSeconds < 1.8) return "2馬身";
+  return `${Math.round(gapSeconds / 0.8)}馬身`;
+}
+
+function buildFinishStats(resultOrder) {
+  let currentSeconds = 116 + Math.random() * 10;
+  const stats = [{ number: resultOrder[0], seconds: currentSeconds, gapSeconds: 0 }];
+
+  for (let i = 1; i < resultOrder.length; i++) {
+    const gapSeconds = 0.05 + Math.random() * 0.55;
+    currentSeconds += gapSeconds;
+    stats.push({ number: resultOrder[i], seconds: currentSeconds, gapSeconds });
+  }
+
+  return stats.map((s, index) => ({
+    number: s.number,
+    timeText: formatRaceTime(s.seconds),
+    marginText: index === 0 ? "" : getMarginLabel(s.gapSeconds)
+  }));
+}
+
 async function tryGenerateRaceResult(raceId) {
   const raceRef = doc(db, "races", raceId);
 
@@ -2360,6 +2576,7 @@ async function tryGenerateRaceResult(raceId) {
         raceId,
         resultOrder,
         checkpoints: buildRaceCheckpoints(resultOrder),
+        finishStats: buildFinishStats(resultOrder),
         status: "finished",
         generatedAt: serverTimestamp()
       });
