@@ -2400,3 +2400,121 @@ button:disabled {
     }
 
 }
+
+
+/* ==================================================================
+   フェーズ④-2 追加分
+   ・ゆうダービーのレース演出（発走〜コーナー〜直線〜ゴール）
+================================================================== */
+
+.race-phase-banner {
+    text-align: center;
+    font-weight: 800;
+    font-size: 14px;
+
+    padding: 7px;
+    margin-bottom: 8px;
+
+    border-radius: 10px;
+
+    background: rgba(255, 255, 255, 0.85);
+    color: #111;
+
+    transition: opacity .2s ease;
+}
+
+.race-commentary {
+    margin-top: 8px;
+
+    padding: 8px 12px;
+
+    border-radius: 10px;
+
+    background: #111;
+    color: #fff;
+
+    font-size: 12px;
+
+    min-height: 18px;
+}
+
+.race-start-flash {
+    position: absolute;
+    inset: 0;
+
+    z-index: 5;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    font-size: clamp(22px, 6vw, 34px);
+    font-weight: 900;
+
+    color: #fff;
+
+    text-shadow: 0 2px 8px rgba(0, 0, 0, .5);
+
+    background: rgba(0, 0, 0, .18);
+
+    pointer-events: none;
+
+    animation: yuuStartFlash 1.4s ease forwards;
+}
+
+@keyframes yuuStartFlash {
+    0% { opacity: 0; transform: scale(.7); }
+    15% { opacity: 1; transform: scale(1.05); }
+    30% { transform: scale(1); }
+    75% { opacity: 1; }
+    100% { opacity: 0; }
+}
+
+.race-horse.mine .horse-number {
+    background: var(--yuu-accent-2);
+    color: #fff;
+
+    box-shadow: 0 0 0 3px rgba(255, 107, 157, .45);
+}
+
+.race-horse.mine .horse-body {
+    filter:
+        drop-shadow(2px 3px 2px rgba(0,0,0,.25))
+        drop-shadow(0 0 6px rgba(255, 107, 157, .8));
+}
+
+.race-leaderboard {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+
+    margin-top: 10px;
+}
+
+.race-leaderboard-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+
+    padding: 5px 10px;
+
+    border-radius: 8px;
+
+    background: #f5f6f8;
+
+    font-size: 12px;
+
+    transition: background-color .2s ease;
+}
+
+.race-leaderboard-item:first-child {
+    background: var(--yuu-accent-soft);
+    font-weight: 700;
+}
+
+.race-leaderboard-item .rank {
+    font-weight: 800;
+    width: 16px;
+
+    flex-shrink: 0;
+}
