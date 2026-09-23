@@ -90,6 +90,7 @@ let bettingLocked = false;
 let todayRaceResult = null;
 let todayRaceGenerationAttempted = false;
 let lastCheckedRaceId = null;
+let selectedBetHorses = [];
 
 /* =========================================================
    HTML要素取得（index.htmlのidと一致させています）
@@ -157,7 +158,9 @@ const raceTrack = document.getElementById("raceTrack");
 const raceInfo = document.getElementById("raceInfo");
 const oddsList = document.getElementById("oddsList");
 const betType = document.getElementById("betType");
-const betHorses = document.getElementById("betHorses");
+const betHorsesHint = document.getElementById("betHorsesHint");
+const betHorsesPicker = document.getElementById("betHorsesPicker");
+const betHorsesSelection = document.getElementById("betHorsesSelection");
 const betAmount = document.getElementById("betAmount");
 const betButton = document.getElementById("betButton");
 const horseList = document.getElementById("horseList");
@@ -1884,7 +1887,7 @@ function renderHorseList() {
 function updateBetFormEnabled() {
   const canBet = Boolean(currentUser && username) && !bettingLocked;
   if (betType) betType.disabled = !canBet;
-  if (betHorses) betHorses.disabled = !canBet;
+  if (betHorsesPicker) betHorsesPicker.classList.toggle("disabled", !canBet);
   if (betAmount) betAmount.disabled = !canBet;
   if (betButton) {
     betButton.disabled = !canBet;
@@ -1892,19 +1895,92 @@ function updateBetFormEnabled() {
   }
 }
 
-function parseBetHorses(text, type) {
+/* ----- 馬番号タップ選択 ----- */
+
+function getBetTypeHint(type, count) {
   const need = BET_TYPE_COUNT[type] || 1;
-  const nums = (text || "")
-    .split(/[,、\s]+/)
-    .map((s) => Number(s.trim()))
-    .filter((n) => Number.isInteger(n) && n >= 1 && n <= SAFE_RACE_HORSES.length);
-
-  const ordered = [];
-  nums.forEach((n) => { if (!ordered.includes(n)) ordered.push(n); });
-
-  if (ordered.length !== need) return null;
-  return type === "trifecta" ? ordered : [...ordered].sort((a, b) => a - b);
+  if (type === "trifecta") {
+    const labels = ["1着", "2着", "3着"];
+    if (count >= need) return "選択完了。もう一度タップすると選び直せます。";
+    return `${labels[count]}を選んでください。`;
+  }
+  if (need === 1) return "1頭選んでください。";
+  return `${need}頭選んでください（順番は関係ありません）。`;
 }
+
+function renderBetHorsesSelectionText() {
+  if (!betHorsesSelection) return;
+  const type = betType?.value || "win";
+
+  if (selectedBetHorses.length === 0) {
+    betHorsesSelection.innerHTML = "";
+    return;
+  }
+
+  if (type === "trifecta") {
+    const labels = ["1着", "2着", "3着"];
+    betHorsesSelection.innerHTML = selectedBetHorses
+      .map((num, i) => `<div>${escapeHTML(labels[i] || "")}：${num}番 ${escapeHTML(getHorseName(num))}</div>`)
+      .join("");
+  } else {
+    const text = selectedBetHorses.map((num) => `${num}番 ${getHorseName(num)}`).join("・");
+    betHorsesSelection.innerHTML = `<div>選択中：${escapeHTML(text)}</div>`;
+  }
+}
+
+function renderBetHorsesPicker() {
+  if (!betHorsesPicker) return;
+
+  const type = betType?.value || "win";
+  const need = BET_TYPE_COUNT[type] || 1;
+
+  betHorsesPicker.innerHTML = "";
+
+  SAFE_RACE_HORSES.forEach((horse) => {
+    const selectedIndex = selectedBetHorses.indexOf(horse.number);
+    const isSelected = selectedIndex !== -1;
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "bet-horse-button";
+    if (isSelected) btn.classList.add("selected");
+    if (!isSelected && selectedBetHorses.length >= need) btn.classList.add("disabled-choice");
+
+    let orderBadge = "";
+    if (isSelected && type === "trifecta") {
+      const labels = ["1着", "2着", "3着"];
+      orderBadge = `<span class="bet-horse-order">${escapeHTML(labels[selectedIndex] || "")}</span>`;
+    }
+
+    btn.innerHTML = `${orderBadge}<span class="bet-horse-number">${horse.number}</span><span class="bet-horse-name">${escapeHTML(horse.name)}</span>`;
+    btn.addEventListener("click", () => toggleBetHorseSelection(horse.number));
+    betHorsesPicker.appendChild(btn);
+  });
+
+  if (betHorsesHint) betHorsesHint.textContent = getBetTypeHint(type, selectedBetHorses.length);
+  renderBetHorsesSelectionText();
+}
+
+function toggleBetHorseSelection(number) {
+  const type = betType?.value || "win";
+  const need = BET_TYPE_COUNT[type] || 1;
+  const index = selectedBetHorses.indexOf(number);
+
+  if (index !== -1) {
+    selectedBetHorses.splice(index, 1);
+  } else {
+    if (selectedBetHorses.length >= need) return;
+    selectedBetHorses.push(number);
+  }
+  renderBetHorsesPicker();
+}
+
+function resetBetHorsesSelection() {
+  selectedBetHorses = [];
+  renderBetHorsesPicker();
+}
+
+betType?.addEventListener("change", resetBetHorsesSelection);
 
 betButton?.addEventListener("click", async () => {
   if (!currentUser || !username) return alert("ログインしてください。");
@@ -1912,10 +1988,10 @@ betButton?.addEventListener("click", async () => {
 
   const type = betType?.value || "win";
   const amount = Number(betAmount?.value || 0);
-  const horses = parseBetHorses(betHorses?.value, type);
+  const need = BET_TYPE_COUNT[type] || 1;
 
-  if (!horses) {
-    return alert(`${getBetTypeName(type)}は馬番号を${BET_TYPE_COUNT[type]}個、カンマ区切りで入力してください。`);
+  if (selectedBetHorses.length !== need) {
+    return alert(`${getBetTypeName(type)}は馬を${need}頭選んでください。`);
   }
   if (!Number.isInteger(amount) || amount < 10) {
     return alert("投票額は10ゆうcoin以上で入力してください。");
@@ -1923,6 +1999,8 @@ betButton?.addEventListener("click", async () => {
   if (amount > myCoins) {
     return alert("ゆうcoinが足りません。");
   }
+
+  const horses = [...selectedBetHorses];
 
   try {
     betButton.disabled = true;
@@ -1944,7 +2022,7 @@ betButton?.addEventListener("click", async () => {
     });
 
     alert("投票しました！");
-    if (betHorses) betHorses.value = "";
+    resetBetHorsesSelection();
   } catch (error) {
     console.error("投票エラー:", error);
     if (error.message === "NOT_ENOUGH_COINS") alert("ゆうcoinが足りません。");
@@ -2493,6 +2571,7 @@ function tickDerbyCountdown() {
 }
 
 function initializeSafeRace() {
+  resetBetHorsesSelection();
   updateBetFormEnabled();
   tickDerbyCountdown();
   if (raceCountdownTimer) clearInterval(raceCountdownTimer);
