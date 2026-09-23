@@ -12,7 +12,7 @@ import {
 
 import {
   getFirestore, collection, addDoc, getDocs, getDoc, doc, setDoc,
-  updateDoc, deleteDoc, query, where, onSnapshot, orderBy,
+  updateDoc, deleteDoc, query, where, onSnapshot, orderBy, limit,
   serverTimestamp, writeBatch, runTransaction
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
@@ -2062,7 +2062,9 @@ async function settleMyBets(raceId, resultOrder) {
   }
 }
 
-/* ----- 投票履歴（マイページ） ----- */
+/* ----- 投票履歴（マイページ）／今日の自分の馬の把握 ----- */
+
+let myTodayBetHorses = [];
 
 function listenMyBetHistory() {
   if (unsubscribeMyBetHistory) { unsubscribeMyBetHistory(); unsubscribeMyBetHistory = null; }
@@ -2070,7 +2072,15 @@ function listenMyBetHistory() {
 
   unsubscribeMyBetHistory = onSnapshot(
     query(collection(db, "raceBets"), where("uid", "==", currentUser.uid), orderBy("createdAt", "desc")),
-    (snap) => renderBetHistory(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (snap) => {
+      const bets = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderBetHistory(bets);
+
+      const raceId = getTodayRaceId();
+      const horses = new Set();
+      bets.filter((b) => b.raceId === raceId).forEach((b) => (b.horses || []).forEach((h) => horses.add(h)));
+      myTodayBetHorses = [...horses];
+    },
     (error) => console.error("投票履歴監視エラー:", error)
   );
 }
@@ -2102,6 +2112,9 @@ function renderBetHistory(bets) {
 
 /* ----- レース結果の抽選（発走時刻になった最初のクライアントが実行） ----- */
 
+const RACE_DURATION_SECONDS = 20;
+const RACE_SEGMENTS = 20;
+
 function generateWeightedRaceOrder() {
   const withKey = SAFE_RACE_HORSES.map((h) => {
     const effectivePower = Math.max(0.1, h.power * (0.4 + Math.random() * 1.3));
@@ -2112,6 +2125,45 @@ function generateWeightedRaceOrder() {
   return withKey.map((h) => h.number);
 }
 
+/* 最終着順(resultOrder)と矛盾しないように、各馬の「経過時間ごとの進み具合」をあらかじめ作っておく。
+   これをレース結果と一緒にFirestoreへ保存することで、あとから見るどの端末でも
+   まったく同じレース展開を再現できる（サーバーを使わずに演出を同期させるための仕組み）。 */
+function buildRaceCheckpoints(resultOrder) {
+  const gapStep = 0.02 + Math.random() * 0.03;
+  const finalProgress = {};
+
+  resultOrder.forEach((horseNumber, rankIndex) => {
+    finalProgress[horseNumber] = Math.max(0.72, 1 - rankIndex * gapStep);
+  });
+  finalProgress[resultOrder[0]] = 1;
+
+  const rawWeights = {};
+  SAFE_RACE_HORSES.forEach((h) => {
+    rawWeights[h.number] = Array.from({ length: RACE_SEGMENTS }, () => 0.3 + Math.random());
+  });
+
+  SAFE_RACE_HORSES.forEach((h) => {
+    const total = rawWeights[h.number].reduce((a, b) => a + b, 0);
+    const scale = finalProgress[h.number] / total;
+    rawWeights[h.number] = rawWeights[h.number].map((w) => w * scale);
+  });
+
+  const cumulative = {};
+  SAFE_RACE_HORSES.forEach((h) => { cumulative[h.number] = 0; });
+
+  const checkpoints = [];
+  for (let s = 0; s < RACE_SEGMENTS; s++) {
+    const frame = {};
+    SAFE_RACE_HORSES.forEach((h) => {
+      cumulative[h.number] += rawWeights[h.number][s];
+      frame[h.number] = Math.min(1, Number(cumulative[h.number].toFixed(4)));
+    });
+    checkpoints.push(frame);
+  }
+
+  return checkpoints;
+}
+
 async function tryGenerateRaceResult(raceId) {
   const raceRef = doc(db, "races", raceId);
 
@@ -2120,9 +2172,12 @@ async function tryGenerateRaceResult(raceId) {
       const snap = await transaction.get(raceRef);
       if (snap.exists()) return;
 
+      const resultOrder = generateWeightedRaceOrder();
+
       transaction.set(raceRef, {
         raceId,
-        resultOrder: generateWeightedRaceOrder(),
+        resultOrder,
+        checkpoints: buildRaceCheckpoints(resultOrder),
         status: "finished",
         generatedAt: serverTimestamp()
       });
@@ -2132,7 +2187,221 @@ async function tryGenerateRaceResult(raceId) {
   }
 }
 
-/* ----- 本日のレース監視・カウントダウン ----- */
+/* ----- 経過時間から、各馬の現在位置(0〜1)を計算 ----- */
+
+function getHorseProgressAt(checkpoints, elapsedSeconds) {
+  const zero = {};
+  SAFE_RACE_HORSES.forEach((h) => { zero[h.number] = 0; });
+
+  if (!checkpoints || checkpoints.length === 0) return zero;
+  if (elapsedSeconds <= 0) return zero;
+
+  const segDuration = RACE_DURATION_SECONDS / RACE_SEGMENTS;
+  if (elapsedSeconds >= RACE_DURATION_SECONDS) return checkpoints[checkpoints.length - 1];
+
+  const rawIndex = elapsedSeconds / segDuration;
+  const idx = Math.floor(rawIndex);
+  const frac = rawIndex - idx;
+  const prev = idx === 0 ? zero : checkpoints[idx - 1];
+  const curr = checkpoints[idx] || checkpoints[checkpoints.length - 1];
+
+  const result = {};
+  SAFE_RACE_HORSES.forEach((h) => {
+    const prevVal = prev[h.number] || 0;
+    const currVal = curr[h.number] ?? prevVal;
+    result[h.number] = prevVal + (currVal - prevVal) * frac;
+  });
+  return result;
+}
+
+/* ----- レース展開の実況・フェーズ表示 ----- */
+
+const RACE_PHASE_LABELS = {
+  lineup: "🏇 スタート待機中",
+  start: "🏁 スタート！",
+  pack: "集団戦",
+  corner: "🔄 コーナー",
+  straight: "🔥 最終直線",
+  finishing: "ゴール目前！",
+  finished: "🏆 ゴール"
+};
+
+function getRacePhase(elapsed) {
+  if (elapsed < 0) return "lineup";
+  if (elapsed < 1.2) return "start";
+  const frac = elapsed / RACE_DURATION_SECONDS;
+  if (frac < 0.45) return "pack";
+  if (frac < 0.7) return "corner";
+  if (frac < 0.9) return "straight";
+  if (frac < 1) return "finishing";
+  return "finished";
+}
+
+function getStandings(progress) {
+  return SAFE_RACE_HORSES
+    .map((h) => ({ number: h.number, name: h.name, progress: progress[h.number] || 0 }))
+    .sort((a, b) => b.progress - a.progress);
+}
+
+function pickCommentary(phase, standings) {
+  const leader = standings[0];
+  const second = standings[1];
+  if (!leader) return "";
+
+  const templates = {
+    lineup: ["まもなくスタートです。各馬、ゲートに向かっています。"],
+    start: ["スタートしました！"],
+    pack: [
+      `${getHorseName(leader.number)}が先頭に立っています。`,
+      second ? `${getHorseName(leader.number)}と${getHorseName(second.number)}が競り合っています。` : ""
+    ].filter(Boolean),
+    corner: [
+      `コーナーです。${getHorseName(leader.number)}先頭でコーナーを回ります！`,
+      second ? `内から${getHorseName(second.number)}が差してきた！` : ""
+    ].filter(Boolean),
+    straight: [
+      `最終直線に入りました！先頭は${getHorseName(leader.number)}！`,
+      second ? `${getHorseName(second.number)}が猛追しています！` : ""
+    ].filter(Boolean),
+    finishing: [`ゴール目前！${getHorseName(leader.number)}が押し切るか！`],
+    finished: [`ゴールしました！優勝は${getHorseName(leader.number)}！`]
+  };
+
+  const pool = templates[phase] && templates[phase].length ? templates[phase] : templates.pack;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+/* ----- レーストラックの描画・更新 ----- */
+
+let lastElapsedWasNegative = null;
+let lastCommentaryUpdateAt = -999;
+let lastCommentaryText = "";
+
+function triggerStartFlash() {
+  if (!raceTrack) return;
+  const flash = document.createElement("div");
+  flash.className = "race-start-flash";
+  flash.textContent = "🏁 スタート！";
+  raceTrack.appendChild(flash);
+  setTimeout(() => flash.remove(), 1500);
+}
+
+function ensureRaceTrackLanes(raceId) {
+  if (!raceTrack) return;
+  if (raceTrack.dataset.raceId === raceId) return;
+
+  raceTrack.dataset.raceId = raceId;
+  raceTrack.innerHTML = "";
+
+  SAFE_RACE_HORSES.forEach((horse) => {
+    const lane = document.createElement("div");
+    lane.className = "race-lane";
+
+    const el = document.createElement("div");
+    el.className = "race-horse";
+    el.id = `raceHorse${horse.number}`;
+    el.innerHTML = `<span class="horse-number">${horse.number}</span><span class="horse-body">🐎</span>`;
+
+    lane.appendChild(el);
+    raceTrack.appendChild(lane);
+  });
+}
+
+function renderRaceTrackFrame(progress) {
+  SAFE_RACE_HORSES.forEach((horse) => {
+    const el = document.getElementById(`raceHorse${horse.number}`);
+    if (!el) return;
+    const p = progress[horse.number] || 0;
+    el.style.left = `${Math.min(90, p * 90)}%`;
+    el.classList.toggle("mine", myTodayBetHorses.includes(horse.number));
+  });
+}
+
+/* ----- レース情報パネル（スケジュール・実況・順位・結果・過去結果） ----- */
+
+function ensureDerbyLiveStructure() {
+  if (!raceInfo || raceInfo.dataset.liveReady === "1") return;
+  raceInfo.dataset.liveReady = "1";
+  raceInfo.innerHTML = `
+    <div id="raceScheduleLine" style="font-weight:700;"></div>
+    <div id="racePhaseBanner" class="race-phase-banner hidden"></div>
+    <div id="raceCommentary" class="race-commentary hidden"></div>
+    <div id="raceLeaderboard" class="race-leaderboard"></div>
+    <div id="raceFinalResult"></div>
+    <div id="racePastResults"></div>
+  `;
+}
+
+function renderRaceInfo() {
+  if (!raceInfo) return;
+  ensureDerbyLiveStructure();
+
+  const { raceTime, closeTime } = getRaceScheduleForToday();
+  const now = new Date();
+  const timeText = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
+  let statusLine;
+  if (now < closeTime) statusLine = `投票受付中（締切 ${timeText(closeTime)}）`;
+  else if (now < raceTime) statusLine = "投票は締め切りました。まもなく発走です。";
+  else if (todayRaceResult) statusLine = "本日のレースは終了しました。";
+  else statusLine = "集計中です…";
+
+  const scheduleLine = document.getElementById("raceScheduleLine");
+  if (scheduleLine) scheduleLine.textContent = `本日のレース（発走 ${timeText(raceTime)}）　${statusLine}`;
+
+  const finalResultEl = document.getElementById("raceFinalResult");
+  if (finalResultEl) {
+    finalResultEl.innerHTML = todayRaceResult ? `
+      <div style="margin-top:8px;">
+        <strong>結果</strong>　
+        1着：${escapeHTML(getHorseName(todayRaceResult.resultOrder[0]))}　
+        2着：${escapeHTML(getHorseName(todayRaceResult.resultOrder[1]))}　
+        3着：${escapeHTML(getHorseName(todayRaceResult.resultOrder[2]))}
+      </div>` : "";
+  }
+
+  loadRecentRaceResults();
+}
+
+async function loadRecentRaceResults() {
+  const el = document.getElementById("racePastResults");
+  if (!el) return;
+
+  try {
+    const snap = await getDocs(query(collection(db, "races"), orderBy("raceId", "desc"), limit(6)));
+    const races = snap.docs.map((d) => d.data()).filter((r) => r.raceId !== getTodayRaceId() && r.resultOrder);
+
+    if (races.length === 0) { el.innerHTML = ""; return; }
+
+    let html = `<div style="margin-top:14px; font-weight:700; font-size:12px; color:#777;">過去のレース結果</div>`;
+    races.slice(0, 5).forEach((race) => {
+      html += `<div style="font-size:11px; color:#888; margin-top:4px;">
+        ${escapeHTML(race.raceId)}　1着:${escapeHTML(getHorseName(race.resultOrder[0]))}　
+        2着:${escapeHTML(getHorseName(race.resultOrder[1]))}　
+        3着:${escapeHTML(getHorseName(race.resultOrder[2]))}
+      </div>`;
+    });
+    el.innerHTML = html;
+  } catch (error) {
+    console.error("過去レース取得エラー:", error);
+  }
+}
+
+/* ----- 毎ティック：カウントダウン・演出・順位・実況の更新 ----- */
+
+function refreshDerbySubscriptionsIfNeeded() {
+  const raceId = getTodayRaceId();
+  if (raceId === lastCheckedRaceId) return;
+
+  lastCheckedRaceId = raceId;
+  todayRaceResult = null;
+  todayRaceGenerationAttempted = false;
+  lastElapsedWasNegative = null;
+  lastCommentaryUpdateAt = -999;
+
+  listenTodayRace(raceId);
+  listenWinBets(raceId);
+}
 
 function listenTodayRace(raceId) {
   if (unsubscribeTodayRace) { unsubscribeTodayRace(); unsubscribeTodayRace = null; }
@@ -2152,49 +2421,13 @@ function listenTodayRace(raceId) {
   );
 }
 
-function renderRaceInfo() {
-  if (!raceInfo) return;
-
-  const { raceTime, closeTime } = getRaceScheduleForToday();
-  const now = new Date();
-  const timeText = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-
-  let statusLine;
-  if (now < closeTime) statusLine = `投票受付中（締切 ${timeText(closeTime)}）`;
-  else if (now < raceTime) statusLine = "投票は締め切りました。まもなく発走です。";
-  else if (todayRaceResult) statusLine = "本日のレースは終了しました。";
-  else statusLine = "集計中です…";
-
-  raceInfo.innerHTML = `
-    <div><strong>本日のレース</strong>（発走 ${timeText(raceTime)}）</div>
-    <div>${escapeHTML(statusLine)}</div>
-    ${todayRaceResult ? `
-      <div style="margin-top:8px;">
-        <strong>結果</strong>　
-        1着：${escapeHTML(getHorseName(todayRaceResult.resultOrder[0]))}　
-        2着：${escapeHTML(getHorseName(todayRaceResult.resultOrder[1]))}　
-        3着：${escapeHTML(getHorseName(todayRaceResult.resultOrder[2]))}
-      </div>` : ""}`;
-}
-
-function refreshDerbySubscriptionsIfNeeded() {
-  const raceId = getTodayRaceId();
-  if (raceId === lastCheckedRaceId) return;
-
-  lastCheckedRaceId = raceId;
-  todayRaceResult = null;
-  todayRaceGenerationAttempted = false;
-
-  listenTodayRace(raceId);
-  listenWinBets(raceId);
-}
-
 function tickDerbyCountdown() {
   refreshDerbySubscriptionsIfNeeded();
 
   const raceId = getTodayRaceId();
   const { raceTime, closeTime } = getRaceScheduleForToday();
   const now = new Date();
+  const elapsed = (now.getTime() - raceTime.getTime()) / 1000;
 
   const wasLocked = bettingLocked;
   bettingLocked = now >= closeTime;
@@ -2209,13 +2442,61 @@ function tickDerbyCountdown() {
     todayRaceGenerationAttempted = true;
     tryGenerateRaceResult(raceId);
   }
+
+  /* ここから演出（トラック・実況・順位表） */
+  ensureRaceTrackLanes(raceId);
+
+  if (lastElapsedWasNegative === true && elapsed >= 0) triggerStartFlash();
+  lastElapsedWasNegative = elapsed < 0;
+
+  const checkpoints = todayRaceResult?.checkpoints || null;
+  const progress = checkpoints ? getHorseProgressAt(checkpoints, elapsed) : (() => {
+    const zero = {};
+    SAFE_RACE_HORSES.forEach((h) => { zero[h.number] = 0; });
+    return zero;
+  })();
+
+  renderRaceTrackFrame(progress);
+
+  const phase = getRacePhase(elapsed);
+  const banner = document.getElementById("racePhaseBanner");
+  const commentaryEl = document.getElementById("raceCommentary");
+  const leaderboardEl = document.getElementById("raceLeaderboard");
+
+  if (phase === "lineup") {
+    banner?.classList.add("hidden");
+    commentaryEl?.classList.add("hidden");
+    if (leaderboardEl) leaderboardEl.innerHTML = "";
+  } else {
+    if (banner) { banner.classList.remove("hidden"); banner.textContent = RACE_PHASE_LABELS[phase]; }
+    commentaryEl?.classList.remove("hidden");
+
+    const standings = getStandings(progress);
+
+    if (elapsed - lastCommentaryUpdateAt > 2.5 || lastCommentaryUpdateAt === -999) {
+      lastCommentaryUpdateAt = elapsed;
+      lastCommentaryText = pickCommentary(phase, standings);
+    }
+    if (commentaryEl) commentaryEl.textContent = lastCommentaryText;
+
+    if (leaderboardEl) {
+      leaderboardEl.innerHTML = "";
+      standings.slice(0, 5).forEach((horse, index) => {
+        const row = document.createElement("div");
+        row.className = "race-leaderboard-item";
+        const mine = myTodayBetHorses.includes(horse.number) ? " ⭐" : "";
+        row.innerHTML = `<span class="rank">${index + 1}</span><span>${horse.number}番 ${escapeHTML(horse.name)}${mine}</span>`;
+        leaderboardEl.appendChild(row);
+      });
+    }
+  }
 }
 
 function initializeSafeRace() {
   updateBetFormEnabled();
   tickDerbyCountdown();
   if (raceCountdownTimer) clearInterval(raceCountdownTimer);
-  raceCountdownTimer = setInterval(tickDerbyCountdown, 1000);
+  raceCountdownTimer = setInterval(tickDerbyCountdown, 150);
 }
 
 /* =========================================================
