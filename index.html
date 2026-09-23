@@ -696,23 +696,23 @@
                             >
 
                                 <option value="win">
-                                    単勝
+                                    単勝（1着になる馬を当てる）
                                 </option>
 
                                 <option value="place">
-                                    複勝
+                                    複勝（3着以内になる馬を当てる）
                                 </option>
 
                                 <option value="quinella">
-                                    馬連
+                                    馬連（1着・2着になる2頭を順番なしで当てる）
                                 </option>
 
                                 <option value="trio">
-                                    三連複
+                                    三連複（1着・2着・3着になる3頭を順番なしで当てる）
                                 </option>
 
                                 <option value="trifecta">
-                                    三連単
+                                    三連単（1着・2着・3着を順番通りに当てる）
                                 </option>
 
                             </select>
@@ -724,12 +724,24 @@
                             </label>
 
 
-                            <input
-                                id="betHorses"
-                                type="text"
-                                placeholder="例：1 または 1,2,3"
-                                autocomplete="off"
-                            >
+                            <div id="betHorsesArea">
+
+                                <div
+                                    id="betHorsesHint"
+                                    class="bet-horses-hint"
+                                ></div>
+
+                                <div
+                                    id="betHorsesPicker"
+                                    class="bet-horses-picker"
+                                ></div>
+
+                                <div
+                                    id="betHorsesSelection"
+                                    class="bet-horses-selection"
+                                ></div>
+
+                            </div>
 
 
 
