@@ -468,6 +468,7 @@ async function startApp() {
     initializeNotifications();
     listenMyCoins();
     listenMyBetHistory();
+    listenIncomingMessageNotifications();
     try { initializeSafeRace(); } catch (e) { console.error("レース初期化エラー:", e); }
   } catch (error) {
     console.error("アプリ起動エラー:", error);
@@ -1585,6 +1586,106 @@ function showInAppNotification(payload) {
 }
 
 /* =========================================================
+   アプリ内トースト通知／ブラウザ通知
+   （メッセージ受信・ゆうダービー開始などに使用。
+    FCM/サービスワーカーの設定に依存せず、常に動く軽量版）
+========================================================= */
+
+function showAppToast(title, body) {
+  const notification = document.createElement("div");
+  notification.className = "notification";
+
+  const titleElement = document.createElement("div");
+  titleElement.className = "notification-title";
+  titleElement.textContent = title;
+
+  const bodyElement = document.createElement("div");
+  bodyElement.className = "notification-body";
+  bodyElement.textContent = body;
+
+  notification.append(titleElement, bodyElement);
+  document.body.appendChild(notification);
+
+  requestAnimationFrame(() => notification.classList.add("show"));
+
+  setTimeout(() => {
+    notification.classList.remove("show");
+    setTimeout(() => notification.remove(), 300);
+  }, 4000);
+}
+
+function showBrowserNotification(title, body) {
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission !== "granted") return;
+
+  /* 今まさにこのタブを見ている間は、ブラウザ通知は出さない（アプリ内トーストだけで十分なため） */
+  if (document.visibilityState === "visible" && document.hasFocus()) return;
+
+  try {
+    new Notification(title, { body });
+  } catch (error) {
+    console.error("ブラウザ通知エラー:", error);
+  }
+}
+
+/* ----- メッセージ受信通知 ----- */
+
+let unsubscribeGlobalMessageWatch = null;
+let messageWatchInitialized = false;
+let lastNotifiedMessageId = null;
+
+function listenIncomingMessageNotifications() {
+  if (unsubscribeGlobalMessageWatch) { unsubscribeGlobalMessageWatch(); unsubscribeGlobalMessageWatch = null; }
+  if (!username) return;
+
+  messageWatchInitialized = false;
+  lastNotifiedMessageId = null;
+
+  unsubscribeGlobalMessageWatch = onSnapshot(
+    query(collection(db, "messages"), orderBy("createdAt", "desc"), limit(1)),
+    (snapshot) => {
+      const docSnap = snapshot.docs[0];
+      if (!docSnap) { messageWatchInitialized = true; return; }
+
+      const message = { id: docSnap.id, ...docSnap.data() };
+
+      /* ログイン直後、最初のスナップショットは「既にある最新メッセージ」なので通知しない */
+      if (!messageWatchInitialized) {
+        messageWatchInitialized = true;
+        lastNotifiedMessageId = message.id;
+        return;
+      }
+
+      if (message.id === lastNotifiedMessageId) return;
+      lastNotifiedMessageId = message.id;
+
+      if (message.deleted) return;
+      if (message.sender === username) return;
+
+      const isForMe =
+        (message.type === "friend" && message.receiver === username) ||
+        (message.type === "group" && groupsData.some((g) => g.id === message.groupId));
+
+      if (!isForMe) return;
+
+      const isCurrentlyOpenChat =
+        (selectedChatType === "friend" && message.type === "friend" && selectedChat === message.sender) ||
+        (selectedChatType === "group" && message.type === "group" && selectedChat === message.groupId);
+
+      /* 今まさにその相手とのチャットを開いて見ている場合は、うるさいので通知しない */
+      if (isCurrentlyOpenChat && document.visibilityState === "visible" && document.hasFocus()) return;
+
+      const title = message.type === "group" ? `${message.sender}（グループ）` : message.sender;
+      const body = message.image ? "画像を送信しました" : (message.text || "メッセージが届きました");
+
+      showAppToast(title, body);
+      showBrowserNotification(`ゆうChat - ${title}`, body);
+    },
+    (error) => console.error("メッセージ通知監視エラー:", error)
+  );
+}
+
+/* =========================================================
    タブ切り替え
 ========================================================= */
 
@@ -1632,12 +1733,15 @@ logoutButton?.addEventListener("click", async () => {
     if (unsubscribeTodayRace) { unsubscribeTodayRace(); unsubscribeTodayRace = null; }
     if (unsubscribeWinBets) { unsubscribeWinBets(); unsubscribeWinBets = null; }
     if (unsubscribeMyBetHistory) { unsubscribeMyBetHistory(); unsubscribeMyBetHistory = null; }
+    if (unsubscribeGlobalMessageWatch) { unsubscribeGlobalMessageWatch(); unsubscribeGlobalMessageWatch = null; }
     if (raceCountdownTimer) { clearInterval(raceCountdownTimer); raceCountdownTimer = null; }
     lastCheckedRaceId = null;
     todayRaceResult = null;
     todayRaceGenerationAttempted = false;
     currentWinPool = {};
     myCoins = 0;
+    messageWatchInitialized = false;
+    lastNotifiedMessageId = null;
 
     await updateOnlineStatus(false);
     await signOut(auth);
@@ -2524,7 +2628,11 @@ function tickDerbyCountdown() {
   /* ここから演出（トラック・実況・順位表） */
   ensureRaceTrackLanes(raceId);
 
-  if (lastElapsedWasNegative === true && elapsed >= 0) triggerStartFlash();
+  if (lastElapsedWasNegative === true && elapsed >= 0) {
+    triggerStartFlash();
+    showAppToast("🏇 ゆうダービー", "レースがスタートしました！");
+    showBrowserNotification("🏇 ゆうダービー", "レースがスタートしました！");
+  }
   lastElapsedWasNegative = elapsed < 0;
 
   const checkpoints = todayRaceResult?.checkpoints || null;
