@@ -894,6 +894,32 @@ button {
         );
 
     border: 5px solid #5c9e5c;
+
+    transition: transform .7s ease;
+    transform-origin: center center;
+}
+
+.race-track::before {
+    content: "";
+
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+
+    height: 12px;
+
+    background: repeating-linear-gradient(
+        90deg,
+        #ffd166 0 6px,
+        #ef476f 6px 12px,
+        #06d6a0 12px 18px,
+        #118ab2 18px 24px
+    );
+
+    opacity: .55;
+
+    z-index: 1;
 }
 
 .race-lane {
@@ -1442,6 +1468,36 @@ button {
     width: 30px;
 
     font-weight: 800;
+}
+
+.ranking-item.rank-1 {
+    background: linear-gradient(135deg, #fff6d6, #ffe89e);
+    border-color: #f0cf6a;
+}
+
+.ranking-item.rank-2 {
+    background: linear-gradient(135deg, #f3f5f8, #dfe3e9);
+    border-color: #c3c9d1;
+}
+
+.ranking-item.rank-3 {
+    background: linear-gradient(135deg, #ffe9dc, #f3cba9);
+    border-color: #e0ab7e;
+}
+
+.ranking-item.rank-1 .ranking-number,
+.ranking-item.rank-2 .ranking-number,
+.ranking-item.rank-3 .ranking-number {
+    font-size: 18px;
+}
+
+.ranking-item.me {
+    border: 2px solid var(--yuu-accent-2);
+}
+
+.ranking-item-self {
+    margin-top: 6px;
+    opacity: .9;
 }
 
 
@@ -2617,4 +2673,390 @@ button:disabled {
     line-height: 1.6;
 
     margin-bottom: 4px;
+}
+
+
+/* ==================================================================
+   今回の追加分（ゆうダービー大幅リニューアル）
+   ・カメラワーク／ゲート・ゴール演出／ギャロップアニメーション
+   ・購入馬券／コイン増減／詳細結果／過去結果／ランキング表示
+================================================================== */
+
+/* ----- カメラワーク（場面に応じてズーム・視点を切り替え） ----- */
+
+.race-camera-start {
+    transform: scale(1.18) translateX(-12%);
+}
+
+.race-camera-wide {
+    transform: scale(1) translateX(0);
+}
+
+.race-camera-stretch {
+    transform: scale(1.12) translateX(10%);
+}
+
+.race-camera-finish {
+    transform: scale(1.28) translateX(16%);
+}
+
+/* ----- スタートゲート ----- */
+
+.race-gate {
+    position: absolute;
+    top: 10px;
+    bottom: 10px;
+    left: 1%;
+
+    width: 10px;
+
+    background: repeating-linear-gradient(
+        180deg,
+        #444 0 6px,
+        #777 6px 12px
+    );
+
+    border-radius: 3px;
+
+    z-index: 3;
+
+    opacity: 1;
+
+    transition: opacity .6s ease;
+}
+
+.race-track.gate-passed .race-gate {
+    opacity: .18;
+}
+
+/* ----- ゴール板 ----- */
+
+.race-finish-line {
+    position: absolute;
+    top: 6px;
+    bottom: 6px;
+    left: 90%;
+
+    width: 6px;
+
+    background: repeating-linear-gradient(
+        180deg,
+        #111 0 8px,
+        #fff 8px 16px
+    );
+
+    z-index: 3;
+}
+
+.race-finish-line span {
+    position: absolute;
+    top: -22px;
+    left: 50%;
+
+    transform: translateX(-50%);
+
+    font-size: 16px;
+}
+
+/* ----- 馬（ギャロップ演出・追い上げ表現） ----- */
+
+.horse-trail {
+    position: absolute;
+    left: -16px;
+    top: 50%;
+
+    width: 0;
+    height: 2px;
+
+    transform: translateY(-50%);
+
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.85));
+
+    opacity: 0;
+
+    transition: opacity .2s ease;
+}
+
+.race-track.race-running .race-horse .horse-trail {
+    width: 14px;
+    opacity: .8;
+}
+
+.race-track.race-running .race-horse .horse-body {
+    animation: yuuGallop .45s infinite ease-in-out;
+}
+
+@keyframes yuuGallop {
+    0%, 100% { transform: translateY(0) rotate(-3deg); }
+    50% { transform: translateY(-4px) rotate(3deg); }
+}
+
+.race-horse.mine .horse-trail {
+    background: linear-gradient(90deg, transparent, rgba(255,107,157,.9));
+}
+
+/* ----- レース情報パネル：スケジュール・馬券・結果まわり ----- */
+
+.race-schedule-line {
+    font-weight: 700;
+    font-size: 13px;
+
+    margin-bottom: 4px;
+}
+
+.race-my-tickets {
+    margin-top: 10px;
+
+    padding: 10px 12px;
+
+    border-radius: 12px;
+
+    background: #f7f8fa;
+
+    border: 1px solid #e5e7eb;
+}
+
+.race-tickets-title {
+    font-weight: 700;
+    font-size: 12px;
+
+    margin-bottom: 6px;
+}
+
+.race-ticket-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+
+    padding: 6px 0;
+
+    font-size: 12px;
+
+    border-top: 1px dashed #dfe3e8;
+}
+
+.race-ticket-item:first-of-type {
+    border-top: none;
+}
+
+.race-ticket-type {
+    font-weight: 700;
+
+    flex-shrink: 0;
+}
+
+.race-ticket-horses {
+    flex: 1;
+
+    padding: 0 6px;
+
+    color: #555;
+}
+
+.race-ticket-amount {
+    flex-shrink: 0;
+
+    font-weight: 700;
+
+    color: var(--yuu-accent-2);
+}
+
+.race-tickets-total {
+    margin-top: 6px;
+
+    padding-top: 6px;
+
+    border-top: 1px solid #dfe3e8;
+
+    font-size: 11px;
+    font-weight: 700;
+
+    text-align: right;
+
+    color: #777;
+}
+
+.race-final-result {
+    margin-top: 10px;
+
+    padding: 10px 12px;
+
+    border-radius: 12px;
+
+    background: #fff8e8;
+
+    border: 1px solid #f0d98a;
+
+    font-size: 13px;
+
+    line-height: 1.7;
+}
+
+.race-final-result-title {
+    font-weight: 800;
+
+    margin-bottom: 3px;
+}
+
+.race-detailed-result {
+    margin-top: 10px;
+}
+
+.race-detailed-title {
+    font-weight: 700;
+    font-size: 12px;
+
+    margin-bottom: 6px;
+
+    color: #777;
+}
+
+.race-result-row {
+    display: grid;
+    grid-template-columns: 40px 1fr 56px 56px 50px;
+    align-items: center;
+    gap: 6px;
+
+    padding: 6px 8px;
+
+    border-radius: 8px;
+
+    background: #f6f7f9;
+
+    font-size: 11px;
+
+    margin-bottom: 4px;
+}
+
+.race-result-rank {
+    font-weight: 800;
+    font-size: 13px;
+}
+
+.race-result-horse {
+    font-weight: 700;
+
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.race-result-time,
+.race-result-margin,
+.race-result-pop {
+    color: #777;
+
+    text-align: right;
+}
+
+.race-my-result {
+    margin-top: 10px;
+
+    padding: 12px;
+
+    border-radius: 14px;
+
+    font-size: 13px;
+}
+
+.race-my-result.win {
+    background: linear-gradient(135deg, #fff0f6, #ffe1ec);
+    border: 1px solid var(--yuu-accent-2);
+}
+
+.race-my-result.lose {
+    background: #f3f4f6;
+    border: 1px solid #d7dbe0;
+}
+
+.race-my-result-title {
+    font-weight: 800;
+
+    margin-bottom: 6px;
+}
+
+.race-my-result-row {
+    display: flex;
+    justify-content: space-between;
+
+    padding: 3px 0;
+}
+
+.race-my-result-row.net {
+    font-weight: 800;
+    font-size: 15px;
+
+    border-top: 1px dashed rgba(0,0,0,.15);
+    margin-top: 4px;
+    padding-top: 6px;
+}
+
+.race-my-result.win .race-my-result-row.net span:last-child {
+    color: #ff3d78;
+}
+
+.race-my-result.lose .race-my-result-row.net span:last-child {
+    color: #556;
+}
+
+.race-my-result-row.balance {
+    font-weight: 700;
+
+    color: #555;
+}
+
+.race-my-result-pending {
+    margin-top: 10px;
+
+    padding: 10px 12px;
+
+    border-radius: 12px;
+
+    background: #f6f7f9;
+
+    font-size: 12px;
+
+    color: #888;
+}
+
+.race-past-title {
+    margin-top: 14px;
+
+    font-weight: 700;
+    font-size: 12px;
+
+    color: #777;
+}
+
+.race-past-item {
+    font-size: 11px;
+
+    color: #888;
+
+    margin-top: 4px;
+}
+
+.race-ranking-title {
+    margin-top: 16px;
+
+    font-weight: 700;
+    font-size: 13px;
+}
+
+
+/* ----- スマホでも見やすく ----- */
+
+@media (max-width: 700px) {
+
+    .race-result-row {
+        grid-template-columns: 34px 1fr 46px 46px 40px;
+
+        font-size: 10px;
+    }
+
+    .race-my-result-row.net {
+        font-size: 14px;
+    }
+
 }
