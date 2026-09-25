@@ -22,7 +22,8 @@ import {
 
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously,
-  onAuthStateChanged, signOut
+  onAuthStateChanged, signOut,
+  signInWithEmailAndPassword, linkWithCredential, EmailAuthProvider
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 
 /* =========================================================
@@ -87,7 +88,7 @@ let unsubscribeMyBetHistory = null;
 let raceCountdownTimer = null;
 let currentWinPool = {};
 let liveRaceResult = null;
-let liveRaceGenerationAttemptedFor = null;
+let lastGenerationAttemptAt = -999;
 let lastActiveBettingRaceId = null;
 let lastLiveRaceId = null;
 let selectedBetHorses = [];
@@ -106,11 +107,21 @@ const appElement = document.getElementById("app");
 const googleLoginButton = document.getElementById("googleLoginButton");
 const guestLoginButton = document.getElementById("guestLoginButton");
 const existingLoginButton = document.getElementById("existingLoginButton");
+const passwordLoginButton = document.getElementById("passwordLoginButton");
 const loginError = document.getElementById("loginError");
 
 const nameInput = document.getElementById("nameInput");
 const startChatButton = document.getElementById("startChatButton");
 const nameError = document.getElementById("nameError");
+
+const passwordLoginScreen = document.getElementById("passwordLoginScreen");
+const passwordLoginUsernameInput = document.getElementById("passwordLoginUsernameInput");
+const passwordLoginPasswordInput = document.getElementById("passwordLoginPasswordInput");
+const passwordLoginSubmitButton = document.getElementById("passwordLoginSubmitButton");
+const passwordLoginError = document.getElementById("passwordLoginError");
+const passwordLoginBackButton = document.getElementById("passwordLoginBackButton");
+
+const modalEl = document.getElementById("modal");
 
 const recoverScreen = document.getElementById("recoverScreen");
 const recoverStepText = document.getElementById("recoverStepText");
@@ -253,6 +264,73 @@ existingLoginButton?.addEventListener("click", () => {
   showRecoverAuthStep();
 });
 
+/* =========================================================
+   ユーザー名＋パスワードでログイン
+   （パスワードそのものはメールを使わず、Firebase Authの
+    email/password機能を「ユーザーのuidから作った内部専用のダミーアドレス」で
+    利用する。ユーザー名が後で変更されても、uidは変わらないのでログインは壊れない） */
+
+function makePasswordAuthEmail(uid) {
+  return `u-${uid}@yuuchat.local`;
+}
+
+function showPasswordLoginScreen() {
+  loginScreen?.classList.add("hidden");
+  passwordLoginScreen?.classList.remove("hidden");
+  showError(passwordLoginError, "");
+  if (passwordLoginUsernameInput) passwordLoginUsernameInput.value = "";
+  if (passwordLoginPasswordInput) passwordLoginPasswordInput.value = "";
+}
+
+passwordLoginButton?.addEventListener("click", showPasswordLoginScreen);
+
+passwordLoginBackButton?.addEventListener("click", () => {
+  passwordLoginScreen?.classList.add("hidden");
+  loginScreen?.classList.remove("hidden");
+});
+
+passwordLoginSubmitButton?.addEventListener("click", async () => {
+  const name = passwordLoginUsernameInput?.value.trim();
+  const password = passwordLoginPasswordInput?.value || "";
+
+  showError(passwordLoginError, "");
+
+  if (!name) return showError(passwordLoginError, "ユーザー名を入力してください。");
+  if (!password) return showError(passwordLoginError, "パスワードを入力してください。");
+
+  try {
+    passwordLoginSubmitButton.disabled = true;
+
+    const userDoc = await getDoc(doc(db, "users", name));
+    if (!userDoc.exists() || !userDoc.data().uid) {
+      showError(passwordLoginError, "そのユーザー名のアカウントが見つかりません。");
+      return;
+    }
+
+    const authEmail = makePasswordAuthEmail(userDoc.data().uid);
+
+    /* ログインに成功すれば、このユーザー名として自動的にアプリに入れるようにしておく */
+    localStorage.setItem("yuuchat_username", name);
+
+    await signInWithEmailAndPassword(auth, authEmail, password);
+    /* 以降はonAuthStateChangedがsavedNameを見つけて自動的にアプリへ進む */
+  } catch (error) {
+    console.error("パスワードログインエラー:", error);
+
+    if (error.code === "auth/wrong-password" || error.code === "auth/invalid-credential") {
+      showError(passwordLoginError, "パスワードが正しくありません。");
+    } else if (error.code === "auth/user-not-found") {
+      showError(passwordLoginError, "このアカウントはまだパスワードが設定されていません。パスワードを設定した端末でアプリを開いてください。");
+    } else {
+      showError(passwordLoginError, "ログインに失敗しました。");
+    }
+
+    localStorage.removeItem("yuuchat_username");
+  } finally {
+    passwordLoginSubmitButton.disabled = false;
+  }
+});
+
 recoverGoogleButton?.addEventListener("click", async () => {
   try {
     showError(recoverError, "");
@@ -344,11 +422,13 @@ onAuthStateChanged(auth, async (user) => {
     loginScreen?.classList.remove("hidden");
     nameScreen?.classList.add("hidden");
     recoverScreen?.classList.add("hidden");
+    passwordLoginScreen?.classList.add("hidden");
     appElement?.classList.add("hidden");
     return;
   }
 
   currentUser = user;
+  passwordLoginScreen?.classList.add("hidden");
 
   if (pendingRecovery) {
     showRecoverNameStepIfReady();
@@ -455,6 +535,77 @@ function showApp() {
   if (myName) myName.textContent = username || "ユーザー";
   loadProfileImage();
   startApp();
+  maybePromptSetPassword();
+}
+
+/* =========================================================
+   パスワード未設定のアカウントに、設定を促す
+   （今のログイン方法＝Google/ゲストはそのまま維持しつつ、
+    同じアカウントにパスワードを追加で紐づけるだけなので、
+    既存のデータ・ログイン方法は一切失われない） */
+
+function hasPasswordLinked() {
+  return Boolean(currentUser?.providerData?.some((p) => p.providerId === "password"));
+}
+
+function maybePromptSetPassword() {
+  if (!currentUser || !username || !modalEl) return;
+  if (hasPasswordLinked()) return;
+
+  modalEl.classList.remove("hidden");
+  modalEl.innerHTML = `
+    <div class="modal-card">
+      <h3>🔐 パスワードを設定しませんか？</h3>
+      <p style="font-size:13px; color:#666; margin-bottom:14px;">
+        パスワードを設定すると、他の端末でも「ユーザー名とパスワード」でこのアカウントに入れるようになります。
+      </p>
+      <input id="setPasswordInput1" type="password" placeholder="新しいパスワード（6文字以上）" autocomplete="new-password">
+      <input id="setPasswordInput2" type="password" placeholder="もう一度入力" autocomplete="new-password">
+      <div id="setPasswordError" class="error"></div>
+      <div class="modal-buttons">
+        <button id="setPasswordSkipButton" class="modal-secondary" type="button">あとで</button>
+        <button id="setPasswordConfirmButton" class="modal-primary" type="button">設定する</button>
+      </div>
+    </div>
+  `;
+
+  document.getElementById("setPasswordSkipButton")?.addEventListener("click", () => {
+    modalEl.classList.add("hidden");
+    modalEl.innerHTML = "";
+  });
+
+  document.getElementById("setPasswordConfirmButton")?.addEventListener("click", async () => {
+    const errorEl = document.getElementById("setPasswordError");
+    const p1 = document.getElementById("setPasswordInput1")?.value || "";
+    const p2 = document.getElementById("setPasswordInput2")?.value || "";
+    const confirmButton = document.getElementById("setPasswordConfirmButton");
+
+    showError(errorEl, "");
+
+    if (p1.length < 6) return showError(errorEl, "パスワードは6文字以上にしてください。");
+    if (p1 !== p2) return showError(errorEl, "パスワードが一致しません。");
+
+    try {
+      if (confirmButton) confirmButton.disabled = true;
+
+      const authEmail = makePasswordAuthEmail(currentUser.uid);
+      const credential = EmailAuthProvider.credential(authEmail, p1);
+      await linkWithCredential(currentUser, credential);
+
+      alert("パスワードを設定しました。他の端末では「ユーザー名とパスワードでログイン」から入れます。");
+      modalEl.classList.add("hidden");
+      modalEl.innerHTML = "";
+    } catch (error) {
+      console.error("パスワード設定エラー:", error);
+      if (error.code === "auth/requires-recent-login") {
+        showError(errorEl, "セキュリティのため、一度ログインし直してからもう一度お試しください。");
+      } else {
+        showError(errorEl, "パスワードの設定に失敗しました。");
+      }
+    } finally {
+      if (confirmButton) confirmButton.disabled = false;
+    }
+  });
 }
 
 /* =========================================================
@@ -1716,7 +1867,7 @@ function switchView(view) {
   });
 
   if (view === "mypage") loadMyPage();
-  if (view === "derby") renderRaceInfo();
+  if (view === "derby") { renderRaceInfo(); renderRaceInfoHeavyParts(); }
   if (view === "games") loadGameRooms();
 }
 
@@ -1742,7 +1893,7 @@ logoutButton?.addEventListener("click", async () => {
     lastActiveBettingRaceId = null;
     lastLiveRaceId = null;
     liveRaceResult = null;
-    liveRaceGenerationAttemptedFor = null;
+    lastGenerationAttemptAt = -999;
     currentWinPool = {};
     myCoins = 0;
     myAllBets = [];
@@ -2883,7 +3034,6 @@ function renderRaceInfo() {
   ensureDerbyLiveStructure();
 
   const activeContext = getActiveBettingRaceContext();
-  const liveContext = getLiveRaceContext();
   const now = new Date();
   const timeText = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   const isToday = formatRaceId(now) === activeContext.raceId;
@@ -2893,8 +3043,10 @@ function renderRaceInfo() {
     scheduleLine.textContent = `次のレース：${isToday ? "本日" : "明日"} ${timeText(activeContext.raceTime)}（${activeContext.raceId}）`;
   }
 
+  /* 馬券表示は手元のデータ(myAllBets)だけで組み立てられるので、毎ティック更新してもチラつかない */
   renderMyActiveTickets();
 
+  const liveContext = getLiveRaceContext();
   const finalResultEl = document.getElementById("raceFinalResult");
   if (finalResultEl) {
     finalResultEl.innerHTML = liveRaceResult ? `
@@ -2906,15 +3058,26 @@ function renderRaceInfo() {
       </div>` : "";
   }
 
+  if (liveRaceResult) {
+    renderMyRaceResultSummary(liveContext.raceId);
+  } else {
+    const myResultEl = document.getElementById("raceMyResult");
+    if (myResultEl) myResultEl.innerHTML = "";
+  }
+}
+
+/* 通信を伴う「重い」部分（詳細結果・過去結果・コインランキング）は、
+   毎ティック(1秒に1回)ではなく、実際にレース結果が変わったときだけ更新する。
+   これを1秒ごとに呼んでしまうと、ランキング等が「読み込み中…」→表示 を
+   繰り返して画面がチラつくバグの原因になっていたため分離した。 */
+function renderRaceInfoHeavyParts() {
+  const liveContext = getLiveRaceContext();
   const detailedEl = document.getElementById("raceDetailedResult");
-  const myResultEl = document.getElementById("raceMyResult");
 
   if (liveRaceResult) {
     renderDetailedRaceResults(liveContext.raceId, liveRaceResult).catch((e) => console.error("詳細結果描画エラー:", e));
-    renderMyRaceResultSummary(liveContext.raceId);
-  } else {
-    if (detailedEl) detailedEl.innerHTML = "";
-    if (myResultEl) myResultEl.innerHTML = "";
+  } else if (detailedEl) {
+    detailedEl.innerHTML = "";
   }
 
   loadRecentRaceResults(liveContext.raceId);
@@ -2963,10 +3126,12 @@ function refreshDerbySubscriptionsIfNeeded() {
     lastElapsedWasNegative = null;
     lastCommentaryUpdateAt = -999;
     lastLeaderNumber = null;
+    lastGenerationAttemptAt = -999;
     cachedPopularityForRaceId = null;
     cachedPopularity = null;
 
     listenLiveRace(liveId);
+    renderRaceInfoHeavyParts();
   }
 }
 
@@ -2976,13 +3141,21 @@ function listenLiveRace(raceId) {
   unsubscribeLiveRace = onSnapshot(
     doc(db, "races", raceId),
     (snap) => {
+      const wasFinished = Boolean(liveRaceResult);
+
       if (snap.exists() && snap.data().status === "finished") {
         liveRaceResult = snap.data();
         settleMyBets(raceId, liveRaceResult.resultOrder);
       } else {
         liveRaceResult = null;
       }
+
       renderRaceInfo();
+
+      /* 「未生成→生成された」の瞬間だけ、重い部分（詳細結果・ランキング等）を更新する */
+      if (!wasFinished && liveRaceResult) {
+        renderRaceInfoHeavyParts();
+      }
     },
     (error) => console.error("本日のレース監視エラー:", error)
   );
@@ -3008,8 +3181,11 @@ function tickDerbyCountdown() {
     }
   }
 
-  if (now >= liveContext.raceTime && liveRaceGenerationAttemptedFor !== liveContext.raceId) {
-    liveRaceGenerationAttemptedFor = liveContext.raceId;
+  if (now >= liveContext.raceTime && !liveRaceResult && elapsed - lastGenerationAttemptAt > 5) {
+    /* 一度失敗しても(通信エラー等)5秒おきに再試行する。
+       tryGenerateRaceResult自体はすでに結果がある場合は何もしないだけなので、
+       何度呼んでも安全（二重生成はされない）。 */
+    lastGenerationAttemptAt = elapsed;
     tryGenerateRaceResult(liveContext.raceId);
   }
 
