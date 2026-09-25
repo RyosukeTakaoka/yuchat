@@ -84,6 +84,14 @@
         </button>
 
 
+        <button
+            id="passwordLoginButton"
+            class="secondary"
+        >
+            🔐 ユーザー名とパスワードでログイン
+        </button>
+
+
         <div
             id="loginError"
             class="error"
@@ -92,6 +100,75 @@
     </div>
 
 </section>
+
+
+
+<!-- ==================================================
+     ユーザー名＋パスワードでログイン
+================================================== -->
+
+<section
+    id="passwordLoginScreen"
+    class="login-screen hidden"
+>
+
+    <div class="login-card">
+
+        <div class="login-logo">
+            🔐
+        </div>
+
+        <h1>
+            パスワードでログイン
+        </h1>
+
+        <p>
+            ユーザー名とパスワードを入力してください
+        </p>
+
+
+        <input
+            id="passwordLoginUsernameInput"
+            type="text"
+            maxlength="20"
+            placeholder="ユーザー名"
+            autocomplete="username"
+        >
+
+
+        <input
+            id="passwordLoginPasswordInput"
+            type="password"
+            placeholder="パスワード"
+            autocomplete="current-password"
+        >
+
+
+        <button
+            id="passwordLoginSubmitButton"
+            class="secondary"
+        >
+            ログイン
+        </button>
+
+
+        <div
+            id="passwordLoginError"
+            class="error"
+        ></div>
+
+
+        <button
+            id="passwordLoginBackButton"
+            class="secondary"
+        >
+            戻る
+        </button>
+
+    </div>
+
+</section>
+
 
 
 
