@@ -2675,6 +2675,22 @@ button:disabled {
     margin-bottom: 4px;
 }
 
+.bet-payout-estimate {
+    margin-top: 6px;
+
+    padding: 8px 10px;
+
+    border-radius: 10px;
+
+    background: linear-gradient(135deg, var(--yuu-accent-soft), #fff);
+
+    border: 1px solid var(--yuu-accent-1);
+
+    font-weight: 700;
+
+    color: #c2185b;
+}
+
 
 /* ==================================================================
    今回の追加分（ゆうダービー大幅リニューアル）
