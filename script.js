@@ -2033,7 +2033,7 @@ const RACE_TAKEOUT_RATE = 0.8;
 const RACE_HOUR = 15;
 const RACE_MINUTE = 2;
 const RACE_CLOSE_MINUTES_BEFORE = 10;
-const ODDS_VIRTUAL_SEED_PER_HORSE = 20;
+const ODDS_VIRTUAL_SEED_TOTAL = 200;
 
 /* style: start=逃げ / front=先行 / mid=差し / closer=追込 / stamina=スタミナ / longshot=大穴
    （能力にはランダム性も加えるため「能力が高い＝必ず勝つ」にはならない） */
@@ -2166,13 +2166,19 @@ function listenMyCoins() {
 /* ----- オッズ（賭けられている金額から計算） ----- */
 
 function computeWinOdds(horseNumber) {
-  /* ユーザーがまだ少ない・誰も賭けていない場合でもオッズが必ず表示されるよう、
-     全馬に均等な「仮想の種銭」を敷いておく。実際の投票が増えるほど、その影響は
-     相対的に小さくなり、本物の人気投票（実際の賭け金）が支配的になっていく。 */
-  const virtualTotal = ODDS_VIRTUAL_SEED_PER_HORSE * SAFE_RACE_HORSES.length;
+  /* ユーザーがまだ少ない今は、馬の能力(power)に応じた「仮想の種銭」を
+     あらかじめ敷いておく（強い馬ほど種銭が多い＝オッズが低い）。
+     これを初期値として、実際の投票が増えるほどその影響は相対的に小さくなり、
+     本物の人気投票（実際の賭け金）が支配的になっていく。 */
+  const horse = SAFE_RACE_HORSES.find((h) => h.number === horseNumber);
+  if (!horse) return null;
+
+  const totalPower = SAFE_RACE_HORSES.reduce((a, h) => a + h.power, 0);
+  const virtualOnHorse = (horse.power / totalPower) * ODDS_VIRTUAL_SEED_TOTAL;
+
   const realTotal = Object.values(currentWinPool).reduce((a, b) => a + b, 0);
-  const totalPool = virtualTotal + realTotal;
-  const onHorse = ODDS_VIRTUAL_SEED_PER_HORSE + (currentWinPool[horseNumber] || 0);
+  const totalPool = ODDS_VIRTUAL_SEED_TOTAL + realTotal;
+  const onHorse = virtualOnHorse + (currentWinPool[horseNumber] || 0);
 
   if (totalPool <= 0 || onHorse <= 0) return null;
   return Math.max(1.1, (totalPool * RACE_TAKEOUT_RATE) / onHorse);
@@ -2263,25 +2269,71 @@ function getBetTypeHint(type, count) {
   return `${need}頭選んでください（順番は関係ありません）。`;
 }
 
+/* 選んでいる馬券が的中した場合、いくら返ってくるかの「目安」を計算する。
+   単勝はその馬の実際のオッズから正確に計算できるが、
+   複勝・馬連・三連複・三連単は最終的な払戻がレース締切時点の全員の投票額で決まるため、
+   ここではオッズを組み合わせた概算値を「目安」として示す（実際の払戻とは異なる場合がある）。 */
+function estimateBetPayout(type, horses, amount) {
+  if (!horses || horses.length === 0 || !amount) return null;
+
+  const oddsOf = (n) => computeWinOdds(n) || 8;
+
+  if (type === "win") return amount * oddsOf(horses[0]);
+  if (type === "place") return amount * Math.max(1.1, oddsOf(horses[0]) * 0.35);
+
+  if (type === "quinella") {
+    const combined = (oddsOf(horses[0]) * oddsOf(horses[1])) / 4.5;
+    return amount * Math.max(1.5, combined);
+  }
+
+  if (type === "trio") {
+    const combined = horses.reduce((acc, n) => acc * oddsOf(n), 1) / 20;
+    return amount * Math.max(2, combined);
+  }
+
+  if (type === "trifecta") {
+    const combined = horses.reduce((acc, n) => acc * oddsOf(n), 1) / 8;
+    return amount * Math.max(3, combined);
+  }
+
+  return null;
+}
+
 function renderBetHorsesSelectionText() {
   if (!betHorsesSelection) return;
   const type = betType?.value || "win";
+  const need = BET_TYPE_COUNT[type] || 1;
 
   if (selectedBetHorses.length === 0) {
     betHorsesSelection.innerHTML = "";
     return;
   }
 
+  let html = "";
   if (type === "trifecta") {
     const labels = ["1着", "2着", "3着"];
-    betHorsesSelection.innerHTML = selectedBetHorses
+    html = selectedBetHorses
       .map((num, i) => `<div>${escapeHTML(labels[i] || "")}：${num}番 ${escapeHTML(getHorseName(num))}</div>`)
       .join("");
   } else {
     const text = selectedBetHorses.map((num) => `${num}番 ${getHorseName(num)}`).join("・");
-    betHorsesSelection.innerHTML = `<div>選択中：${escapeHTML(text)}</div>`;
+    html = `<div>選択中：${escapeHTML(text)}</div>`;
   }
+
+  if (selectedBetHorses.length === need) {
+    const amount = Number(betAmount?.value || 0);
+    if (amount > 0) {
+      const estimate = estimateBetPayout(type, selectedBetHorses, amount);
+      if (estimate) {
+        html += `<div class="bet-payout-estimate">🎯 的中した場合の予想払戻：約 ${Math.floor(estimate).toLocaleString()} コイン（目安）</div>`;
+      }
+    }
+  }
+
+  betHorsesSelection.innerHTML = html;
 }
+
+betAmount?.addEventListener("input", renderBetHorsesSelectionText);
 
 function renderBetHorsesPicker() {
   if (!betHorsesPicker) return;
@@ -2541,10 +2593,21 @@ function listenMyBetHistory() {
   if (unsubscribeMyBetHistory) { unsubscribeMyBetHistory(); unsubscribeMyBetHistory = null; }
   if (!currentUser) return;
 
+  /* 【重要】where(uid) + orderBy(createdAt) を組み合わせたクエリは、
+     Firestore側で複合インデックスの作成が必要で、それが無いと
+     このリスナーがエラーで止まり、馬券が一切表示されなくなっていた。
+     orderByをやめてJavaScript側で並び替えることで、
+     Firebase Console側の追加設定を一切不要にした。 */
   unsubscribeMyBetHistory = onSnapshot(
-    query(collection(db, "raceBets"), where("uid", "==", currentUser.uid), orderBy("createdAt", "desc")),
+    query(collection(db, "raceBets"), where("uid", "==", currentUser.uid)),
     (snap) => {
-      myAllBets = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      myAllBets = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => {
+          const at = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
+          const bt = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
+          return bt - at;
+        });
       renderBetHistory(myAllBets);
       renderMyActiveTickets();
     },
