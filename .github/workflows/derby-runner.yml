@@ -1,0 +1,61 @@
+# ゆうダービー 自動開催
+# 毎日 15:02（日本時間）のレースを、誰もサイトを開いていなくても開催・精算する。
+# GitHub の定期実行は数分〜数十分遅れることがあるので、予備の実行も入れている
+# （2回目以降は「すでに開催済み・精算済み」なら何もしない）。
+#
+# 必要な設定：リポジトリの Settings → Secrets and variables → Actions に
+#   FIREBASE_SERVICE_ACCOUNT（Firebase のサービスアカウントの鍵 JSON）を登録する。
+# 未登録のあいだは警告を出して何もしない。
+
+name: ゆうダービー自動開催
+
+on:
+  schedule:
+    - cron: "2 6 * * *"    # 15:02 JST（06:02 UTC）
+    - cron: "20 6 * * *"   # 15:20 JST（予備）
+    - cron: "0 9 * * *"    # 18:00 JST（予備）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: derby-runner
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: derby-runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 鍵が登録されているか確認
+        id: secret
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "::warning::FIREBASE_SERVICE_ACCOUNT が未登録のため、自動開催をスキップしました"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.secret.outputs.ready == 'true'
+        with:
+          node-version: 22
+
+      - name: 依存パッケージのインストール
+        if: steps.secret.outputs.ready == 'true'
+        run: npm ci --no-audit --no-fund
+
+      - name: レースの開催・精算
+        if: steps.secret.outputs.ready == 'true'
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node run.mjs
