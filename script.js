@@ -23,7 +23,7 @@ import {
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously,
   onAuthStateChanged, signOut,
-  signInWithEmailAndPassword, linkWithCredential, EmailAuthProvider
+  signInWithEmailAndPassword, linkWithCredential, EmailAuthProvider, deleteUser
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 
 /* =========================================================
@@ -214,26 +214,144 @@ function createFriendshipId(userA, userB) {
 }
 
 /* =========================================================
-   ログイン
+   ログイン前の画面の切り替え
+   ・起動直後は「読み込み中」を表示し、ログイン状態の確認が終わってから画面を決める
+   ・名前設定画面は、この画面でユーザーがログイン操作をしたときだけ開く
+     （前回のログインが自動で復元されただけのときは開かない）
+   ・ログアウト状態の画面（最初の画面・パスワード・アカウントを探す）を表示中は、
+     ログイン状態の変化で勝手に画面を切り替えない
 ========================================================= */
 
+const authLoadingScreen = document.getElementById("authLoadingScreen");
+const authLoadingText = document.getElementById("authLoadingText");
+const authLoadingActions = document.getElementById("authLoadingActions");
+const authRetryButton = document.getElementById("authRetryButton");
+const authToLoginButton = document.getElementById("authToLoginButton");
+const nameBackButton = document.getElementById("nameBackButton");
+
+const AUTH_SCREENS = [authLoadingScreen, loginScreen, passwordLoginScreen, nameScreen, recoverScreen];
+
+let loginIntent = false;        /* この画面でユーザーがログイン操作をしたか */
+let authFlowLock = false;       /* パスワードログインの途中は、onAuthStateChanged で画面を動かさない */
+let authResolveSeq = 0;         /* 古い確認処理の結果で画面を上書きしないための番号 */
+let resolvedUid = null;         /* アプリに入った uid（同じユーザーで二重に起動しないため） */
+let nameScreenOrigin = "login"; /* 名前設定画面の「戻る」の行き先（"login" / "recover"） */
+
+function isShown(element) {
+  return Boolean(element) && !element.classList.contains("hidden");
+}
+
+function showAuthScreen(screen) {
+  appElement?.classList.add("hidden");
+  AUTH_SCREENS.forEach((element) => element?.classList.toggle("hidden", element !== screen));
+}
+
+function showAuthLoading(text = "読み込み中...") {
+  if (authLoadingText) authLoadingText.textContent = text;
+  authLoadingActions?.classList.add("hidden");
+  showAuthScreen(authLoadingScreen);
+}
+
+function showAuthLoadError(text) {
+  if (authLoadingText) authLoadingText.textContent = text;
+  authLoadingActions?.classList.remove("hidden");
+  showAuthScreen(authLoadingScreen);
+}
+
+function showLoginScreen() {
+  loginIntent = false;
+  showError(loginError, "");
+  showAuthScreen(loginScreen);
+}
+
+/* ログアウトしたままでよい画面を表示中か */
+function isSignedOutScreenShown() {
+  if (isShown(loginScreen) || isShown(passwordLoginScreen)) return true;
+  return isShown(recoverScreen) && !isShown(recoverNameStep);
+}
+
+/* 開発者向け：Firebase から返ってきた本当のエラー（コードとメッセージ）をコンソールに出す */
+function logFirebaseError(label, error) {
+  console.error(`[${label}] code=${error?.code || "(なし)"} message=${error?.message || String(error)}`, error);
+}
+
+/* Firebase のエラーを、原因が分かるメッセージにする */
+function describeFirebaseError(error, fallback) {
+  const code = String(error?.code || "").replace(/^(auth|firestore)\//, "");
+  const message = String(error?.message || "");
+
+  if (code === "unavailable" || code === "network-request-failed" || /offline/i.test(message)) {
+    return "通信できませんでした。インターネット接続を確認して、もう一度お試しください。";
+  }
+  if (code === "deadline-exceeded") return "通信がタイムアウトしました。もう一度お試しください。";
+  if (code === "permission-denied") return "権限がないため処理できませんでした。一度ログインし直してからお試しください。";
+  if (code === "unauthenticated" || code === "user-token-expired" || code === "requires-recent-login") {
+    return "ログインの有効期限が切れました。ログインし直してください。";
+  }
+  if (code === "resource-exhausted" || code === "too-many-requests") return "混み合っています。しばらく待ってからお試しください。";
+  if (code === "invalid-argument") return "保存できないデータが含まれていました。別の名前やプロフィール画像でお試しください。";
+  if (code === "operation-not-allowed") return "このログイン方法は現在使えません。";
+  return code ? `${fallback}（${code}）` : fallback;
+}
+
+/* ----- ユーザー名のルール -----
+   ひらがな・カタカナ（長音「ー」を含む）・漢字（「々」「〆」を含む）・英数字（全角も可）・スペース・「_」「-」
+   先頭と末尾が「__」の名前は Firestore のドキュメントIDとして使えないので拒否する */
+const USERNAME_PATTERN = /^[ぁ-ゖゝゞァ-ヺーヽヾ々〆〇一-鿿㐀-䶿a-zA-Z0-9Ａ-Ｚａ-ｚ０-９ _\-]+$/u;
+
+function validateUsername(name) {
+  if (!name) return "名前を入力してください。";
+  if (name.length > 20) return "名前は20文字以内にしてください。";
+  if (!USERNAME_PATTERN.test(name)) {
+    return "使用できない文字が含まれています。（ひらがな・カタカナ・漢字・英数字・スペース・「_」「-」が使えます）";
+  }
+  if (/^__.*__$/.test(name)) return "先頭と末尾が「__」の名前は使えません。";
+  return "";
+}
+
+/* =========================================================
+   ログイン（最初の画面）
+========================================================= */
+
+function isPopupCancelled(error) {
+  return error?.code === "auth/popup-closed-by-user" || error?.code === "auth/cancelled-popup-request";
+}
+
+/* 同じユーザーのままだと onAuthStateChanged が呼ばれないので、そのときは自分で画面を決める */
+function resolveIfSameUser(uidBefore) {
+  if (auth.currentUser && auth.currentUser.uid === uidBefore) resolveAuthState(auth.currentUser);
+}
+
 googleLoginButton?.addEventListener("click", async () => {
+  const uidBefore = auth.currentUser?.uid || null;
   try {
     showError(loginError, "");
+    loginIntent = true;
+    nameScreenOrigin = "login";
+    pendingRecovery = false;
     await signInWithPopup(auth, new GoogleAuthProvider());
+    resolveIfSameUser(uidBefore);
   } catch (error) {
+    loginIntent = false;
+    if (isPopupCancelled(error)) return;
     console.error("Googleログインエラー:", error);
-    showError(loginError, "ログインに失敗しました。");
+    showError(loginError, describeFirebaseError(error, "ログインに失敗しました。"));
   }
 });
 
 guestLoginButton?.addEventListener("click", async () => {
+  const uidBefore = auth.currentUser?.uid || null;
   try {
     showError(loginError, "");
+    loginIntent = true;
+    nameScreenOrigin = "login";
+    pendingRecovery = false;
     await signInAnonymously(auth);
+    resolveIfSameUser(uidBefore);
   } catch (error) {
+    loginIntent = false;
     console.error("ゲストログインエラー:", error);
-    showError(loginError, "ゲストログインに失敗しました。");
+    showError(loginError, describeFirebaseError(error, "ゲストログインに失敗しました。"));
   }
 });
 
@@ -245,9 +363,7 @@ guestLoginButton?.addEventListener("click", async () => {
 ========================================================= */
 
 function showRecoverAuthStep() {
-  loginScreen?.classList.add("hidden");
-  nameScreen?.classList.add("hidden");
-  recoverScreen?.classList.remove("hidden");
+  showAuthScreen(recoverScreen);
   recoverAuthStep?.classList.remove("hidden");
   recoverNameStep?.classList.add("hidden");
   if (recoverStepText) recoverStepText.textContent = "まずはログイン方法を選んでください";
@@ -257,6 +373,7 @@ function showRecoverAuthStep() {
 
 function showRecoverNameStepIfReady() {
   if (pendingRecovery && currentUser) {
+    showAuthScreen(recoverScreen);
     recoverAuthStep?.classList.add("hidden");
     recoverNameStep?.classList.remove("hidden");
     if (recoverStepText) recoverStepText.textContent = "以前使っていた名前を入力してください";
@@ -272,26 +389,43 @@ existingLoginButton?.addEventListener("click", () => {
    ユーザー名＋パスワードでログイン
    （パスワードそのものはメールを使わず、Firebase Authの
     email/password機能を「ユーザーのuidから作った内部専用のダミーアドレス」で
-    利用する。ユーザー名が後で変更されても、uidは変わらないのでログインは壊れない） */
+    利用する。ユーザー名が後で変更されても、uidは変わらないのでログインは壊れない）
+   ・Firestore は「ログイン済みのみ読める」ので、ユーザー名から uid を調べる間だけ
+     一時的なゲストログインを使い、調べ終わったらその一時アカウントは削除する
+========================================================= */
 
 function makePasswordAuthEmail(uid) {
   return `u-${uid}@yuuchat.local`;
 }
 
-function showPasswordLoginScreen() {
-  loginScreen?.classList.add("hidden");
-  passwordLoginScreen?.classList.remove("hidden");
+function clearPasswordLoginForm() {
   showError(passwordLoginError, "");
   if (passwordLoginUsernameInput) passwordLoginUsernameInput.value = "";
   if (passwordLoginPasswordInput) passwordLoginPasswordInput.value = "";
 }
 
+function showPasswordLoginScreen() {
+  clearPasswordLoginForm();
+  showAuthScreen(passwordLoginScreen);
+}
+
 passwordLoginButton?.addEventListener("click", showPasswordLoginScreen);
 
 passwordLoginBackButton?.addEventListener("click", () => {
-  passwordLoginScreen?.classList.add("hidden");
-  loginScreen?.classList.remove("hidden");
+  clearPasswordLoginForm();
+  showLoginScreen();
 });
+
+/* 一時的なゲストアカウントを片付ける（削除できなければログアウトだけする） */
+async function discardTemporaryUser(tempUser) {
+  if (!tempUser || auth.currentUser?.uid !== tempUser.uid) return;
+  try {
+    await deleteUser(tempUser);
+  } catch (error) {
+    console.warn("一時アカウントの削除に失敗:", error);
+    try { await signOut(auth); } catch (signOutError) { console.warn("サインアウト失敗:", signOutError); }
+  }
+}
 
 passwordLoginSubmitButton?.addEventListener("click", async () => {
   const name = passwordLoginUsernameInput?.value.trim();
@@ -302,37 +436,58 @@ passwordLoginSubmitButton?.addEventListener("click", async () => {
   if (!name) return showError(passwordLoginError, "ユーザー名を入力してください。");
   if (!password) return showError(passwordLoginError, "パスワードを入力してください。");
 
+  const previousSavedName = localStorage.getItem("yuuchat_username");
+  let tempUser = null;
+  let signedIn = false;
+
   try {
     passwordLoginSubmitButton.disabled = true;
+    authFlowLock = true;
 
-    const userDoc = await getDoc(doc(db, "users", name));
+    /* 1. ユーザー名から uid を調べる（未ログインなら一時的なゲストログインで読む） */
+    if (!auth.currentUser) {
+      const credential = await signInAnonymously(auth);
+      tempUser = credential.user;
+    }
+
+    let userDoc;
+    try {
+      userDoc = await getDoc(doc(db, "users", name));
+    } finally {
+      await discardTemporaryUser(tempUser);
+    }
+
     if (!userDoc.exists() || !userDoc.data().uid) {
       showError(passwordLoginError, "そのユーザー名のアカウントが見つかりません。");
       return;
     }
 
-    const authEmail = makePasswordAuthEmail(userDoc.data().uid);
-
-    /* ログインに成功すれば、このユーザー名として自動的にアプリに入れるようにしておく */
+    /* 2. パスワードでログイン。成功したらこのユーザー名で自動的にアプリへ進む */
     localStorage.setItem("yuuchat_username", name);
-
-    await signInWithEmailAndPassword(auth, authEmail, password);
-    /* 以降はonAuthStateChangedがsavedNameを見つけて自動的にアプリへ進む */
+    loginIntent = true;
+    await signInWithEmailAndPassword(auth, makePasswordAuthEmail(userDoc.data().uid), password);
+    signedIn = true;
   } catch (error) {
-    console.error("パスワードログインエラー:", error);
+    logFirebaseError("パスワードログインエラー", error);
+    await discardTemporaryUser(tempUser);
+    loginIntent = false;
+
+    if (previousSavedName) localStorage.setItem("yuuchat_username", previousSavedName);
+    else localStorage.removeItem("yuuchat_username");
 
     if (error.code === "auth/wrong-password" || error.code === "auth/invalid-credential") {
-      showError(passwordLoginError, "パスワードが正しくありません。");
+      showError(passwordLoginError, "パスワードが正しくありません。（パスワードを設定していないアカウントの場合も、このように表示されます）");
     } else if (error.code === "auth/user-not-found") {
       showError(passwordLoginError, "このアカウントはまだパスワードが設定されていません。パスワードを設定した端末でアプリを開いてください。");
     } else {
-      showError(passwordLoginError, "ログインに失敗しました。");
+      showError(passwordLoginError, describeFirebaseError(error, "ログインに失敗しました。"));
     }
-
-    localStorage.removeItem("yuuchat_username");
   } finally {
+    authFlowLock = false;
     passwordLoginSubmitButton.disabled = false;
   }
+
+  if (signedIn && auth.currentUser) resolveAuthState(auth.currentUser);
 });
 
 recoverGoogleButton?.addEventListener("click", async () => {
@@ -340,10 +495,12 @@ recoverGoogleButton?.addEventListener("click", async () => {
     showError(recoverError, "");
     pendingRecovery = true;
     await signInWithPopup(auth, new GoogleAuthProvider());
+    currentUser = auth.currentUser;
     showRecoverNameStepIfReady();
   } catch (error) {
+    if (isPopupCancelled(error)) return;
     console.error("Googleログインエラー:", error);
-    showError(recoverError, "ログインに失敗しました。");
+    showError(recoverError, describeFirebaseError(error, "ログインに失敗しました。"));
   }
 });
 
@@ -352,10 +509,11 @@ recoverGuestButton?.addEventListener("click", async () => {
     showError(recoverError, "");
     pendingRecovery = true;
     await signInAnonymously(auth);
+    currentUser = auth.currentUser;
     showRecoverNameStepIfReady();
   } catch (error) {
     console.error("ゲストログインエラー:", error);
-    showError(recoverError, "ゲストログインに失敗しました。");
+    showError(recoverError, describeFirebaseError(error, "ゲストログインに失敗しました。"));
   }
 });
 
@@ -380,14 +538,11 @@ recoverConfirmButton?.addEventListener("click", async () => {
       return;
     }
 
-    username = name;
-    localStorage.setItem("yuuchat_username", username);
     pendingRecovery = false;
-    await saveUserProfile();
-    showApp();
+    await enterAppAs(name, userDoc.data(), ++authResolveSeq);
   } catch (error) {
     console.error("アカウント確認エラー:", error);
-    showError(recoverError, "確認中にエラーが発生しました。");
+    showError(recoverError, describeFirebaseError(error, "確認中にエラーが発生しました。"));
   } finally {
     recoverConfirmButton.disabled = false;
   }
@@ -395,116 +550,199 @@ recoverConfirmButton?.addEventListener("click", async () => {
 
 recoverNewAccountButton?.addEventListener("click", () => {
   pendingRecovery = false;
-  recoverScreen?.classList.add("hidden");
   if (currentUser) {
-    showNameScreen();
+    loginIntent = true;
+    showNameScreen("recover");
   } else {
+    pendingRecovery = true;
     showRecoverAuthStep();
   }
 });
 
+/* 戻る：名前入力の段階 → ログイン方法を選ぶ段階（ログアウトする）／ログイン方法を選ぶ段階 → 最初の画面 */
 recoverBackButton?.addEventListener("click", async () => {
-  pendingRecovery = false;
-  recoverScreen?.classList.add("hidden");
-
-  if (currentUser && !username) {
-    try { await signOut(auth); } catch (error) { console.error("サインアウトエラー:", error); }
-  } else {
-    loginScreen?.classList.remove("hidden");
+  if (isShown(recoverNameStep)) {
+    pendingRecovery = true;
+    showRecoverAuthStep();
+    if (auth.currentUser && !username) {
+      try { await signOut(auth); } catch (error) { console.error("サインアウトエラー:", error); }
+    }
+    return;
   }
+
+  pendingRecovery = false;
+  showError(recoverError, "");
+  showLoginScreen();
 });
 
 /* =========================================================
    Firebase認証状態
 ========================================================= */
 
-onAuthStateChanged(auth, async (user) => {
-  if (!user) {
-    currentUser = null;
-    username = null;
-    pendingRecovery = false;
-    loginScreen?.classList.remove("hidden");
-    nameScreen?.classList.add("hidden");
-    recoverScreen?.classList.add("hidden");
-    passwordLoginScreen?.classList.add("hidden");
-    appElement?.classList.add("hidden");
-    return;
+/* 自分のユーザー名を探す：①この端末で最後に使った名前 ②uid が一致するユーザー */
+async function findOwnUserProfile(user) {
+  const savedName = localStorage.getItem("yuuchat_username");
+
+  if (savedName) {
+    const snapshot = await getDoc(doc(db, "users", savedName));
+    if (snapshot.exists() && snapshot.data().uid === user.uid) {
+      return { name: savedName, data: snapshot.data() };
+    }
   }
 
+  const result = await getDocs(query(collection(db, "users"), where("uid", "==", user.uid), limit(1)));
+  if (!result.empty) return { name: result.docs[0].id, data: result.docs[0].data() };
+  return null;
+}
+
+async function resolveAuthState(user) {
+  if (!user) return;
+  const seq = ++authResolveSeq;
   currentUser = user;
-  passwordLoginScreen?.classList.add("hidden");
 
   if (pendingRecovery) {
     showRecoverNameStepIfReady();
     return;
   }
 
-  const savedName = localStorage.getItem("yuuchat_username");
-  let suggestedName = savedName || user.displayName || null;
+  /* すでにこのユーザーでアプリに入っていれば何もしない */
+  if (resolvedUid === user.uid && username && isShown(appElement)) return;
 
-  if (!suggestedName) {
-    showNameScreen();
-    return;
-  }
+  showAuthLoading();
 
   try {
-    const userRef = doc(db, "users", suggestedName);
-    const userDoc = await getDoc(userRef);
+    const profile = await findOwnUserProfile(user);
+    if (seq !== authResolveSeq) return;
 
-    if (!userDoc.exists() || !userDoc.data().uid || userDoc.data().uid === user.uid) {
-      username = suggestedName;
-      localStorage.setItem("yuuchat_username", username);
-      await saveUserProfile();
-      showApp();
-    } else {
-      showNameScreen();
+    if (profile) {
+      await enterAppAs(profile.name, profile.data, seq);
+      return;
     }
+
+    /* 前回のログインが自動で復元されただけなら、名前設定画面は開かずに最初の画面を出す */
+    if (!loginIntent) {
+      showLoginScreen();
+      return;
+    }
+
+    /* Googleの表示名がまだ誰にも使われていなければ、今まで通りその名前で始める */
+    const suggestedName = (user.displayName || "").trim();
+    if (suggestedName && !validateUsername(suggestedName)) {
+      const snapshot = await getDoc(doc(db, "users", suggestedName));
+      if (seq !== authResolveSeq) return;
+      if (!snapshot.exists()) {
+        await enterAppAs(suggestedName, null, seq);
+        return;
+      }
+    }
+
+    showNameScreen(nameScreenOrigin);
   } catch (error) {
-    console.error("ユーザー確認エラー:", error);
-    showNameScreen();
+    if (seq !== authResolveSeq) return;
+    logFirebaseError("ユーザー確認エラー", error);
+    showAuthLoadError(describeFirebaseError(error, "アカウント情報を読み込めませんでした。"));
   }
+}
+
+function handleSignedOut() {
+  authResolveSeq++;
+  currentUser = null;
+  username = null;
+  resolvedUid = null;
+  if (authFlowLock) return;
+
+  /* ログアウト状態の画面を表示中なら、そのまま（戻るボタンやパスワード入力中の画面を上書きしない） */
+  if (!isSignedOutScreenShown()) {
+    pendingRecovery = false;
+    showLoginScreen();
+  }
+}
+
+onAuthStateChanged(auth, (user) => {
+  if (!user) {
+    handleSignedOut();
+    return;
+  }
+  if (authFlowLock) return;
+  resolveAuthState(user);
+});
+
+authRetryButton?.addEventListener("click", () => {
+  if (auth.currentUser) resolveAuthState(auth.currentUser);
+  else showLoginScreen();
+});
+
+authToLoginButton?.addEventListener("click", () => {
+  authResolveSeq++;
+  pendingRecovery = false;
+  showLoginScreen();
 });
 
 /* =========================================================
    名前画面
 ========================================================= */
 
-function showNameScreen() {
-  loginScreen?.classList.add("hidden");
-  nameScreen?.classList.remove("hidden");
-  appElement?.classList.add("hidden");
-  if (nameInput) nameInput.value = localStorage.getItem("yuuchat_username") || "";
+function showNameScreen(origin = "login") {
+  nameScreenOrigin = origin;
+  showError(nameError, "");
+  if (nameInput) nameInput.value = "";
+  showAuthScreen(nameScreen);
 }
 
 startChatButton?.addEventListener("click", async () => {
-  const name = nameInput?.value.trim();
+  const name = nameInput?.value.trim() || "";
   showError(nameError, "");
 
-  if (!name) return showError(nameError, "名前を入力してください。");
-  if (name.length > 20) return showError(nameError, "名前は20文字以内にしてください。");
-  if (!/^[ぁ-んァ-ヶ一-龠a-zA-Z0-9 _\-]+$/.test(name)) {
-    return showError(nameError, "使用できない文字が含まれています。");
-  }
+  const invalidReason = validateUsername(name);
+  if (invalidReason) return showError(nameError, invalidReason);
+  if (!currentUser) return showError(nameError, "ログイン状態を確認できませんでした。「戻る」からもう一度ログインしてください。");
 
   try {
     startChatButton.disabled = true;
-    const userRef = doc(db, "users", name);
-    const userDoc = await getDoc(userRef);
 
-    if (userDoc.exists() && userDoc.data().uid !== currentUser?.uid) {
+    /* 1. 名前が使えるか確認 */
+    let existing;
+    try {
+      existing = await getDoc(doc(db, "users", name));
+    } catch (error) {
+      logFirebaseError("名前確認エラー", error);
+      showError(nameError, describeFirebaseError(error, "名前を確認できませんでした。"));
+      return;
+    }
+
+    if (existing.exists() && existing.data().uid !== currentUser.uid) {
       showError(nameError, "その名前はすでに使われています。");
       return;
     }
 
-    username = name;
-    localStorage.setItem("yuuchat_username", username);
-    await saveUserProfile();
-    showApp();
-  } catch (error) {
-    console.error("名前設定エラー:", error);
-    showError(nameError, "名前の設定に失敗しました。");
+    /* 2. 保存してアプリへ（保存後の画面表示で起きたエラーは「保存失敗」として扱わない） */
+    try {
+      await enterAppAs(name, existing.exists() ? existing.data() : null, ++authResolveSeq);
+    } catch (error) {
+      logFirebaseError("名前設定エラー", error);
+      showError(nameError, describeFirebaseError(error, "名前を保存できませんでした。"));
+    }
   } finally {
     startChatButton.disabled = false;
+  }
+});
+
+/* 戻る：ログイン済みなのでログアウトして、来た画面（最初の画面／アカウントを探す）に戻る */
+nameBackButton?.addEventListener("click", async () => {
+  showError(nameError, "");
+  if (nameInput) nameInput.value = "";
+  loginIntent = false;
+
+  if (nameScreenOrigin === "recover") {
+    pendingRecovery = true;
+    showRecoverAuthStep();
+  } else {
+    pendingRecovery = false;
+    showLoginScreen();
+  }
+
+  if (auth.currentUser && !username) {
+    try { await signOut(auth); } catch (error) { console.error("サインアウトエラー:", error); }
   }
 });
 
@@ -512,19 +750,51 @@ startChatButton?.addEventListener("click", async () => {
    ユーザープロフィール
 ========================================================= */
 
+/* このユーザーとしてアプリに入る。
+   existingData が null（新しく名前を作る）ときは、保存に失敗したらエラーを投げる */
+async function enterAppAs(name, existingData, seq) {
+  username = name;
+  localStorage.setItem("yuuchat_username", name);
+
+  /* プロフィール画像はこのアカウントのものだけを使う（新しいアカウントは画像なし） */
+  myProfileImageData = await normalizeProfileImage(existingData?.profileImage || "");
+
+  try {
+    await saveUserProfile();
+  } catch (error) {
+    if (!existingData) {
+      username = null;
+      localStorage.removeItem("yuuchat_username");
+      myProfileImageData = "";
+      throw error;
+    }
+    /* 既存のアカウントはプロフィールの更新に失敗してもログインは続ける */
+    logFirebaseError("プロフィール更新エラー（ログインは続行）", error);
+  }
+
+  if (seq !== authResolveSeq) return;
+  resolvedUid = currentUser?.uid || null;
+  loginIntent = false;
+
+  try {
+    showApp();
+  } catch (error) {
+    logFirebaseError("アプリ表示エラー（名前の保存は成功済み）", error);
+  }
+}
+
 async function saveUserProfile() {
   if (!currentUser || !username) return;
 
   const userRef = doc(db, "users", username);
   const existing = await getDoc(userRef);
   const oldData = existing.exists() ? existing.data() : {};
-  const profileImage = localStorage.getItem("yuuchat_profile_image") || "";
 
   await setDoc(userRef, {
     uid: currentUser.uid,
     name: username,
     photoURL: currentUser.photoURL || "",
-    profileImage,
+    profileImage: getMyProfileImage(),
     online: true,
     lastSeen: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -533,8 +803,7 @@ async function saveUserProfile() {
 }
 
 function showApp() {
-  loginScreen?.classList.add("hidden");
-  nameScreen?.classList.add("hidden");
+  AUTH_SCREENS.forEach((element) => element?.classList.add("hidden"));
   appElement?.classList.remove("hidden");
   if (myName) myName.textContent = username || "ユーザー";
   loadProfileImage();
@@ -690,48 +959,125 @@ setInterval(() => {
 
 /* =========================================================
    プロフィール画像
+   ・選んだ画像は 256px 以内の JPEG に縮小・圧縮してから使う
+     （Firestore の 1ドキュメント 1MiB の上限に十分余裕を持たせる。メッセージの senderPhoto も小さくなる）
+   ・画像はアカウントごと（users/{username}.profileImage）に持ち、端末（localStorage）には残さない
+     （以前は端末に1つだけ保存していたため、別のアカウントに引き継がれていた）
 ========================================================= */
 
-profileImageInput?.addEventListener("change", (event) => {
+const PROFILE_IMAGE_MAX_SIZE = 256;
+const PROFILE_IMAGE_MAX_LENGTH = 120 * 1024;
+const PROFILE_IMAGE_MAX_FILE_BYTES = 20 * 1024 * 1024;
+const LEGACY_PROFILE_IMAGE_KEY = "yuuchat_profile_image";
+
+let myProfileImageData = "";
+
+/* 以前の「端末に1つだけ」の保存場所は使わないので消す */
+try { localStorage.removeItem(LEGACY_PROFILE_IMAGE_KEY); } catch (error) { /* 使えなくても動作に影響なし */ }
+
+function getMyProfileImage() {
+  return myProfileImageData || "";
+}
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("IMAGE_LOAD_FAILED"));
+    image.src = src;
+  });
+}
+
+async function compressImageSource(src) {
+  const image = await loadImageElement(src);
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  if (!width || !height) throw new Error("IMAGE_LOAD_FAILED");
+
+  const scale = Math.min(1, PROFILE_IMAGE_MAX_SIZE / Math.max(width, height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#ffffff"; /* 透過PNGの背景が黒くならないように */
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  for (const quality of [0.85, 0.75, 0.6, 0.45]) {
+    const dataURL = canvas.toDataURL("image/jpeg", quality);
+    if (dataURL.length <= PROFILE_IMAGE_MAX_LENGTH) return dataURL;
+  }
+  throw new Error("IMAGE_TOO_LARGE");
+}
+
+async function compressProfileImageFile(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    return await compressImageSource(url);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/* 以前に保存された大きい画像は、ログイン時に小さくしてから使う */
+async function normalizeProfileImage(dataURL) {
+  if (!dataURL) return "";
+  if (dataURL.length <= PROFILE_IMAGE_MAX_LENGTH) return dataURL;
+  try {
+    return await compressImageSource(dataURL);
+  } catch (error) {
+    console.warn("プロフィール画像を縮小できませんでした:", error);
+    return "";
+  }
+}
+
+profileImageInput?.addEventListener("change", async (event) => {
   const file = event.target.files?.[0];
   if (!file) return;
 
   if (!file.type.startsWith("image/")) {
     alert("画像ファイルを選択してください。");
-    return;
-  }
-
-  if (file.size > 5 * 1024 * 1024) {
-    alert("画像は5MB以下にしてください。");
     profileImageInput.value = "";
     return;
   }
 
-  const reader = new FileReader();
-  reader.onload = async () => {
-    const dataURL = reader.result;
-    try {
-      localStorage.setItem("yuuchat_profile_image", dataURL);
-      loadProfileImage();
-      await saveUserProfile();
-      await updateProfileImageEverywhere(dataURL);
-    } catch (error) {
-      console.error("プロフィール画像更新エラー:", error);
-      alert("プロフィール画像の更新に失敗しました。");
-    }
-  };
-  reader.onerror = () => alert("画像の読み込みに失敗しました。");
-  reader.readAsDataURL(file);
+  if (file.size > PROFILE_IMAGE_MAX_FILE_BYTES) {
+    alert("画像は20MB以下にしてください。");
+    profileImageInput.value = "";
+    return;
+  }
+
+  const previousImage = myProfileImageData;
+
+  try {
+    const compressed = await compressProfileImageFile(file);
+    myProfileImageData = compressed;
+    loadProfileImage();
+    await saveUserProfile();
+    await updateProfileImageEverywhere(compressed);
+  } catch (error) {
+    console.error("プロフィール画像更新エラー:", error);
+    myProfileImageData = previousImage;
+    loadProfileImage();
+
+    if (error.message === "IMAGE_LOAD_FAILED") alert("この画像は読み込めませんでした。別の画像（JPEG / PNG など）をお試しください。");
+    else if (error.message === "IMAGE_TOO_LARGE") alert("画像を小さくできませんでした。別の画像をお試しください。");
+    else alert(describeFirebaseError(error, "プロフィール画像の更新に失敗しました。"));
+  } finally {
+    profileImageInput.value = "";
+  }
 });
 
 function loadProfileImage() {
-  const savedImage = localStorage.getItem("yuuchat_profile_image");
+  const savedImage = getMyProfileImage();
 
   if (savedImage && myProfileImage) {
     myProfileImage.src = savedImage;
     myProfileImage.classList.remove("hidden");
     profileImagePlaceholder?.classList.add("hidden");
   } else {
+    if (myProfileImage) myProfileImage.removeAttribute("src");
     myProfileImage?.classList.add("hidden");
     profileImagePlaceholder?.classList.remove("hidden");
   }
@@ -768,9 +1114,9 @@ changeNameButton?.addEventListener("click", async () => {
   if (newName === null) return;
 
   const trimmed = newName.trim();
-  if (!trimmed) return alert("名前を入力してください。");
   if (trimmed === username) return;
-  if (trimmed.length > 20) return alert("名前は20文字以内にしてください。");
+  const invalidReason = validateUsername(trimmed);
+  if (invalidReason) return alert(invalidReason);
 
   try {
     const newUserRef = doc(db, "users", trimmed);
@@ -787,7 +1133,7 @@ changeNameButton?.addEventListener("click", async () => {
       uid: currentUser.uid,
       name: trimmed,
       photoURL: currentUser.photoURL || "",
-      profileImage: localStorage.getItem("yuuchat_profile_image") || "",
+      profileImage: getMyProfileImage(),
       online: true,
       lastSeen: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -998,7 +1344,7 @@ addFriendButton?.addEventListener("click", async () => {
     const existing = await getDoc(friendshipRef);
     if (existing.exists()) return alert("すでに友達です。");
 
-    const myImage = localStorage.getItem("yuuchat_profile_image") || "";
+    const myImage = getMyProfileImage();
     const isUser1 = username < trimmed;
 
     await setDoc(friendshipRef, {
@@ -1564,7 +1910,7 @@ async function sendMessage() {
     const messageData = {
       sender: username,
       senderUid: currentUser.uid,
-      senderPhoto: localStorage.getItem("yuuchat_profile_image") || "",
+      senderPhoto: getMyProfileImage(),
       text,
       image,
       type: selectedChatType,
@@ -1912,6 +2258,12 @@ logoutButton?.addEventListener("click", async () => {
     lastNotifiedMessageId = null;
 
     await updateOnlineStatus(false);
+
+    /* 次に別のアカウントでログインしたときに引き継がれないようにする */
+    myProfileImageData = "";
+    loadProfileImage();
+    localStorage.removeItem("yuuchat_username");
+
     await signOut(auth);
   } catch (error) {
     console.error("ログアウトエラー:", error);
