@@ -1,0 +1,16 @@
+{
+  "name": "yuuchat-derby-runner",
+  "description": "ゆうダービーを開催時刻に自動開催・精算する（GitHub Actions から実行）",
+  "private": true,
+  "type": "module",
+  "main": "run.mjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node run.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.5.0"
+  }
+}

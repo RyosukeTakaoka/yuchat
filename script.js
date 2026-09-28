@@ -2879,26 +2879,37 @@ async function settleMyBets(raceId, resultOrder) {
     if (mySnap.empty) return;
 
     for (const betDoc of mySnap.docs) {
-      const bet = betDoc.data();
-      const isWin = evaluateBetWin(bet, resultOrder);
-      const payout = isWin ? await computePoolPayout(raceId, bet, resultOrder) : 0;
+      /* 1枚の精算に失敗しても、残りの馬券の精算は続ける */
+      try {
+        const bet = betDoc.data();
+        const isWin = evaluateBetWin(bet, resultOrder);
+        const payout = isWin ? await computePoolPayout(raceId, bet, resultOrder) : 0;
+        let settledNow = false;
 
-      await runTransaction(db, async (transaction) => {
-        const betRef = doc(db, "raceBets", betDoc.id);
-        const freshBet = await transaction.get(betRef);
-        if (!freshBet.exists() || freshBet.data().settled) return;
-
-        transaction.update(betRef, { settled: true, win: isWin, payout });
-
-        if (payout > 0) {
+        await runTransaction(db, async (transaction) => {
+          /* Firestore のトランザクションは「読み込みを全部終えてから書き込む」必要がある。
+             以前は払い戻しのときに書き込みの後で users を読んでいたため、
+             当たり馬券の精算が毎回失敗していた */
+          const betRef = doc(db, "raceBets", betDoc.id);
           const userRef = doc(db, "users", username);
-          const userSnap = await transaction.get(userRef);
-          const coins = userSnap.exists() ? Number(userSnap.data().coins || 0) : 0;
-          transaction.update(userRef, { coins: coins + payout });
-        }
-      });
+          const freshBet = await transaction.get(betRef);
+          const userSnap = payout > 0 ? await transaction.get(userRef) : null;
 
-      if (isWin && payout > 0) showRaceHitAnimation(bet, payout);
+          settledNow = false;
+          if (!freshBet.exists() || freshBet.data().settled) return;
+
+          transaction.update(betRef, { settled: true, win: isWin, payout });
+          if (payout > 0) {
+            const coins = userSnap?.exists() ? Number(userSnap.data().coins || 0) : 0;
+            transaction.update(userRef, { coins: coins + payout });
+          }
+          settledNow = true;
+        });
+
+        if (settledNow && isWin && payout > 0) showRaceHitAnimation(bet, payout);
+      } catch (error) {
+        console.error(`[ベット精算エラー] raceId=${raceId} betId=${betDoc.id} code=${error?.code || "(なし)"} message=${error?.message || error}`, error);
+      }
     }
 
     loadMyPageStats();
@@ -3181,8 +3192,11 @@ function buildFinishStats(resultOrder) {
   }));
 }
 
+/* 開催ログ（管理用）：raceLogs/{raceId}。一般の画面には表示しない（Firebase Console で確認する）。
+   GitHub Actions の自動開催（derby-runner）も同じドキュメントに記録する */
 async function tryGenerateRaceResult(raceId) {
   const raceRef = doc(db, "races", raceId);
+  const logRef = doc(db, "raceLogs", raceId);
 
   try {
     await runTransaction(db, async (transaction) => {
@@ -3197,11 +3211,29 @@ async function tryGenerateRaceResult(raceId) {
         checkpoints: buildRaceCheckpoints(resultOrder),
         finishStats: buildFinishStats(resultOrder),
         status: "finished",
-        generatedAt: serverTimestamp()
+        generatedAt: serverTimestamp(),
+        generatedBy: "client"
       });
+
+      transaction.set(logRef, {
+        raceId,
+        scheduledAt: parseRaceIdToDate(raceId),
+        resultGeneratedAt: serverTimestamp(),
+        resultGeneratedBy: "client",
+        resultStatus: "created"
+      }, { merge: true });
     });
   } catch (error) {
-    console.error("レース抽選エラー:", error);
+    console.error(`[レース抽選エラー] raceId=${raceId} code=${error?.code || "(なし)"} message=${error?.message || error}`, error);
+    try {
+      await setDoc(logRef, {
+        raceId,
+        lastClientError: `${error?.code || ""} ${error?.message || error}`.trim().slice(0, 500),
+        lastClientErrorAt: serverTimestamp()
+      }, { merge: true });
+    } catch (logError) {
+      console.warn("開催ログの記録にも失敗:", logError);
+    }
   }
 }
 
