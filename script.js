@@ -2420,55 +2420,104 @@ const BET_TYPE_COUNT = { win: 1, place: 1, quinella: 2, trio: 3, trifecta: 3 };
 function getBetTypeName(type) { return BET_TYPE_NAMES[type] || type; }
 function getHorseName(number) { return SAFE_RACE_HORSES.find((h) => h.number === number)?.name || `${number}番`; }
 
+/* ----- 時刻の基準（日本時間 15:02:00）-----
+   ・開催時刻・レースID（YYYY-MM-DD）は、端末のタイムゾーンに関係なく日本時間で計算する
+     （自動開催 derby-runner/run.mjs と同じ基準。日本の端末では以前と同じ結果になる）
+   ・端末の時計がずれていてもカウントダウンや演出がずれないよう、サーバー（GitHub Pages）の時刻との差を補正する */
+
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+let derbyClockOffsetMs = 0;
+
+/* サーバーの時刻に合わせた「今」 */
+function derbyNow() {
+  return new Date(Date.now() + derbyClockOffsetMs);
+}
+
+/* サーバーが返す Date ヘッダーとの差を測る（2秒以内の差は補正しない） */
+async function syncDerbyClock() {
+  try {
+    const sentAt = Date.now();
+    const response = await fetch(`./manifest.json?clock=${sentAt}`, { method: "HEAD", cache: "no-store" });
+    const receivedAt = Date.now();
+    const serverDate = Date.parse(response.headers.get("Date") || "");
+    if (!Number.isFinite(serverDate)) return;
+    /* Date ヘッダーは秒単位なので +500ms、通信の往復の半分を足して推定する */
+    const offset = serverDate + 500 + (receivedAt - sentAt) / 2 - receivedAt;
+    derbyClockOffsetMs = Math.abs(offset) > 2000 ? Math.round(offset) : 0;
+  } catch (error) {
+    console.warn("時刻の確認に失敗（端末の時計を使います）:", error);
+  }
+}
+
+/* 日本時間での年・月・日（UTCのメソッドで読むための Date） */
+function toJstFields(date) {
+  return new Date(date.getTime() + JST_OFFSET_MS);
+}
+
 function formatRaceId(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
+  const jst = toJstFields(date);
+  const year = jst.getUTCFullYear();
+  const month = String(jst.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(jst.getUTCDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
-function getTodayRaceId() { return formatRaceId(new Date()); }
+function getTodayRaceId() { return formatRaceId(derbyNow()); }
 
+/* その日（日本時間）の 15:02:00 JST */
 function parseRaceIdToDate(raceId) {
   const [y, m, d] = raceId.split("-").map(Number);
-  return new Date(y, m - 1, d, RACE_HOUR, RACE_MINUTE, 0, 0);
+  return new Date(Date.UTC(y, m - 1, d, RACE_HOUR, RACE_MINUTE, 0, 0) - JST_OFFSET_MS);
 }
 
 function getRaceScheduleFor(date) {
-  const raceTime = new Date(date.getFullYear(), date.getMonth(), date.getDate(), RACE_HOUR, RACE_MINUTE, 0, 0);
+  const raceTime = parseRaceIdToDate(formatRaceId(date));
   const closeTime = new Date(raceTime.getTime() - RACE_CLOSE_MINUTES_BEFORE * 60000);
   return { raceTime, closeTime };
 }
 
-/* レースは毎日15:02に開催。締切(14:52)を過ぎたら、その瞬間から「次の日のレース」を
+function makeRaceContext(date) {
+  const { raceTime, closeTime } = getRaceScheduleFor(date);
+  return { raceId: formatRaceId(date), raceTime, closeTime };
+}
+
+/* レースは毎日15:02（日本時間）に開催。締切(14:52)を過ぎたら、その瞬間から「次の日のレース」を
    投票対象にする（＝1日のどこかの時間帯で投票が完全に止まることがないようにする） */
-function getActiveBettingRaceContext() {
-  const now = new Date();
-  const today = getRaceScheduleFor(now);
-
-  if (now < today.closeTime) {
-    return { raceId: formatRaceId(now), raceTime: today.raceTime, closeTime: today.closeTime };
-  }
-
-  const tomorrowDate = new Date(now);
-  tomorrowDate.setDate(tomorrowDate.getDate() + 1);
-  const tomorrow = getRaceScheduleFor(tomorrowDate);
-  return { raceId: formatRaceId(tomorrowDate), raceTime: tomorrow.raceTime, closeTime: tomorrow.closeTime };
+function getActiveBettingRaceContext(now = derbyNow()) {
+  const today = makeRaceContext(now);
+  if (now < today.closeTime) return today;
+  return makeRaceContext(new Date(now.getTime() + DAY_MS));
 }
 
 /* 直近に発走した（または、まさに発走中の）レース。演出・結果表示・精算の対象。 */
-function getLiveRaceContext() {
-  const now = new Date();
-  const today = getRaceScheduleFor(now);
+function getLiveRaceContext(now = derbyNow()) {
+  const today = makeRaceContext(now);
+  if (now >= today.raceTime) return today;
+  return makeRaceContext(new Date(now.getTime() - DAY_MS));
+}
 
-  if (now >= today.raceTime) {
-    return { raceId: formatRaceId(now), raceTime: today.raceTime, closeTime: today.closeTime };
-  }
+/* 次に始まるレース（カウントダウンの対象）。締切ではなく開催時刻 15:02:00 で切り替える */
+function getNextRaceStartContext(now = derbyNow()) {
+  const today = makeRaceContext(now);
+  if (now < today.raceTime) return today;
+  return makeRaceContext(new Date(now.getTime() + DAY_MS));
+}
 
-  const yesterdayDate = new Date(now);
-  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
-  const yesterday = getRaceScheduleFor(yesterdayDate);
-  return { raceId: formatRaceId(yesterdayDate), raceTime: yesterday.raceTime, closeTime: yesterday.closeTime };
+/* 右上のカウントダウンの文字（レース中は「レース中」、それ以外は次のレースまでの残り） */
+function getDerbyCountdownText(now = derbyNow()) {
+  const live = getLiveRaceContext(now);
+  const sinceStart = now.getTime() - live.raceTime.getTime();
+  if (sinceStart >= 0 && sinceStart < RACE_DURATION_SECONDS * 1000) return "🏇 レース中";
+
+  const next = getNextRaceStartContext(now);
+  const dayLabel = next.raceId === formatRaceId(now) ? "本日" : "明日";
+  return `${dayLabel} ${formatCountdown(next.raceTime.getTime() - now.getTime())}`;
+}
+
+function formatJstHourMinute(date) {
+  const jst = toJstFields(date);
+  return `${String(jst.getUTCHours()).padStart(2, "0")}:${String(jst.getUTCMinutes()).padStart(2, "0")}`;
 }
 
 
@@ -2942,7 +2991,7 @@ async function catchUpMissedRaces() {
 
       if (!raceSnap.exists()) {
         const scheduledTime = parseRaceIdToDate(raceId);
-        if (new Date() >= scheduledTime) {
+        if (derbyNow() >= scheduledTime) {
           await tryGenerateRaceResult(raceId);
           raceSnap = await getDoc(raceRef);
         }
@@ -3489,13 +3538,12 @@ function renderRaceInfo() {
   ensureDerbyLiveStructure();
 
   const activeContext = getActiveBettingRaceContext();
-  const now = new Date();
-  const timeText = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const now = derbyNow();
   const isToday = formatRaceId(now) === activeContext.raceId;
 
   const scheduleLine = document.getElementById("raceScheduleLine");
   if (scheduleLine) {
-    scheduleLine.textContent = `次のレース：${isToday ? "本日" : "明日"} ${timeText(activeContext.raceTime)}（${activeContext.raceId}）`;
+    scheduleLine.textContent = `次のレース：${isToday ? "本日" : "明日"} ${formatJstHourMinute(activeContext.raceTime)}（${activeContext.raceId}）`;
   }
 
   /* 馬券表示は手元のデータ(myAllBets)だけで組み立てられるので、毎ティック更新してもチラつかない */
@@ -3621,20 +3669,13 @@ let lastRaceInfoRenderAt = -999;
 function tickDerbyCountdown() {
   refreshDerbySubscriptionsIfNeeded();
 
-  const activeContext = getActiveBettingRaceContext();
-  const liveContext = getLiveRaceContext();
-  const now = new Date();
+  const now = derbyNow();
+  const liveContext = getLiveRaceContext(now);
   const elapsed = (now.getTime() - liveContext.raceTime.getTime()) / 1000;
 
-  if (derbyCountdown) {
-    const isToday = formatRaceId(now) === activeContext.raceId;
-    const dayLabel = isToday ? "本日" : "明日";
-    if (now < activeContext.raceTime) {
-      derbyCountdown.textContent = `${dayLabel} ${formatCountdown(activeContext.raceTime - now)}`;
-    } else {
-      derbyCountdown.textContent = "投票受付中";
-    }
-  }
+  /* 以前は「馬券を買える対象のレース」の時刻を使っていたため、締切(14:52)〜15:02 の間は
+     明日のレースまでの約24時間が表示されていた。開催時刻 15:02:00 JST を基準にする */
+  if (derbyCountdown) derbyCountdown.textContent = getDerbyCountdownText(now);
 
   if (now >= liveContext.raceTime && !liveRaceResult && elapsed - lastGenerationAttemptAt > 5) {
     /* 一度失敗しても(通信エラー等)5秒おきに再試行する。
@@ -3717,7 +3758,11 @@ function tickDerbyCountdown() {
   }
 }
 
+let derbyClockSyncTimer = null;
+
 function initializeSafeRace() {
+  syncDerbyClock();
+  if (!derbyClockSyncTimer) derbyClockSyncTimer = setInterval(syncDerbyClock, 10 * 60 * 1000);
   resetBetHorsesSelection();
   updateBetFormEnabled();
   tickDerbyCountdown();

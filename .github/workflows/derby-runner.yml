@@ -1,7 +1,13 @@
 # ゆうダービー 自動開催
 # 毎日 15:02（日本時間）のレースを、誰もサイトを開いていなくても開催・精算する。
-# GitHub の定期実行は数分〜数十分遅れることがあるので、予備の実行も入れている
-# （2回目以降は「すでに開催済み・精算済み」なら何もしない）。
+#
+# GitHub の定期実行は予定より15〜20分ほど遅れて始まる（実測）。そのため
+#   ・開催時刻より前に起動し、プログラムの中で 15:02:00 まで待ってから開催する（DERBY_WAIT_FOR_RACE）
+#   ・開催時刻の後にも予備の実行を入れ、失敗や大きな遅れがあっても後から必ず開催・精算する
+# 何回実行されても、Firestore のトランザクションで「まだ無ければ作る」「未精算なら精算する」ので二重にはならない。
+# 締切（14:52）より前に結果を作ることはない（早く起動しても 15:02 まで待つ）。
+#
+# cron は UTC。混み合う毎時0分付近を避けた時刻にしている。
 #
 # 必要な設定：リポジトリの Settings → Secrets and variables → Actions に
 #   FIREBASE_SERVICE_ACCOUNT（Firebase のサービスアカウントの鍵 JSON）を登録する。
@@ -11,22 +17,21 @@ name: ゆうダービー自動開催
 
 on:
   schedule:
-    - cron: "2 6 * * *"    # 15:02 JST（06:02 UTC）
-    - cron: "20 6 * * *"   # 15:20 JST（予備）
-    - cron: "0 9 * * *"    # 18:00 JST（予備）
+    - cron: "13 5 * * *"   # 14:13 JST 起動 → 15:02 まで待って開催
+    - cron: "37 5 * * *"   # 14:37 JST 起動 → 15:02 まで待って開催（上の実行が遅れた・失敗したときの保険）
+    - cron: "11 6 * * *"   # 15:11 JST 予備（開催・精算の確認）
+    - cron: "47 6 * * *"   # 15:47 JST 予備
+    - cron: "19 9 * * *"   # 18:19 JST 予備
+    - cron: "23 14 * * *"  # 23:23 JST 予備（その日のうちの最後の確認）
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: derby-runner
-  cancel-in-progress: false
-
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: derby-runner
@@ -58,4 +63,5 @@ jobs:
         if: steps.secret.outputs.ready == 'true'
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          DERBY_WAIT_FOR_RACE: "1"
         run: node run.mjs
