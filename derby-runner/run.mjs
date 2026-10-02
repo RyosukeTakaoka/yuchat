@@ -14,8 +14,12 @@
      FIREBASE_SERVICE_ACCOUNT  サービスアカウントの鍵（JSON）。GitHub Secrets に登録する
      FIRESTORE_EMULATOR_HOST   テスト用（Emulator を使うとき）
      DERBY_NOW                 テスト用（現在時刻を ISO 形式で上書き）
+     DERBY_WAIT_FOR_RACE       "1" なら、今日の開催時刻の前に起動したときは開催時刻まで待ってから実行する
+                               （GitHub の定期実行は15〜20分ほど遅れるので、早めに起動して待つ）
+     GITHUB_STEP_SUMMARY       GitHub Actions が設定する。実行結果の表をここに書き出す
 ========================================================= */
 
+import fs from "fs";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 
@@ -40,6 +44,9 @@ const SAFE_RACE_HORSES = [
 /* 開催時刻は日本時間。何日前までさかのぼって「作られていないレース・未精算の馬券」を処理するか */
 const JST_OFFSET_HOURS = 9;
 const LOOKBACK_DAYS = 7;
+
+/* 早めに起動したとき、最大でどれだけ開催時刻まで待つか（GitHub Actions の1ジョブは最長6時間） */
+const MAX_WAIT_MINUTES = 80;
 
 /* ----- レース結果の生成（script.js と同じ） ----- */
 
@@ -230,6 +237,7 @@ async function ensureRaceResult(db, raceId, raceTime) {
       scheduledAt: Timestamp.fromDate(raceTime),
       resultGeneratedAt: FieldValue.serverTimestamp(),
       resultGeneratedBy: "github-actions",
+      resultGeneratedDelaySeconds: Math.round((Date.now() - raceTime.getTime()) / 1000),
       resultStatus: "created"
     }, { merge: true });
     created = true;
@@ -332,6 +340,32 @@ export async function runDerby({ db, now = new Date(), lookbackDays = LOOKBACK_D
   return summary;
 }
 
+/* 今日のレースの開催時刻より前に起動していたら、開催時刻まで待つ（待ち時間が長すぎるときは待たない） */
+export function getWaitMillisUntilTodayRace(now) {
+  const { raceTime } = getRaceForJstDay(now, 0);
+  const wait = raceTime.getTime() - now.getTime();
+  if (wait <= 0 || wait > MAX_WAIT_MINUTES * 60 * 1000) return 0;
+  return wait + 2000; /* 開催時刻ちょうど＋2秒 */
+}
+
+function writeStepSummary(summary, startedAt, finishedAt) {
+  const file = process.env.GITHUB_STEP_SUMMARY;
+  if (!file) return;
+  const jst = (d) => new Date(d.getTime() + JST_OFFSET_HOURS * 3600 * 1000).toISOString().replace("T", " ").slice(0, 19) + " JST";
+  const rows = summary.map((e) =>
+    `| ${e.raceId} | ${e.status === "ok" ? "✅" : "❌"} | ${e.result || "-"} | ${e.betsTotal ?? "-"} | ${e.settledNow ?? "-"} | ${e.payoutTotal ?? "-"} | ${e.unsettledRemaining ?? "-"} | ${(e.error || (e.errors || []).join(" / ") || "").replace(/\|/g, "/")} |`);
+  const text = [
+    "## ゆうダービー自動開催",
+    `起動 ${jst(startedAt)} ／ 完了 ${jst(finishedAt)}`,
+    "",
+    "| レース | 状態 | 結果 | 馬券 | 今回精算 | 払戻計 | 未精算 | エラー |",
+    "|---|---|---|---|---|---|---|---|",
+    ...rows,
+    ""
+  ].join("\n");
+  fs.appendFileSync(file, text);
+}
+
 /* ----- GitHub Actions から直接実行されたとき ----- */
 
 const isMain = import.meta.url === `file://${process.argv[1]}`;
@@ -348,10 +382,22 @@ if (isMain) {
     initializeApp({ projectId: process.env.GCLOUD_PROJECT || "demo-yuuchat" });
   }
 
-  const now = process.env.DERBY_NOW ? new Date(process.env.DERBY_NOW) : new Date();
-  console.log(`ゆうダービー自動開催 now=${now.toISOString()}`);
+  const startedAt = new Date();
+  let now = process.env.DERBY_NOW ? new Date(process.env.DERBY_NOW) : new Date();
+  console.log(`ゆうダービー自動開催 起動 now=${now.toISOString()}`);
+
+  if (process.env.DERBY_WAIT_FOR_RACE === "1" && !process.env.DERBY_NOW) {
+    const wait = getWaitMillisUntilTodayRace(now);
+    if (wait > 0) {
+      console.log(`開催時刻まで ${Math.round(wait / 1000)} 秒待ちます`);
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      now = new Date();
+      console.log(`開催時刻になりました now=${now.toISOString()}`);
+    }
+  }
 
   const summary = await runDerby({ db: getFirestore(), now });
+  writeStepSummary(summary, startedAt, new Date());
   const failed = summary.filter((e) => e.status !== "ok");
   if (failed.length) {
     console.error(`失敗したレース: ${failed.map((e) => e.raceId).join(", ")}`);
