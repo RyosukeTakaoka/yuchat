@@ -1,0 +1,12 @@
+# ゆうChat 通知サーバー（Cloudflare Workers）
+# コマンドで公開する場合：npx wrangler deploy
+# 鍵の登録：npx wrangler secret put FIREBASE_SERVICE_ACCOUNT（JSON の中身を貼り付け）
+# 管理画面に worker.js を貼り付けて使う場合、このファイルは不要。
+
+name = "yuuchat-notify"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+FIREBASE_PROJECT_ID = "yuuchat-be666"
+ALLOWED_ORIGINS = "https://yuchin0809.github.io"
