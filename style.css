@@ -3415,3 +3415,207 @@ button:disabled {
     font-size: 12px;
     line-height: 1.5;
 }
+
+
+/* ==================================================
+   ゆうダービー：レース画面（Canvas の中継風演出・字幕・リプレイ）
+   ・既存の .race-track を「レース画面の枠」として使う
+================================================== */
+
+.race-track.race-stage {
+    min-height: 0;
+    height: clamp(230px, 62vw, 380px);
+
+    padding: 0;
+
+    background: #0f2416;
+    border: none;
+
+    transform: none;
+    transition: none;
+}
+
+.race-canvas {
+    position: absolute;
+    inset: 0;
+
+    width: 100%;
+    height: 100%;
+
+    display: block;
+}
+
+.race-stage-badge {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+
+    z-index: 2;
+
+    max-width: 70%;
+
+    padding: 3px 9px;
+
+    border-radius: 999px;
+
+    background: rgba(0, 0, 0, .62);
+    color: #fff;
+
+    font-size: 11px;
+    font-weight: 800;
+
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.race-stage-badge:empty {
+    display: none;
+}
+
+.race-stage-top3 {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+
+    z-index: 2;
+
+    display: flex;
+    gap: 4px;
+}
+
+.race-stage-pos {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+
+    padding: 2px 5px 2px 4px;
+
+    border-radius: 999px;
+
+    background: rgba(0, 0, 0, .55);
+    color: #fff;
+
+    font-size: 10px;
+    font-weight: 800;
+}
+
+.race-stage-pos b {
+    width: 18px;
+    height: 18px;
+
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+
+    border-radius: 50%;
+
+    font-size: 11px;
+
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .35);
+}
+
+.race-subtitle {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+
+    z-index: 2;
+
+    padding: 6px 10px;
+
+    border-radius: 10px;
+
+    background: rgba(0, 0, 0, .66);
+    color: #fff;
+
+    font-size: clamp(13px, 3.6vw, 16px);
+    font-weight: 800;
+    line-height: 1.4;
+    text-align: center;
+
+    text-shadow: 0 1px 2px rgba(0, 0, 0, .6);
+
+    pointer-events: none;
+}
+
+.race-replay-end {
+    position: absolute;
+    inset: 0;
+
+    z-index: 4;
+
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+
+    background: rgba(0, 0, 0, .62);
+    color: #fff;
+
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.race-replay-end-title {
+    margin-bottom: 4px;
+
+    font-size: 15px;
+    font-weight: 900;
+}
+
+.race-replay-end-buttons {
+    display: flex;
+    gap: 8px;
+
+    margin-top: 8px;
+}
+
+.race-replay-end-buttons button {
+    padding: 8px 14px;
+
+    border: none;
+    border-radius: 999px;
+
+    background: #fff;
+    color: #111;
+
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.race-replay-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+
+    margin-top: 8px;
+}
+
+.race-replay-bar:not(:has(button:not(.hidden))) {
+    display: none;
+}
+
+.race-replay-bar button {
+    flex: 1;
+
+    min-height: 40px;
+
+    padding: 8px 12px;
+
+    border: 1.5px solid #111;
+    border-radius: 12px;
+
+    background: #fff;
+    color: #111;
+
+    font-size: 13px;
+    font-weight: 800;
+}
+
+#raceReplayExitButton {
+    background: #111;
+    color: #fff;
+}
