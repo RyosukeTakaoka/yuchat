@@ -10,6 +10,14 @@ import {
   initializeApp
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
 
+/* ゆうダービーのレース演出（決まった結果を見せるだけ。Firebase には触らない） */
+import {
+  buildRaceShow,
+  createRaceStage,
+  getHorseColors,
+  RACE_SHOW_MAX_SECONDS
+} from "./derby-show.js?v=20261006-derby";
+
 import {
   getFirestore, collection, addDoc, getDocs, getDoc, doc, setDoc,
   updateDoc, deleteDoc, query, where, onSnapshot, orderBy, limit,
@@ -2661,6 +2669,7 @@ logoutButton?.addEventListener("click", async () => {
     if (unsubscribeMyBetHistory) { unsubscribeMyBetHistory(); unsubscribeMyBetHistory = null; }
     if (unsubscribeGlobalMessageWatch) { unsubscribeGlobalMessageWatch(); unsubscribeGlobalMessageWatch = null; }
     if (raceCountdownTimer) { clearInterval(raceCountdownTimer); raceCountdownTimer = null; }
+    derbyReplay = null;
     lastActiveBettingRaceId = null;
     lastLiveRaceId = null;
     liveRaceResult = null;
@@ -2940,7 +2949,9 @@ function getNextRaceStartContext(now = derbyNow()) {
 function getDerbyCountdownText(now = derbyNow()) {
   const live = getLiveRaceContext(now);
   const sinceStart = now.getTime() - live.raceTime.getTime();
-  if (sinceStart >= 0 && sinceStart < RACE_DURATION_SECONDS * 1000) return "🏇 レース中";
+  const liveShow = live.raceId === getLiveRaceContext().raceId ? getLiveShow() : null;
+  const showSeconds = liveShow ? liveShow.revealTime : RACE_DURATION_SECONDS;
+  if (sinceStart >= 0 && sinceStart < showSeconds * 1000) return "🏇 レース中";
 
   const next = getNextRaceStartContext(now);
   const dayLabel = next.raceId === formatRaceId(now) ? "本日" : "明日";
@@ -3117,13 +3128,14 @@ function updateBetFormEnabled() {
   /* 毎日15:02に開催される仕組み上、締切(14:52)を過ぎた瞬間から
      投票対象が自動的に「次の日のレース」に切り替わるため、
      ログインさえしていれば常に投票できる（投票自体が止まることはない） */
-  const canBet = Boolean(currentUser && username);
+  /* 前回レースのリプレイを見ている間は投票を受け付けない（リプレイ終了で元に戻る） */
+  const canBet = Boolean(currentUser && username) && !derbyReplay;
   if (betType) betType.disabled = !canBet;
   if (betHorsesPicker) betHorsesPicker.classList.toggle("disabled", !canBet);
   if (betAmount) betAmount.disabled = !canBet;
   if (betButton) {
     betButton.disabled = !canBet;
-    betButton.textContent = "🪙 投票する";
+    betButton.textContent = derbyReplay ? "📼 リプレイ中は投票できません" : "🪙 投票する";
   }
 }
 
@@ -3262,6 +3274,7 @@ betType?.addEventListener("change", resetBetHorsesSelection);
 
 betButton?.addEventListener("click", async () => {
   if (!currentUser || !username) return alert("ログインしてください。");
+  if (derbyReplay) return alert("リプレイ中は投票できません。リプレイを終了してから投票してください。");
 
   const type = betType?.value || "win";
   const amount = Number(betAmount?.value || 0);
@@ -3431,7 +3444,7 @@ async function settleMyBets(raceId, resultOrder) {
           settledNow = true;
         });
 
-        if (settledNow && isWin && payout > 0) showRaceHitAnimation(bet, payout);
+        if (settledNow && isWin && payout > 0) showRaceHitAnimationWhenRevealed(raceId, bet, payout);
       } catch (error) {
         console.error(`[ベット精算エラー] raceId=${raceId} betId=${betDoc.id} code=${error?.code || "(なし)"} message=${error?.message || error}`, error);
       }
@@ -3762,34 +3775,10 @@ async function tryGenerateRaceResult(raceId) {
   }
 }
 
-/* ----- 経過時間から、各馬の現在位置(0〜1)を計算 ----- */
-
-function getHorseProgressAt(checkpoints, elapsedSeconds) {
-  const zero = {};
-  SAFE_RACE_HORSES.forEach((h) => { zero[h.number] = 0; });
-
-  if (!checkpoints || checkpoints.length === 0) return zero;
-  if (elapsedSeconds <= 0) return zero;
-
-  const segDuration = RACE_DURATION_SECONDS / RACE_SEGMENTS;
-  if (elapsedSeconds >= RACE_DURATION_SECONDS) return checkpoints[checkpoints.length - 1];
-
-  const rawIndex = elapsedSeconds / segDuration;
-  const idx = Math.floor(rawIndex);
-  const frac = rawIndex - idx;
-  const prev = idx === 0 ? zero : checkpoints[idx - 1];
-  const curr = checkpoints[idx] || checkpoints[checkpoints.length - 1];
-
-  const result = {};
-  SAFE_RACE_HORSES.forEach((h) => {
-    const prevVal = prev[h.number] || 0;
-    const currVal = curr[h.number] ?? prevVal;
-    result[h.number] = prevVal + (currVal - prevVal) * frac;
-  });
-  return result;
-}
-
-/* ----- レース展開の実況・フェーズ表示 ----- */
+/* ----- レース演出（derby-show.js）
+   ・レース結果（races/{raceId} の resultOrder・checkpoints）を読んで、見せ方だけを作る。
+   ・全馬が着順どおりにゴールするまで再生し、最後の馬のゴール後に「レース終了」→結果表示。
+   ・結果・コイン・投票・払い戻し・Firestore には一切触れない（リプレイも同じ）。 ----- */
 
 const RACE_PHASE_LABELS = {
   gate: "🚦 スタートゲート",
@@ -3799,89 +3788,59 @@ const RACE_PHASE_LABELS = {
   late: "終盤",
   straight: "🔥 最終直線",
   finishing: "ゴール目前の競り合い！",
-  finished: "🏆 ゴール！",
+  goal: "🏁 続々とゴール！",
+  finished: "🏆 全馬ゴール！",
   results: "📋 結果発表"
 };
 
-const RACE_CAMERA_CLASSES = {
-  gate: "race-camera-start",
-  start: "race-camera-start",
-  early: "race-camera-wide",
-  mid: "race-camera-wide",
-  late: "race-camera-wide",
-  straight: "race-camera-stretch",
-  finishing: "race-camera-finish",
-  finished: "race-camera-finish",
-  results: "race-camera-wide"
-};
-
-function getRacePhase(elapsed) {
-  if (elapsed < 0) return "gate";
-  if (elapsed < 2) return "start";
-  const frac = elapsed / RACE_DURATION_SECONDS;
-  if (frac < 0.22) return "early";
-  if (frac < 0.48) return "mid";
-  if (frac < 0.68) return "late";
-  if (frac < 0.85) return "straight";
-  if (frac < 1) return "finishing";
-  if (elapsed < RACE_DURATION_SECONDS + 3) return "finished";
-  return "results";
-}
-
-function getStandings(progress) {
-  return SAFE_RACE_HORSES
-    .map((h) => ({ number: h.number, name: h.name, progress: progress[h.number] || 0 }))
-    .sort((a, b) => b.progress - a.progress);
-}
-
-function pickCommentary(phase, standings, leaderChanged) {
-  const leader = standings[0];
-  const second = standings[1];
-  const third = standings[2];
-  if (!leader) return "";
-
-  if (leaderChanged) {
-    return `${getHorseName(leader.number)}が先頭に躍り出た！`;
-  }
-
-  const templates = {
-    gate: ["まもなくスタートです。各馬、ゲートに向かっています。"],
-    start: ["スタートしました！", `${getHorseName(leader.number)}が好スタートを切った！`],
-    early: [
-      `${getHorseName(leader.number)}が先頭に立っています。`,
-      second ? `${getHorseName(leader.number)}を追う形で${getHorseName(second.number)}。` : ""
-    ].filter(Boolean),
-    mid: [
-      `レースは${getHorseName(leader.number)}がリードしたまま中盤に入ります。`,
-      second ? `${getHorseName(second.number)}が少しずつ差を詰めています。` : "",
-      third ? `${getHorseName(third.number)}も上位をうかがう位置につけています。` : ""
-    ].filter(Boolean),
-    late: [
-      `終盤に入りました。先頭は${getHorseName(leader.number)}。`,
-      second ? `外から${getHorseName(second.number)}が上がってきた！` : ""
-    ].filter(Boolean),
-    straight: [
-      `最終直線に入りました！先頭は${getHorseName(leader.number)}！`,
-      second ? `${getHorseName(second.number)}が猛追しています！` : ""
-    ].filter(Boolean),
-    finishing: [
-      `ゴール目前！${getHorseName(leader.number)}が押し切るか！`,
-      second ? `${getHorseName(leader.number)}と${getHorseName(second.number)}の激しい競り合い！` : ""
-    ].filter(Boolean),
-    finished: [`ゴールイン！優勝は${getHorseName(leader.number)}！`],
-    results: [`結果が確定しました。優勝は${getHorseName(leader.number)}でした。`]
-  };
-
-  const pool = templates[phase] && templates[phase].length ? templates[phase] : templates.mid;
-  return pool[Math.floor(Math.random() * pool.length)];
-}
-
-/* ----- レーストラックの描画・更新 ----- */
+const REPLAY_LEAD_IN_SECONDS = 3;
 
 let lastElapsedWasNegative = null;
-let lastCommentaryUpdateAt = -999;
-let lastCommentaryText = "";
-let lastLeaderNumber = null;
+let raceStage = null;
+let raceStageLoopStarted = false;
+let raceStageErrorLogged = false;
+let raceStageSnapCamera = true;
+let raceStartFlashRaceId = null;
+let liveShowCache = { key: "", show: null };
+let derbyReplay = null;
+let recentRacesCache = [];
+let revealedLiveRaceId = null;
+const raceStageOverlayCache = {};
+
+function buildShowForRace(raceId, raceData) {
+  return buildRaceShow(raceData, { horses: SAFE_RACE_HORSES, raceId });
+}
+
+/* 今日（直近）のレースの演出。結果データが変わらない限り作り直さない */
+function getLiveShow() {
+  if (!liveRaceResult || !Array.isArray(liveRaceResult.resultOrder)) return null;
+  const raceId = getLiveRaceContext().raceId;
+  const key = `${raceId}:${liveRaceResult.resultOrder.join("-")}:${liveRaceResult.checkpoints ? liveRaceResult.checkpoints.length : 0}`;
+  if (liveShowCache.key !== key) liveShowCache = { key, show: buildShowForRace(raceId, liveRaceResult) };
+  return liveShowCache.show;
+}
+
+function getLiveElapsedSeconds(now = derbyNow()) {
+  return (now.getTime() - getLiveRaceContext(now).raceTime.getTime()) / 1000;
+}
+
+/* 全馬がゴールして「レース終了」になったか（それまでは結果・的中表示を出さない） */
+function isLiveRaceResultRevealed(now = derbyNow()) {
+  if (!liveRaceResult) return false;
+  const show = getLiveShow();
+  return getLiveElapsedSeconds(now) >= (show ? show.revealTime : RACE_DURATION_SECONDS);
+}
+
+/* 的中の表示：レース演出が終わるまで待ってから出す（払い戻しの処理そのものは今までどおり） */
+function showRaceHitAnimationWhenRevealed(raceId, bet, payout) {
+  if (raceId !== getLiveRaceContext().raceId || isLiveRaceResultRevealed()) {
+    showRaceHitAnimation(bet, payout);
+    return;
+  }
+  const show = getLiveShow();
+  const waitMs = ((show ? show.revealTime : RACE_DURATION_SECONDS) - getLiveElapsedSeconds()) * 1000;
+  setTimeout(() => showRaceHitAnimation(bet, payout), Math.min(Math.max(0, waitMs), RACE_SHOW_MAX_SECONDS * 1000));
+}
 
 function triggerStartFlash() {
   if (!raceTrack) return;
@@ -3892,51 +3851,186 @@ function triggerStartFlash() {
   setTimeout(() => flash.remove(), 1500);
 }
 
-function ensureRaceTrackLanes(raceId) {
-  if (!raceTrack) return;
-  if (raceTrack.dataset.raceId === raceId) return;
-
-  raceTrack.dataset.raceId = raceId;
+/* レース画面（Canvas）と字幕などの重ね表示を一度だけ作る */
+function ensureRaceStage() {
+  if (raceStage || !raceTrack) return;
   raceTrack.innerHTML = "";
-  raceTrack.classList.remove("gate-passed");
-
-  const gate = document.createElement("div");
-  gate.className = "race-gate";
-  raceTrack.appendChild(gate);
-
-  SAFE_RACE_HORSES.forEach((horse) => {
-    const lane = document.createElement("div");
-    lane.className = "race-lane";
-
-    const el = document.createElement("div");
-    el.className = "race-horse";
-    el.id = `raceHorse${horse.number}`;
-    el.innerHTML = `
-      <span class="horse-trail"></span>
-      <span class="horse-number">${horse.number}</span>
-      <span class="horse-body">🐎</span>
-    `;
-
-    lane.appendChild(el);
-    raceTrack.appendChild(lane);
-  });
-
-  const finishLine = document.createElement("div");
-  finishLine.className = "race-finish-line";
-  finishLine.innerHTML = `<span>🏁</span>`;
-  raceTrack.appendChild(finishLine);
+  raceTrack.classList.add("race-stage");
+  raceStage = createRaceStage(raceTrack, { horses: SAFE_RACE_HORSES });
+  raceTrack.insertAdjacentHTML("beforeend", `
+    <div id="raceStageBadge" class="race-stage-badge"></div>
+    <div id="raceStageTop3" class="race-stage-top3"></div>
+    <div id="raceSubtitle" class="race-subtitle hidden" aria-live="polite"></div>
+    <div id="raceReplayEnd" class="race-replay-end hidden"></div>`);
+  startRaceStageLoop();
 }
 
-function renderRaceTrackFrame(progress, raceId) {
-  const myHorses = getMyBetHorseNumbersForRace(raceId);
-  SAFE_RACE_HORSES.forEach((horse) => {
-    const el = document.getElementById(`raceHorse${horse.number}`);
-    if (!el) return;
-    const p = progress[horse.number] || 0;
-    el.style.left = `${Math.min(90, p * 90)}%`;
-    el.classList.toggle("mine", myHorses.includes(horse.number));
-  });
+function startRaceStageLoop() {
+  if (raceStageLoopStarted) return;
+  raceStageLoopStarted = true;
+  const frame = () => {
+    requestAnimationFrame(frame);
+    try {
+      drawRaceStageFrame();
+    } catch (error) {
+      if (!raceStageErrorLogged) {
+        raceStageErrorLogged = true;
+        console.error("レース演出エラー:", error);
+      }
+    }
+  };
+  requestAnimationFrame(frame);
 }
+
+function setStageOverlay(id, html, visible = true) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const key = `${visible ? 1 : 0}|${html}`;
+  if (raceStageOverlayCache[id] === key) return;
+  raceStageOverlayCache[id] = key;
+  el.innerHTML = html;
+  el.classList.toggle("hidden", !visible || !html);
+}
+
+function renderStageTop3(show, t) {
+  if (!show || t <= 0) return "";
+  return show.standingsAt(t).slice(0, 3).map((s, i) => {
+    const [bg, fg] = getHorseColors(s.number);
+    return `<span class="race-stage-pos"><small>${i + 1}</small><b style="background:${bg};color:${fg}">${s.number}</b></span>`;
+  }).join("");
+}
+
+/* 毎フレーム：今の場面を描き、字幕・表示を更新する（ライブとリプレイで同じ仕組み） */
+function drawRaceStageFrame() {
+  if (!raceStage || !derbyView || !derbyView.classList.contains("active") || document.hidden) return;
+
+  if (derbyReplay) {
+    const show = derbyReplay.show;
+    const t = (performance.now() - derbyReplay.startedAt) / 1000 - REPLAY_LEAD_IN_SECONDS;
+    raceStage.render({ show: t >= 0 ? show : null, t: Math.min(t, show.revealTime + 2), myHorses: getMyBetHorseNumbersForRace(derbyReplay.raceId), snapCamera: raceStageSnapCamera });
+    raceStageSnapCamera = false;
+    setStageOverlay("raceStageBadge", `📼 前回レース リプレイ（${escapeHTML(derbyReplay.raceId)}）`);
+    setStageOverlay("raceStageTop3", renderStageTop3(show, t), t > 0 && t < show.revealTime);
+    const subtitle = t < 0 ? `まもなくスタート… ${Math.ceil(-t)}` : show.commentaryAt(t);
+    setStageOverlay("raceSubtitle", escapeHTML(subtitle), !derbyReplay.ended);
+    if (!derbyReplay.ended && t >= show.revealTime + 1) finishDerbyReplay();
+    return;
+  }
+
+  const now = derbyNow();
+  const liveContext = getLiveRaceContext(now);
+  const elapsed = getLiveElapsedSeconds(now);
+  const show = getLiveShow();
+  const myHorses = getMyBetHorseNumbersForRace(liveContext.raceId);
+  const next = getNextRaceStartContext(now);
+  const secondsToNext = (next.raceTime.getTime() - now.getTime()) / 1000;
+  const showOver = !show || elapsed >= show.revealTime;
+
+  if (showOver && secondsToNext <= 90) {
+    /* 次のレースの発走直前：全馬ゲートに並ぶ */
+    raceStage.render({ show: null, t: 0, myHorses: getMyBetHorseNumbersForRace(next.raceId), snapCamera: raceStageSnapCamera });
+    setStageOverlay("raceStageBadge", "🚦 まもなく発走");
+    setStageOverlay("raceStageTop3", "", false);
+    setStageOverlay("raceSubtitle", `まもなく発走です（あと${Math.max(0, Math.ceil(secondsToNext))}秒）`);
+  } else if (!show) {
+    /* 発走したが、結果（展開）がまだ届いていない数秒間 */
+    raceStage.render({ show: null, t: 0, myHorses, snapCamera: raceStageSnapCamera });
+    setStageOverlay("raceStageBadge", "🔴 LIVE");
+    setStageOverlay("raceStageTop3", "", false);
+    setStageOverlay("raceSubtitle", "ゲートオープン！");
+  } else if (elapsed < show.revealTime + 4) {
+    /* 最後の馬のゴール →「レース終了」の字幕を少し見せてから、次のレースの案内に切り替える */
+    raceStage.render({ show, t: elapsed, myHorses, snapCamera: raceStageSnapCamera });
+    setStageOverlay("raceStageBadge", elapsed < show.revealTime ? "🔴 LIVE" : `🏁 ${escapeHTML(liveContext.raceId)} レース終了`);
+    setStageOverlay("raceStageTop3", renderStageTop3(show, elapsed), elapsed > 0 && elapsed < show.revealTime);
+    setStageOverlay("raceSubtitle", escapeHTML(show.commentaryAt(elapsed)));
+  } else {
+    /* レースが終わったあと：ゴール後の全体の様子で止めておく */
+    raceStage.render({ show, t: show.revealTime + 2, myHorses, snapCamera: raceStageSnapCamera });
+    setStageOverlay("raceStageBadge", `🏁 ${escapeHTML(liveContext.raceId)} レース終了`);
+    setStageOverlay("raceStageTop3", "", false);
+    const dayLabel = next.raceId === formatRaceId(now) ? "本日" : "明日";
+    setStageOverlay("raceSubtitle", `次のレースは${dayLabel} ${formatJstHourMinute(next.raceTime)} 発走`);
+  }
+  raceStageSnapCamera = false;
+}
+
+/* ----- 前回のレースを再生（閲覧専用。結果を読み込むだけで、何も書き込まない） ----- */
+
+function getPreviousRaceForReplay(now = derbyNow()) {
+  const liveId = getLiveRaceContext(now).raceId;
+  if (liveRaceResult && Array.isArray(liveRaceResult.resultOrder) && isLiveRaceResultRevealed(now)) {
+    return { raceId: liveId, data: liveRaceResult };
+  }
+  const found = recentRacesCache.find((r) => r && typeof r.raceId === "string" && r.raceId < liveId && Array.isArray(r.resultOrder) && r.resultOrder.length > 0);
+  return found ? { raceId: found.raceId, data: found } : null;
+}
+
+function formatRaceIdShort(raceId) {
+  const m = String(raceId || "").match(/^\d{4}-(\d{2})-(\d{2})$/);
+  return m ? `${Number(m[1])}/${Number(m[2])}` : raceId;
+}
+
+function updateReplayControls() {
+  const startButton = document.getElementById("raceReplayButton");
+  const exitButton = document.getElementById("raceReplayExitButton");
+  const target = derbyReplay ? null : getPreviousRaceForReplay();
+  if (startButton) {
+    startButton.classList.toggle("hidden", !target);
+    const text = target ? `▶ 前回のレースを再生（${formatRaceIdShort(target.raceId)}）` : "";
+    if (startButton.textContent !== text) startButton.textContent = text;
+  }
+  exitButton?.classList.toggle("hidden", !derbyReplay);
+}
+
+function startDerbyReplay() {
+  const target = getPreviousRaceForReplay();
+  if (!target) return;
+  ensureRaceStage();
+  derbyReplay = {
+    raceId: target.raceId,
+    show: buildShowForRace(target.raceId, target.data),
+    startedAt: performance.now(),
+    liveRaceIdAtStart: getLiveRaceContext().raceId,
+    ended: false
+  };
+  raceStageSnapCamera = true;
+  setStageOverlay("raceReplayEnd", "", false);
+  updateReplayControls();
+  updateBetFormEnabled();
+}
+
+function finishDerbyReplay() {
+  if (!derbyReplay) return;
+  derbyReplay.ended = true;
+  const order = derbyReplay.show.resultOrder;
+  const medals = ["🥇", "🥈", "🥉"];
+  const rows = order.slice(0, 3).map((n, i) => `<div>${medals[i]} ${i + 1}着　${n}番 ${escapeHTML(getHorseName(n))}</div>`).join("");
+  setStageOverlay("raceReplayEnd", `
+    <div class="race-replay-end-title">📼 リプレイ終了（${escapeHTML(derbyReplay.raceId)}）</div>
+    ${rows}
+    <div class="race-replay-end-buttons">
+      <button type="button" data-replay-action="again">↺ もう一度見る</button>
+      <button type="button" data-replay-action="close">✕ 閉じる</button>
+    </div>`);
+}
+
+function stopDerbyReplay() {
+  if (!derbyReplay) return;
+  derbyReplay = null;
+  raceStageSnapCamera = true;
+  setStageOverlay("raceReplayEnd", "", false);
+  updateReplayControls();
+  updateBetFormEnabled();
+}
+
+document.getElementById("raceReplayButton")?.addEventListener("click", startDerbyReplay);
+document.getElementById("raceReplayExitButton")?.addEventListener("click", stopDerbyReplay);
+raceTrack?.addEventListener("click", (event) => {
+  const action = event.target?.closest?.("[data-replay-action]")?.dataset.replayAction;
+  if (action === "again") startDerbyReplay();
+  if (action === "close") stopDerbyReplay();
+});
 
 /* ----- レース情報パネル（スケジュール・実況・順位・結果・過去結果） ----- */
 
@@ -4026,9 +4120,11 @@ function renderRaceInfo() {
   renderMyActiveTickets();
 
   const liveContext = getLiveRaceContext();
+  /* 結果は、全馬がゴールして「レース終了」になってから表示する（レース中に結果が見えないように） */
+  const revealed = isLiveRaceResultRevealed();
   const finalResultEl = document.getElementById("raceFinalResult");
   if (finalResultEl) {
-    finalResultEl.innerHTML = liveRaceResult ? `
+    finalResultEl.innerHTML = revealed ? `
       <div class="race-final-result">
         <div class="race-final-result-title">レース結果（${escapeHTML(liveContext.raceId)}）</div>
         <div>🥇 1着　${escapeHTML(getHorseName(liveRaceResult.resultOrder[0]))}</div>
@@ -4037,7 +4133,7 @@ function renderRaceInfo() {
       </div>` : "";
   }
 
-  if (liveRaceResult) {
+  if (revealed) {
     renderMyRaceResultSummary(liveContext.raceId);
   } else {
     const myResultEl = document.getElementById("raceMyResult");
@@ -4053,7 +4149,8 @@ function renderRaceInfoHeavyParts() {
   const liveContext = getLiveRaceContext();
   const detailedEl = document.getElementById("raceDetailedResult");
 
-  if (liveRaceResult) {
+  if (liveRaceResult && isLiveRaceResultRevealed()) {
+    revealedLiveRaceId = liveContext.raceId;
     renderDetailedRaceResults(liveContext.raceId, liveRaceResult).catch((e) => console.error("詳細結果描画エラー:", e));
   } else if (detailedEl) {
     detailedEl.innerHTML = "";
@@ -4069,7 +4166,8 @@ async function loadRecentRaceResults(excludeRaceId) {
 
   try {
     const snap = await getDocs(query(collection(db, "races"), orderBy("raceId", "desc"), limit(6)));
-    const races = snap.docs.map((d) => d.data()).filter((r) => r.raceId !== excludeRaceId && r.resultOrder);
+    recentRacesCache = snap.docs.map((d) => d.data());
+    const races = recentRacesCache.filter((r) => r.raceId !== excludeRaceId && r.resultOrder);
 
     if (races.length === 0) { el.innerHTML = ""; return; }
 
@@ -4103,8 +4201,7 @@ function refreshDerbySubscriptionsIfNeeded() {
     lastLiveRaceId = liveId;
     liveRaceResult = null;
     lastElapsedWasNegative = null;
-    lastCommentaryUpdateAt = -999;
-    lastLeaderNumber = null;
+    revealedLiveRaceId = null;
     lastGenerationAttemptAt = -999;
     cachedPopularityForRaceId = null;
     cachedPopularity = null;
@@ -4161,8 +4258,8 @@ function tickDerbyCountdown() {
     tryGenerateRaceResult(liveContext.raceId);
   }
 
-  /* ここから演出（トラック・実況・順位表） */
-  ensureRaceTrackLanes(liveContext.raceId);
+  /* ここから演出（レース画面は derby-show.js が毎フレーム描く。ここでは表示パネルだけ更新） */
+  ensureRaceStage();
 
   if (lastElapsedWasNegative === true && elapsed >= 0) {
     triggerStartFlash();
@@ -4171,59 +4268,51 @@ function tickDerbyCountdown() {
   }
   lastElapsedWasNegative = elapsed < 0;
 
-  const checkpoints = liveRaceResult?.checkpoints || null;
-  const progress = checkpoints ? getHorseProgressAt(checkpoints, elapsed) : (() => {
-    const zero = {};
-    SAFE_RACE_HORSES.forEach((h) => { zero[h.number] = 0; });
-    return zero;
-  })();
+  if (elapsed >= 0 && elapsed < 2 && raceStartFlashRaceId !== liveContext.raceId && !derbyReplay) {
+    raceStartFlashRaceId = liveContext.raceId;
+    triggerStartFlash();
+  }
 
-  renderRaceTrackFrame(progress, liveContext.raceId);
+  /* 見ている途中で今日のレースが始まったら、リプレイを終えてライブに戻す */
+  if (derbyReplay && derbyReplay.liveRaceIdAtStart !== liveContext.raceId && elapsed < RACE_SHOW_MAX_SECONDS) {
+    stopDerbyReplay();
+    showAppToast("🏇 ゆうダービー", "レースが始まったので、リプレイを終了しました");
+  }
 
-  const phase = getRacePhase(elapsed);
+  /* 全馬ゴール→「レース終了」になった瞬間に、結果・詳細結果を表示する */
+  if (liveRaceResult && revealedLiveRaceId !== liveContext.raceId && isLiveRaceResultRevealed(now)) {
+    renderRaceInfoHeavyParts();
+    renderRaceInfo();
+  }
+
+  updateReplayControls();
+
+  const show = getLiveShow();
+  const phase = show ? show.phaseAt(elapsed) : (elapsed < 0 ? "gate" : "start");
   const banner = document.getElementById("racePhaseBanner");
   const commentaryEl = document.getElementById("raceCommentary");
   const leaderboardEl = document.getElementById("raceLeaderboard");
 
-  if (raceTrack) {
-    Object.values(RACE_CAMERA_CLASSES).forEach((c) => raceTrack.classList.remove(c));
-    raceTrack.classList.add(RACE_CAMERA_CLASSES[phase] || "race-camera-wide");
-    raceTrack.classList.toggle("gate-passed", phase !== "gate" && phase !== "start");
-    raceTrack.classList.toggle("race-running", !["gate", "finished", "results"].includes(phase));
-  }
+  /* 実況はレース画面の下に字幕で出すので、下の情報欄の実況は表示しない */
+  commentaryEl?.classList.add("hidden");
 
   if (phase === "gate") {
     banner?.classList.add("hidden");
-    commentaryEl?.classList.add("hidden");
     if (leaderboardEl) leaderboardEl.innerHTML = "";
-    lastLeaderNumber = null;
   } else {
     if (banner) { banner.classList.remove("hidden"); banner.textContent = RACE_PHASE_LABELS[phase]; }
-    commentaryEl?.classList.remove("hidden");
-
-    const standings = getStandings(progress);
-    const leader = standings[0];
-    const leaderChanged = Boolean(
-      leader && lastLeaderNumber !== null && leader.number !== lastLeaderNumber && phase !== "start"
-    );
-    if (leader) lastLeaderNumber = leader.number;
-
-    if (leaderChanged || elapsed - lastCommentaryUpdateAt > 3 || lastCommentaryUpdateAt === -999) {
-      lastCommentaryUpdateAt = elapsed;
-      lastCommentaryText = pickCommentary(phase, standings, leaderChanged);
-    }
-    if (commentaryEl) commentaryEl.textContent = lastCommentaryText;
 
     if (leaderboardEl) {
-      leaderboardEl.innerHTML = "";
       const myHorses = getMyBetHorseNumbersForRace(liveContext.raceId);
-      standings.slice(0, 5).forEach((horse, index) => {
-        const row = document.createElement("div");
-        row.className = "race-leaderboard-item";
+      const standings = show ? show.standingsAt(elapsed) : [];
+      const html = standings.slice(0, 5).map((horse, index) => {
         const mine = myHorses.includes(horse.number) ? " ⭐" : "";
-        row.innerHTML = `<span class="rank">${index + 1}</span><span>${horse.number}番 ${escapeHTML(horse.name)}${mine}</span>`;
-        leaderboardEl.appendChild(row);
-      });
+        return `<div class="race-leaderboard-item"><span class="rank">${index + 1}</span><span>${horse.number}番 ${escapeHTML(horse.name)}${mine}</span></div>`;
+      }).join("");
+      if (leaderboardEl.dataset.html !== html) {
+        leaderboardEl.dataset.html = html;
+        leaderboardEl.innerHTML = html;
+      }
     }
   }
 
@@ -4237,6 +4326,7 @@ function tickDerbyCountdown() {
 let derbyClockSyncTimer = null;
 
 function initializeSafeRace() {
+  derbyReplay = null;
   syncDerbyClock();
   if (!derbyClockSyncTimer) derbyClockSyncTimer = setInterval(syncDerbyClock, 10 * 60 * 1000);
   resetBetHorsesSelection();

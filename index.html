@@ -28,7 +28,7 @@
 
     <link
         rel="stylesheet"
-        href="./style.css?v=20261006-coin"
+        href="./style.css?v=20261006-derby"
     >
 </head>
 
@@ -820,6 +820,29 @@
                         class="race-track"
                     ></div>
 
+                    <!-- 前回のレースを再生（閲覧専用のリプレイ） -->
+
+                    <div
+                        id="raceReplayBar"
+                        class="race-replay-bar"
+                    >
+
+                        <button
+                            id="raceReplayButton"
+                            class="hidden"
+                            type="button"
+                        ></button>
+
+                        <button
+                            id="raceReplayExitButton"
+                            class="hidden"
+                            type="button"
+                        >
+                            ✕ リプレイ終了
+                        </button>
+
+                    </div>
+
 
 
                     <!-- レース情報 -->
@@ -1231,7 +1254,7 @@
 
 <script
     type="module"
-    src="./script.js?v=20261006-coin"
+    src="./script.js?v=20261006-derby"
 ></script>
 
 
