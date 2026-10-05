@@ -422,9 +422,12 @@ export function buildRaceShow(raceData, { horses, raceId }) {
    center：コース上の位置（0=スタート、1=ゴール）、zoom：1でコース全体
 ========================================================= */
 
+/* コース全体を見せるときの倍率（手前のレーンの馬が画面の端で切れないよう少し引く） */
+const WIDE_ZOOM = 0.88;
+
 export function getCameraTarget(show, t) {
-  if (!show || t < 2.5) return { center: 0.5, zoom: 1 };
-  if (t >= show.endTime + 0.8) return { center: 0.5, zoom: 1 };
+  if (!show || t < 2.5) return { center: 0.5, zoom: WIDE_ZOOM };
+  if (t >= show.endTime + 0.8) return { center: 0.5, zoom: WIDE_ZOOM };
 
   const st = show.standingsAt(t);
   const running = st.filter((s) => !s.finished);
@@ -435,25 +438,25 @@ export function getCameraTarget(show, t) {
   if (t >= RACE_MAIN_SECONDS - 1.5) {
     const trailing = running.length ? running[running.length - 1].progress : 1;
     const span = Math.max(0.2, 1.06 - trailing);
-    return { center: Math.min(0.99, Math.max(0.84, 1.03 - span / 2)), zoom: Math.min(4, Math.max(2.2, 0.95 / span)) };
+    return { center: Math.min(0.99, Math.max(0.84, 1.03 - span / 2)), zoom: Math.min(6, Math.max(3.2, 1.5 / span)) };
   }
 
   const leadP = lead.progress;
   if (t >= STRAIGHT_START_SECONDS) {
     /* 最終直線：先頭争いを大きく */
-    const zoom = 3 + Math.min(0.8, (t - STRAIGHT_START_SECONDS) / 20);
+    const zoom = 4.4 + Math.min(1.2, (t - STRAIGHT_START_SECONDS) / 15);
     return { center: Math.min(1, leadP - 0.02), zoom };
   }
 
   if (t > 8 && second && leadP - second.progress < CLOSE_GAP) {
     /* 接戦：先頭付近を寄りで */
-    return { center: leadP - 0.015, zoom: 3 };
+    return { center: leadP - 0.015, zoom: 4.4 };
   }
 
   /* レース中：先頭集団を追いかける */
   const pack = st.slice(0, Math.max(3, Math.ceil(st.length / 2)));
   const packCenter = pack.reduce((a, s) => a + s.progress, 0) / pack.length;
-  return { center: (packCenter + leadP) / 2 + 0.01, zoom: 2.1 };
+  return { center: (packCenter + leadP) / 2 + 0.01, zoom: 3.2 };
 }
 
 /* =========================================================
@@ -531,7 +534,8 @@ export function createRaceStage(container, { horses }) {
     const horizon = height * 0.2;
     const nearY = height * 0.9;
     const groundSpan = (nearY - horizon) * Z_NEAR;
-    const unit = (width * camera.zoom) / 1.18;
+    /* zoom=1 のとき、いちばん手前のレーンでコース全体（0〜1）が画面に収まる */
+    const unit = ((width * camera.zoom) / 1.12) * (Z_NEAR / Z_REF);
     return {
       horizon,
       sx: (x, z) => width / 2 + (x - camera.center) * unit * (Z_REF / z),
@@ -577,7 +581,7 @@ export function createRaceStage(container, { horses }) {
   }
 
   function visibleRange(L, z) {
-    const unit = (width * camera.zoom) / 1.18 * (Z_REF / z);
+    const unit = ((width * camera.zoom) / 1.12) * (Z_NEAR / Z_REF) * (Z_REF / z);
     const half = width / 2 / unit;
     return [camera.center - half - 0.02, camera.center + half + 0.02];
   }
@@ -585,16 +589,21 @@ export function createRaceStage(container, { horses }) {
   function drawTrack(L) {
     const zIn = Z_NEAR - 0.22;
     const zOut = Z_FAR + 0.22;
-    const [a, b] = visibleRange(L, zIn);
+    /* 奥ほど広い範囲が映るので、奥のレーンを基準に描く範囲を決める */
+    const [a, b] = visibleRange(L, zOut);
+
+    /* まず地面全体を芝の色で塗る（コースの外側が黒く残らないように） */
+    ctx.fillStyle = "#5cab5c";
+    ctx.fillRect(0, L.sy(zOut), width, height - L.sy(zOut));
 
     /* 芝の縞模様（コースに沿ってスクロール） */
     const stripe = 0.04;
-    for (let x = Math.floor(Math.max(-0.2, a) / stripe) * stripe; x < Math.min(1.25, b); x += stripe) {
+    for (let x = Math.floor(Math.max(-0.6, a) / stripe) * stripe; x < Math.min(1.6, b); x += stripe) {
       const even = Math.round(x / stripe) % 2 === 0;
       quad(L, x, x + stripe, zIn, zOut, even ? "#66b866" : "#5cab5c");
     }
     /* ゴールの先とスタートの手前は少し色を変える */
-    if (b > 1) quad(L, 1, Math.min(1.25, b), zIn, zOut, "rgba(255,255,255,.08)");
+    if (b > 1) quad(L, 1, Math.min(1.6, b), zIn, zOut, "rgba(255,255,255,.08)");
 
     /* レーンの線 */
     ctx.strokeStyle = "rgba(255,255,255,.35)";
@@ -603,8 +612,8 @@ export function createRaceStage(container, { horses }) {
       const z = laneDepth[n] + LANE_STEP / 2;
       if (z > zOut) return;
       ctx.beginPath();
-      ctx.moveTo(L.sx(Math.max(-0.2, a), z), L.sy(z));
-      ctx.lineTo(L.sx(Math.min(1.25, b), z), L.sy(z));
+      ctx.moveTo(L.sx(Math.max(-0.6, a), z), L.sy(z));
+      ctx.lineTo(L.sx(Math.min(1.6, b), z), L.sy(z));
       ctx.stroke();
     });
 
@@ -615,12 +624,12 @@ export function createRaceStage(container, { horses }) {
       ctx.strokeStyle = "#f4f4f4";
       ctx.lineWidth = Math.max(1, 2.5 * s);
       ctx.beginPath();
-      ctx.moveTo(L.sx(Math.max(-0.2, a), z), y - 10 * s);
-      ctx.lineTo(L.sx(Math.min(1.25, b), z), y - 10 * s);
+      ctx.moveTo(L.sx(Math.max(-0.6, a), z), y - 10 * s);
+      ctx.lineTo(L.sx(Math.min(1.6, b), z), y - 10 * s);
       ctx.stroke();
       ctx.fillStyle = "#e9e9e9";
       const postStep = 0.02;
-      for (let x = Math.ceil(Math.max(-0.2, a) / postStep) * postStep; x < Math.min(1.25, b); x += postStep) {
+      for (let x = Math.ceil(Math.max(-0.6, a) / postStep) * postStep; x < Math.min(1.6, b); x += postStep) {
         const px = L.sx(x, z);
         ctx.fillRect(px - 1 * s, y - 12 * s, Math.max(1, 2 * s), 12 * s);
       }
@@ -675,7 +684,7 @@ export function createRaceStage(container, { horses }) {
   }
 
   function drawHorses(L, positions, t, myHorses, running) {
-    const zoomBoost = 0.75 + Math.min(1.4, camera.zoom) * 0.25;
+    const zoomBoost = 0.8 + Math.min(4, camera.zoom) * 0.1;
     const order = [...numbers].sort((a, b) => laneDepth[b] - laneDepth[a]);
     order.forEach((n) => {
       const z = laneDepth[n];
@@ -756,7 +765,7 @@ export function createRaceStage(container, { horses }) {
     const dt = lastDrawAt ? Math.min(0.25, (now - lastDrawAt) / 1000) : 0;
     lastDrawAt = now;
 
-    const target = show ? getCameraTarget(show, t) : { center: 0.5, zoom: 1 };
+    const target = getCameraTarget(show, t);
     if (!camera.ready || snapCamera) {
       camera.center = target.center;
       camera.zoom = target.zoom;
@@ -767,8 +776,9 @@ export function createRaceStage(container, { horses }) {
       camera.zoom += (target.zoom - camera.zoom) * k;
     }
     /* 端が映りすぎないように */
-    const halfView = 0.59 / camera.zoom;
-    camera.center = Math.min(1.08 - halfView * 0.5, Math.max(-0.02 + halfView * 0.5, camera.center));
+    const halfView = 0.56 / camera.zoom;
+    if (halfView * 2 >= 1.14) camera.center = 0.5;
+    else camera.center = Math.min(1.1 - halfView, Math.max(-0.04 + halfView, camera.center));
 
     const positions = show ? show.positionsAt(t) : Object.fromEntries(numbers.map((n) => [n, 0]));
     const running = Boolean(show) && t > 0 && t < (show ? show.endTime + 2 : 0);
@@ -778,7 +788,7 @@ export function createRaceStage(container, { horses }) {
     const L = layout();
     drawBackground(L);
     drawTrack(L);
-    drawSpeedLines(L, running ? Math.min(1, (camera.zoom - 1) / 2) : 0);
+    drawSpeedLines(L, running ? Math.min(1, (camera.zoom - 1) / 3) : 0);
     drawHorses(L, positions, t, myHorses, running);
     const finalStretch = show && t >= RACE_MAIN_SECONDS * 0.85 && t < show.endTime;
     drawVignette(finalStretch ? 1 : 0);
