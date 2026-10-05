@@ -28,7 +28,7 @@
 
     <link
         rel="stylesheet"
-        href="./style.css?v=20261005-notify2"
+        href="./style.css?v=20261006-announce"
     >
 </head>
 
@@ -566,6 +566,44 @@
         </button>
 
     </nav>
+
+
+
+    <!-- 通知機能追加のお知らせ（通知の設定が済んでいない人にだけ表示） -->
+
+    <div
+        id="notifyAnnouncement"
+        class="notify-announcement hidden"
+        role="status"
+    >
+
+        <div class="notify-announcement-text">
+            <b>🔔 通知機能が追加されました！</b>
+            <span>ゆうChatを閉じていても、新しいメッセージを通知で受け取れるようになりました。マイページから通知をONにできます。</span>
+        </div>
+
+        <div class="notify-announcement-actions">
+
+            <button
+                id="notifyAnnouncementOpenButton"
+                type="button"
+            >
+                マイページで設定
+            </button>
+
+            <button
+                id="notifyAnnouncementCloseButton"
+                class="notify-announcement-close"
+                type="button"
+                title="閉じる"
+                aria-label="閉じる"
+            >
+                ✕
+            </button>
+
+        </div>
+
+    </div>
 
 
 
@@ -1193,7 +1231,7 @@
 
 <script
     type="module"
-    src="./script.js?v=20261005-notify2"
+    src="./script.js?v=20261006-announce"
 ></script>
 
 

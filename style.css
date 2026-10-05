@@ -3292,3 +3292,107 @@ button:disabled {
     color: #777;
     line-height: 1.5;
 }
+
+
+/* ==================================================
+   通知機能追加のお知らせ（タブの下に小さく表示）
+================================================== */
+
+.notify-announcement {
+    flex-shrink: 0;
+
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    margin: 8px 12px 0;
+    padding: 10px 12px;
+
+    border: 1px solid #e1e4e8;
+    border-radius: 12px;
+
+    background: #fff;
+    color: #111;
+}
+
+.notify-announcement-text {
+    flex: 1;
+    min-width: 0;
+
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.notify-announcement-text b {
+    font-size: 14px;
+}
+
+.notify-announcement-text span {
+    color: #444;
+}
+
+.notify-announcement-actions {
+    flex-shrink: 0;
+
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#notifyAnnouncementOpenButton {
+    padding: 8px 12px;
+
+    border: none;
+    border-radius: 10px;
+
+    background: #111;
+    color: #fff;
+
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.notify-announcement-close {
+    width: 32px;
+    height: 32px;
+
+    border: none;
+    border-radius: 50%;
+
+    background: transparent;
+    color: #777;
+
+    font-size: 16px;
+}
+
+@media (max-width: 700px) {
+    .notify-announcement {
+        align-items: flex-start;
+        margin: 6px 8px 0;
+        padding: 8px 10px;
+    }
+
+    .notify-announcement-text {
+        font-size: 12px;
+    }
+
+    .notify-announcement-actions {
+        flex-direction: column-reverse;
+        align-items: flex-end;
+    }
+
+    #notifyAnnouncementOpenButton {
+        padding: 7px 10px;
+        font-size: 12px;
+    }
+
+    .notify-announcement-close {
+        width: 28px;
+        height: 28px;
+    }
+}

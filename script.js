@@ -898,6 +898,7 @@ async function startApp() {
     listenFriends();
     listenGroups();
     restoreNotificationsIfGranted();
+    updateNotifyAnnouncement();
     listenMyCoins();
     listenMyBetHistory();
     listenIncomingMessageNotifications();
@@ -1142,7 +1143,8 @@ changeNameButton?.addEventListener("click", async () => {
       online: true,
       lastSeen: serverTimestamp(),
       updatedAt: serverTimestamp(),
-      createdAt: existing.exists() ? existing.data().createdAt : serverTimestamp()
+      createdAt: existing.exists() ? existing.data().createdAt : serverTimestamp(),
+      ...(isNotifySetupDoneLocally() ? { notificationSetupDone: true } : {})
     });
 
     username = trimmed;
@@ -2055,6 +2057,102 @@ function setNotifyOptIn(enabled) {
   if (enabled) localStorage.setItem(key, "1");
   else localStorage.removeItem(key);
 }
+
+/* ----- 通知機能追加のお知らせ -----
+   「通知の登録が一度でも成功したか」で判断する（閉じただけでは「済み」にしない）。
+   成功の記録は2か所に残す：
+     ・この端末：yuuchat_notify_setup_done:{uid}（以前からの「ONにした」記録 yuuchat_notify_on:{uid} も済みとみなす）
+     ・アカウント：users/{名前}.notificationSetupDone（別の端末や、端末の記録が消えたときに使う）
+   済みのユーザーには、OFF にしたあとも表示しない（ON に戻すのはマイページのボタンからできる） */
+const notifyAnnouncementEl = document.getElementById("notifyAnnouncement");
+let notifyAnnouncementDismissed = false;
+let notifyAnnouncementCheckId = 0;
+
+function getNotifySetupDoneKey() {
+  return currentUser ? `yuuchat_notify_setup_done:${currentUser.uid}` : null;
+}
+
+function isNotifySetupDoneLocally() {
+  const key = getNotifySetupDoneKey();
+  return Boolean(key && localStorage.getItem(key) === "1") || isNotifyOptedIn();
+}
+
+function setNotifyAnnouncementVisible(visible) {
+  notifyAnnouncementEl?.classList.toggle("hidden", !visible);
+}
+
+async function saveNotifySetupDoneToServer() {
+  if (!currentUser || !username) return;
+  try {
+    await updateDoc(doc(db, "users", username), { notificationSetupDone: true });
+  } catch (error) {
+    console.warn("通知設定済みの記録に失敗:", error);
+  }
+}
+
+/* 通知の登録に成功したとき：お知らせを消し、今後は表示しない */
+function markNotifySetupDone() {
+  const key = getNotifySetupDoneKey();
+  if (key) localStorage.setItem(key, "1");
+  notifyAnnouncementCheckId++;
+  setNotifyAnnouncementVisible(false);
+  saveNotifySetupDoneToServer();
+}
+
+/* アプリを開いたとき：まだ通知の設定が済んでいなければ、お知らせを表示する */
+async function updateNotifyAnnouncement() {
+  const checkId = ++notifyAnnouncementCheckId;
+  if (!currentUser || !username || notifyAnnouncementDismissed) {
+    setNotifyAnnouncementVisible(false);
+    return;
+  }
+
+  const doneLocally = isNotifySetupDoneLocally();
+  if (doneLocally) setNotifyAnnouncementVisible(false);
+
+  let doneOnServer = false;
+  try {
+    const snapshot = await getDoc(doc(db, "users", username));
+    doneOnServer = snapshot.exists() && snapshot.data().uid === currentUser?.uid && snapshot.data().notificationSetupDone === true;
+  } catch (error) {
+    console.warn("通知設定状況の確認に失敗:", error);
+  }
+  if (checkId !== notifyAnnouncementCheckId || !currentUser) return;
+
+  if (doneLocally) {
+    /* 以前から ON にしていた人：アカウント側にも記録しておく */
+    if (!doneOnServer) saveNotifySetupDoneToServer();
+    return;
+  }
+  if (doneOnServer) {
+    const key = getNotifySetupDoneKey();
+    if (key) localStorage.setItem(key, "1");
+    setNotifyAnnouncementVisible(false);
+    return;
+  }
+  setNotifyAnnouncementVisible(!notifyAnnouncementDismissed);
+}
+
+/* ログアウト時：表示を消し、次にログインした人のために「閉じた」状態を戻す */
+function resetNotifyAnnouncement() {
+  notifyAnnouncementCheckId++;
+  notifyAnnouncementDismissed = false;
+  setNotifyAnnouncementVisible(false);
+}
+
+document.getElementById("notifyAnnouncementCloseButton")?.addEventListener("click", () => {
+  /* 閉じても「済み」にはしない（次にアプリを開いたときにまた表示する） */
+  notifyAnnouncementDismissed = true;
+  setNotifyAnnouncementVisible(false);
+});
+
+document.getElementById("notifyAnnouncementOpenButton")?.addEventListener("click", () => {
+  notifyAnnouncementDismissed = true;
+  setNotifyAnnouncementVisible(false);
+  switchView("mypage");
+  document.querySelector(".notification-settings")?.scrollIntoView({ behavior: "smooth", block: "center" });
+});
+
 const notificationButton = document.getElementById("notificationButton");
 const notificationStatusEl = document.getElementById("notificationStatus");
 
@@ -2147,6 +2245,7 @@ notificationButton?.addEventListener("click", async () => {
   const ok = await registerFcmToken();
   if (ok) {
     setNotifyOptIn(true);
+    markNotifySetupDone();
     setNotificationStatus("この端末に通知が届きます。（ボタンを押すとOFFにできます）", "on");
   } else {
     setNotificationStatus("通知の設定に失敗しました。時間をおいてもう一度お試しください。", "off");
@@ -2559,6 +2658,7 @@ logoutButton?.addEventListener("click", async () => {
     messageWatchInitialized = false;
     lastNotifiedMessageId = null;
 
+    resetNotifyAnnouncement();
     await unregisterFcmTokenForThisDevice();
     await updateOnlineStatus(false);
 
