@@ -3938,10 +3938,11 @@ function drawRaceStageFrame() {
     setStageOverlay("raceStageBadge", "🔴 LIVE");
     setStageOverlay("raceStageTop3", "", false);
     setStageOverlay("raceSubtitle", "ゲートオープン！");
-  } else if (elapsed < show.revealTime) {
+  } else if (elapsed < show.revealTime + 4) {
+    /* 最後の馬のゴール →「レース終了」の字幕を少し見せてから、次のレースの案内に切り替える */
     raceStage.render({ show, t: elapsed, myHorses, snapCamera: raceStageSnapCamera });
-    setStageOverlay("raceStageBadge", "🔴 LIVE");
-    setStageOverlay("raceStageTop3", renderStageTop3(show, elapsed), elapsed > 0);
+    setStageOverlay("raceStageBadge", elapsed < show.revealTime ? "🔴 LIVE" : `🏁 ${escapeHTML(liveContext.raceId)} レース終了`);
+    setStageOverlay("raceStageTop3", renderStageTop3(show, elapsed), elapsed > 0 && elapsed < show.revealTime);
     setStageOverlay("raceSubtitle", escapeHTML(show.commentaryAt(elapsed)));
   } else {
     /* レースが終わったあと：ゴール後の全体の様子で止めておく */

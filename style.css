@@ -3435,6 +3435,11 @@ button:disabled {
     transition: none;
 }
 
+/* 以前のレーン表示用の上端の飾りは、Canvas の上に重なるので出さない */
+.race-track.race-stage::before {
+    display: none;
+}
+
 .race-canvas {
     position: absolute;
     inset: 0;
