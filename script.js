@@ -1134,6 +1134,8 @@ changeNameButton?.addEventListener("click", async () => {
     }
 
     const oldName = username;
+    const oldUserSnap = await getDoc(doc(db, "users", oldName));
+    const oldUserData = oldUserSnap.exists() ? oldUserSnap.data() : {};
 
     await setDoc(newUserRef, {
       uid: currentUser.uid,
@@ -1146,6 +1148,20 @@ changeNameButton?.addEventListener("click", async () => {
       createdAt: existing.exists() ? existing.data().createdAt : serverTimestamp(),
       ...(isNotifySetupDoneLocally() ? { notificationSetupDone: true } : {})
     });
+
+    /* コイン・ボーナス受け取り済み・累計賭け金を新しい名前に引き継ぐ
+       （引き継がないと、次に開いたときに初期コインやボーナスがもう一度付いてしまう） */
+    const carriedCoinFields = {};
+    ["coins", "bonus500Granted", "bonus500GrantedAt", "totalBetAmount"].forEach((key) => {
+      if (oldUserData[key] !== undefined) carriedCoinFields[key] = oldUserData[key];
+    });
+    if (Object.keys(carriedCoinFields).length > 0) {
+      try {
+        await updateDoc(newUserRef, carriedCoinFields);
+      } catch (error) {
+        console.error("ゆうcoinの引き継ぎエラー:", error);
+      }
+    }
 
     username = trimmed;
     localStorage.setItem("yuuchat_username", username);
@@ -2721,12 +2737,21 @@ async function renderCoinRankingInto(targetEl) {
 
   try {
     const snapshot = await getDocs(query(collection(db, "users"), orderBy("coins", "desc")));
+    /* ランキングに出るのは、これまでに累計 RANKING_MIN_TOTAL_BET コイン以上賭けたユーザーだけ
+       （初期コイン・ボーナスを持っているだけでは上位に入らないようにする） */
     const all = snapshot.docs
-      .map((item) => ({ name: item.id, coins: item.data().coins }))
-      .filter((u) => typeof u.coins === "number");
+      .map((item) => ({ name: item.id, coins: item.data().coins, totalBetAmount: Number(item.data().totalBetAmount || 0) }))
+      .filter((u) => typeof u.coins === "number" && u.totalBetAmount >= RANKING_MIN_TOTAL_BET);
+
+    /* 自分がまだ参加条件を満たしていなければ、条件を案内する */
+    const myDoc = snapshot.docs.find((item) => item.id === username);
+    const myTotalBet = myDoc ? Number(myDoc.data().totalBetAmount || 0) : 0;
+    const joinNoteHtml = username && myTotalBet < RANKING_MIN_TOTAL_BET
+      ? `<div class="ranking-join-note">ゆうCoinを累計${RANKING_MIN_TOTAL_BET}コイン以上賭けるとランキングに参加できます（あと${RANKING_MIN_TOTAL_BET - myTotalBet}コイン）</div>`
+      : "";
 
     if (all.length === 0) {
-      targetEl.innerHTML = `<div class="empty-state">まだランキングデータがありません</div>`;
+      targetEl.innerHTML = `${joinNoteHtml}<div class="empty-state">まだランキング参加者がいません</div>`;
       return;
     }
 
@@ -2741,7 +2766,7 @@ async function renderCoinRankingInto(targetEl) {
       return { ...user, rank: currentRank };
     });
 
-    targetEl.innerHTML = "";
+    targetEl.innerHTML = joinNoteHtml;
 
     const top = ranked.slice(0, 20);
     top.forEach((user) => {
@@ -2792,6 +2817,10 @@ async function loadDerbyCoinRanking() {
 ========================================================= */
 
 const YUU_START_COINS = 1000;
+/* 初期コインとは別の「全ユーザーへの追加ボーナス」。1ユーザー1回だけ（users/{名前}.bonus500Granted で判定） */
+const YUU_BONUS_COINS = 500;
+/* ゆうCoinランキングに参加できる累計賭け金（users/{名前}.totalBetAmount） */
+const RANKING_MIN_TOTAL_BET = 100;
 const RACE_TAKEOUT_RATE = 0.8;
 const RACE_HOUR = 15;
 const RACE_MINUTE = 2;
@@ -2956,6 +2985,35 @@ async function grantStartingCoinsIfNeeded() {
   }
 }
 
+/* 追加ボーナス500コイン：初期コイン（coins）が付いたあと、まだ受け取っていなければ1回だけ加算する。
+   トランザクションの中で bonus500Granted を確かめてから加算するので、
+   再読み込み・再ログイン・複数端末から同時に開いても二重には加算されない。
+   （ブラウザで受け取れなかった人の分は、ゆうダービー自動開催（derby-runner）でも同じ条件で配布する） */
+let bonusGrantInFlight = false;
+
+async function grantBonusCoinsIfNeeded() {
+  if (!username || bonusGrantInFlight) return;
+  bonusGrantInFlight = true;
+  try {
+    await runTransaction(db, async (transaction) => {
+      const userRef = doc(db, "users", username);
+      const snap = await transaction.get(userRef);
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (typeof data.coins !== "number" || data.bonus500Granted === true) return;
+      transaction.update(userRef, {
+        coins: data.coins + YUU_BONUS_COINS,
+        bonus500Granted: true,
+        bonus500GrantedAt: serverTimestamp()
+      });
+    });
+  } catch (error) {
+    console.warn("ゆうcoin追加ボーナスの付与に失敗:", error);
+  } finally {
+    bonusGrantInFlight = false;
+  }
+}
+
 function listenMyCoins() {
   if (unsubscribeMyCoins) { unsubscribeMyCoins(); unsubscribeMyCoins = null; }
   if (!username) return;
@@ -2970,6 +3028,7 @@ function listenMyCoins() {
         return;
       }
       updateCoinDisplays(data.coins);
+      if (data.bonus500Granted !== true) grantBonusCoinsIfNeeded();
     },
     (error) => console.error("コイン監視エラー:", error)
   );
@@ -3224,13 +3283,19 @@ betButton?.addEventListener("click", async () => {
     betButton.disabled = true;
     const raceId = getActiveBettingRaceContext().raceId;
 
-    await runTransaction(db, async (transaction) => {
+    /* 累計賭け金（totalBetAmount）は、馬券の作成・コインの引き落としと同じトランザクションで加算する
+       （馬券1枚につき1回だけ。払い戻しや外れでは減らさない）。
+       万一 totalBetAmount の書き込みが拒否されても投票はできるよう、そのときは従来どおりの内容でやり直す
+       （累計は derby-runner が馬券の記録から計算し直す） */
+    const placeBet = (withTotal) => runTransaction(db, async (transaction) => {
       const userRef = doc(db, "users", username);
       const userSnap = await transaction.get(userRef);
       const coins = userSnap.exists() ? Number(userSnap.data().coins || 0) : 0;
       if (coins < amount) throw new Error("NOT_ENOUGH_COINS");
 
-      transaction.update(userRef, { coins: coins - amount });
+      const userUpdate = { coins: coins - amount };
+      if (withTotal) userUpdate.totalBetAmount = Number(userSnap.data().totalBetAmount || 0) + amount;
+      transaction.update(userRef, userUpdate);
 
       const betRef = doc(collection(db, "raceBets"));
       transaction.set(betRef, {
@@ -3238,6 +3303,14 @@ betButton?.addEventListener("click", async () => {
         settled: false, win: null, payout: null, createdAt: serverTimestamp()
       });
     });
+
+    try {
+      await placeBet(true);
+    } catch (error) {
+      if (error?.code !== "permission-denied") throw error;
+      console.warn("累計賭け金を記録できなかったため、従来の方法で投票します:", error);
+      await placeBet(false);
+    }
 
     alert("投票しました！");
     resetBetHorsesSelection();

@@ -5,6 +5,9 @@
      1. races/{raceId} にレース結果を作る（まだ無ければ）
      2. そのレースの未精算の馬券をすべて精算し、当たった人のコインを増やす
      3. raceLogs/{raceId} に開催ログを残す
+     4. ゆうcoin の整備（runCoinMaintenance）：
+        ・追加ボーナス500コインを、まだ受け取っていないユーザーに1回だけ配る（users/{名前}.bonus500Granted）
+        ・累計賭け金 users/{名前}.totalBetAmount を、raceBets の記録から計算し直す（ランキングの参加条件に使う）
    を行う。サイトを開いている利用者の端末も同じ処理を行うが、
    どちらもトランザクションで「まだ無ければ作る」「未精算なら精算する」ので二重にはならない。
 
@@ -40,6 +43,9 @@ const SAFE_RACE_HORSES = [
   { number: 9, name: "ユウジン", power: 7, style: "front" },
   { number: 10, name: "ユウシャ", power: 8, style: "closer" }
 ];
+
+/* ----- ゆうcoin（script.js と同じ） ----- */
+const YUU_BONUS_COINS = 500;
 
 /* 開催時刻は日本時間。何日前までさかのぼって「作られていないレース・未精算の馬券」を処理するか */
 const JST_OFFSET_HOURS = 9;
@@ -340,6 +346,73 @@ export async function runDerby({ db, now = new Date(), lookbackDays = LOOKBACK_D
   return summary;
 }
 
+/* =========================================================
+   ゆうcoin の整備
+   ・追加ボーナス：初期コイン（coins）が付いていて、bonus500Granted が true でないユーザーにだけ +500。
+     ブラウザ側（grantBonusCoinsIfNeeded）と同じ条件をトランザクションの中で確かめるので、二重には配らない。
+   ・累計賭け金：そのユーザーの raceBets の amount の合計（払い戻し・当たり外れは関係なし）。
+     ユーザーのドキュメントを先に読んでからトランザクション内で合計するので、
+     同時にブラウザから投票があっても、合計がずれたまま残ることはない。
+     ブラウザ側は投票のたびに加算し、ここで記録との食い違いを直す。
+========================================================= */
+
+/* まだ一度も賭けていない人（記録なし・合計0）には書き込まない */
+function totalBetAmountNeedsUpdate(current, expected) {
+  return current === undefined ? expected > 0 : current !== expected;
+}
+
+export async function runCoinMaintenance({ db, log = console.log }) {
+  const result = { users: 0, bonusGranted: 0, totalsUpdated: 0, errors: [] };
+
+  const [usersSnap, betsSnap] = await Promise.all([db.collection("users").get(), db.collection("raceBets").get()]);
+  const betTotals = new Map();
+  betsSnap.docs.forEach((d) => {
+    const bet = d.data();
+    if (!bet.uid) return;
+    betTotals.set(bet.uid, (betTotals.get(bet.uid) || 0) + Number(bet.amount || 0));
+  });
+
+  for (const userDoc of usersSnap.docs) {
+    const data = userDoc.data();
+    if (!data.uid) continue;
+    result.users++;
+
+    const needsBonus = typeof data.coins === "number" && data.bonus500Granted !== true;
+    const needsTotal = totalBetAmountNeedsUpdate(data.totalBetAmount, betTotals.get(data.uid) || 0);
+    if (!needsBonus && !needsTotal) continue;
+
+    try {
+      const outcome = await db.runTransaction(async (transaction) => {
+        const fresh = await transaction.get(userDoc.ref);
+        if (!fresh.exists) return {};
+        const freshData = fresh.data();
+        const bets = await transaction.get(db.collection("raceBets").where("uid", "==", freshData.uid));
+        const total = bets.docs.reduce((sum, d) => sum + Number(d.data().amount || 0), 0);
+
+        const update = {};
+        if (typeof freshData.coins === "number" && freshData.bonus500Granted !== true) {
+          update.coins = freshData.coins + YUU_BONUS_COINS;
+          update.bonus500Granted = true;
+          update.bonus500GrantedAt = FieldValue.serverTimestamp();
+        }
+        if (totalBetAmountNeedsUpdate(freshData.totalBetAmount, total)) {
+          update.totalBetAmount = total;
+        }
+        if (Object.keys(update).length === 0) return {};
+        transaction.update(userDoc.ref, update);
+        return { bonus: "bonus500Granted" in update, total: "totalBetAmount" in update };
+      });
+      if (outcome.bonus) result.bonusGranted++;
+      if (outcome.total) result.totalsUpdated++;
+    } catch (error) {
+      result.errors.push(`user ${userDoc.id}: ${error.message || error}`);
+    }
+  }
+
+  log(JSON.stringify({ coinMaintenance: result }));
+  return result;
+}
+
 /* 今日のレースの開催時刻より前に起動していたら、開催時刻まで待つ（待ち時間が長すぎるときは待たない） */
 export function getWaitMillisUntilTodayRace(now) {
   const { raceTime } = getRaceForJstDay(now, 0);
@@ -348,7 +421,7 @@ export function getWaitMillisUntilTodayRace(now) {
   return wait + 2000; /* 開催時刻ちょうど＋2秒 */
 }
 
-function writeStepSummary(summary, startedAt, finishedAt) {
+function writeStepSummary(summary, startedAt, finishedAt, coinResult) {
   const file = process.env.GITHUB_STEP_SUMMARY;
   if (!file) return;
   const jst = (d) => new Date(d.getTime() + JST_OFFSET_HOURS * 3600 * 1000).toISOString().replace("T", " ").slice(0, 19) + " JST";
@@ -361,7 +434,13 @@ function writeStepSummary(summary, startedAt, finishedAt) {
     "| レース | 状態 | 結果 | 馬券 | 今回精算 | 払戻計 | 未精算 | エラー |",
     "|---|---|---|---|---|---|---|---|",
     ...rows,
-    ""
+    "",
+    ...(coinResult ? [
+      "### ゆうcoin の整備",
+      `ユーザー ${coinResult.users} 人 ／ 追加ボーナス配布 ${coinResult.bonusGranted} 人 ／ 累計賭け金を更新 ${coinResult.totalsUpdated} 人` +
+        (coinResult.errors.length ? ` ／ ❌ エラー: ${coinResult.errors.join(" / ").replace(/\|/g, "/").slice(0, 1500)}` : ""),
+      ""
+    ] : [])
   ].join("\n");
   fs.appendFileSync(file, text);
 }
@@ -397,7 +476,17 @@ if (isMain) {
   }
 
   const summary = await runDerby({ db: getFirestore(), now });
-  writeStepSummary(summary, startedAt, new Date());
+
+  /* ゆうcoin の整備は、レースの開催・精算が終わってから行う（失敗してもレースの処理には影響しない） */
+  let coinResult;
+  try {
+    coinResult = await runCoinMaintenance({ db: getFirestore() });
+  } catch (error) {
+    coinResult = { users: 0, bonusGranted: 0, totalsUpdated: 0, errors: [error.message || String(error)] };
+    console.error("ゆうcoin整備エラー:", error);
+  }
+
+  writeStepSummary(summary, startedAt, new Date(), coinResult);
   const failed = summary.filter((e) => e.status !== "ok");
   if (failed.length) {
     console.error(`失敗したレース: ${failed.map((e) => e.raceId).join(", ")}`);
