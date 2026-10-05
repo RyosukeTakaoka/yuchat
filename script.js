@@ -2038,6 +2038,24 @@ async function markMessagesAsRead(messages) {
 ========================================================= */
 
 const FCM_TOKEN_STORAGE_KEY = "yuuchat_fcm_token";
+
+/* 「通知をONにする」を押したかどうか（この端末・このアカウントごとに記録する）。
+   記録がないときは、ブラウザの通知が許可済みでも自動では登録しない（ONにした人にだけ届ける） */
+function getNotifyOptInKey() {
+  return currentUser ? `yuuchat_notify_on:${currentUser.uid}` : null;
+}
+
+function isNotifyOptedIn() {
+  const key = getNotifyOptInKey();
+  return Boolean(key && localStorage.getItem(key) === "1");
+}
+
+function setNotifyOptIn(enabled) {
+  const key = getNotifyOptInKey();
+  if (!key) return;
+  if (enabled) localStorage.setItem(key, "1");
+  else localStorage.removeItem(key);
+}
 const notificationButton = document.getElementById("notificationButton");
 const notificationStatusEl = document.getElementById("notificationStatus");
 
@@ -2054,7 +2072,7 @@ function setNotificationStatus(text, state) {
   if (notificationStatusEl) notificationStatusEl.textContent = text;
   if (notificationButton) {
     notificationButton.dataset.state = state || "";
-    notificationButton.textContent = state === "on" ? "🔔 通知はONです" : "🔔 通知をONにする";
+    notificationButton.textContent = state === "on" ? "🔕 通知をOFFにする" : "🔔 通知をONにする";
     notificationButton.disabled = state === "unsupported" || state === "denied" || state === "busy";
   }
 }
@@ -2086,16 +2104,25 @@ async function refreshNotificationStatus() {
     setNotificationStatus("通知がブロックされています。ブラウザや端末の設定から、このサイトの通知を許可してください。", "denied");
     return;
   }
-  if (Notification.permission === "granted" && localStorage.getItem(FCM_TOKEN_STORAGE_KEY)) {
-    setNotificationStatus("この端末に通知が届きます。", "on");
+  if (Notification.permission === "granted" && isNotifyOptedIn() && localStorage.getItem(FCM_TOKEN_STORAGE_KEY)) {
+    setNotificationStatus("この端末に通知が届きます。（ボタンを押すとOFFにできます）", "on");
     return;
   }
   setNotificationStatus("ボタンを押すと、アプリを閉じていてもメッセージの通知が届くようになります。", "off");
 }
 
-/* 「🔔 通知をONにする」ボタン */
+/* 「🔔 通知をONにする」／「🔕 通知をOFFにする」ボタン */
 notificationButton?.addEventListener("click", async () => {
   if (!currentUser || !username) return;
+
+  /* ON のときに押したら OFF：この端末のトークンを消し、以後この端末には送らない */
+  if (notificationButton.dataset.state === "on") {
+    setNotificationStatus("OFFにしています...", "busy");
+    setNotifyOptIn(false);
+    await unregisterFcmTokenForThisDevice();
+    setNotificationStatus("通知はOFFです。この端末には通知が送られません。", "off");
+    return;
+  }
 
   /* iOS Safari はユーザー操作の直後でないと許可ダイアログを出さないので、
      他の await より前に許可を求める */
@@ -2120,16 +2147,18 @@ notificationButton?.addEventListener("click", async () => {
   setNotificationStatus("設定しています...", "busy");
   const ok = await registerFcmToken();
   if (ok) {
-    setNotificationStatus("この端末に通知が届きます。", "on");
+    setNotifyOptIn(true);
+    setNotificationStatus("この端末に通知が届きます。（ボタンを押すとOFFにできます）", "on");
   } else {
     setNotificationStatus("通知の設定に失敗しました。時間をおいてもう一度お試しください。", "off");
   }
 });
 
-/* ログイン後：すでに許可済みの端末だけ、許可を求めずにトークンを更新する */
+/* ログイン後：この端末・このアカウントで「通知をONにする」を押していて、許可も残っているときだけ、
+   許可を求めずにトークンを更新する（ONにしていない人・OFFにした人には登録しない） */
 async function restoreNotificationsIfGranted() {
   try {
-    if (await isFcmAvailable() && Notification.permission === "granted") {
+    if (isNotifyOptedIn() && await isFcmAvailable() && Notification.permission === "granted") {
       await registerFcmToken();
     }
   } catch (error) {
@@ -2187,14 +2216,13 @@ async function unregisterFcmTokenForThisDevice() {
   localStorage.removeItem(FCM_TOKEN_STORAGE_KEY);
   if (!token) return;
 
+  /* 通知の送り先から外す（ログアウト前に行う必要があるので待つ） */
   try { await deleteDoc(doc(db, "fcmTokens", token)); } catch (error) { console.warn("通知トークン削除失敗:", error); }
 
-  try {
-    const messaging = await getFcmMessaging();
-    if (messaging) await deleteToken(messaging);
-  } catch (error) {
-    console.warn("FCMトークン無効化失敗:", error);
-  }
+  /* FCM 側のトークン無効化は、通信が遅くても画面を待たせないよう待たない */
+  getFcmMessaging()
+    .then((messaging) => (messaging ? deleteToken(messaging) : null))
+    .catch((error) => console.warn("FCMトークン無効化失敗:", error));
 }
 
 /* 名前変更時：この端末のトークンの username を新しい名前にする（uid は変わらない） */

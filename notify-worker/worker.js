@@ -59,7 +59,8 @@ export async function handleRequest(request, env = {}, deps = createDefaultDeps(
     try {
       uid = await deps.verifyIdToken(idToken);
     } catch (error) {
-      return jsonResponse({ error: "invalid_token", detail: String(error.message || error) }, 401, cors);
+      console.warn("invalid id token", String(error.message || error));
+      return jsonResponse({ error: "invalid_token" }, 401, cors);
     }
 
     let body;
@@ -74,8 +75,9 @@ export async function handleRequest(request, env = {}, deps = createDefaultDeps(
     const result = await notifyForMessage(deps, uid, messageId);
     return jsonResponse(result, result.status || 200, cors);
   } catch (error) {
+    /* 詳しい内容は Cloudflare のログにだけ残し、呼び出し元には返さない */
     console.error("notify error", error);
-    return jsonResponse({ error: "internal_error", detail: String(error.message || error) }, 500, cors);
+    return jsonResponse({ error: "internal_error" }, 500, cors);
   }
 }
 
