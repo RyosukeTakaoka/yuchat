@@ -17,7 +17,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
 import {
-  getMessaging, getToken, onMessage
+  getMessaging, getToken, onMessage, isSupported, deleteToken
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-messaging.js";
 
 import {
@@ -41,6 +41,11 @@ const firebaseConfig = {
 
 const VAPID_PUBLIC_KEY =
   "BNKlLucsJnYok43m4muAEkcQq8cOcNrUKFyNYkCeo2jKhm1RwJVAU6tC7p3PjoaidOU08Hh7oEeRz43S8X73Ppw";
+
+/* 通知を送る Cloudflare Worker の URL（notify-worker を公開したあとに設定する）
+   例："https://yuuchat-notify.xxxx.workers.dev/notify"
+   空のあいだは、アプリを閉じている端末への通知は送られない（アプリ内の通知はこれまで通り動く） */
+const NOTIFY_ENDPOINT = "";
 
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
@@ -68,7 +73,8 @@ let unsubscribeFriends = null;
 let unsubscribeGroups = null;
 let unsubscribeMessages = null;
 
-let notificationsInitialized = false;
+let fcmMessaging = null;
+let fcmForegroundListenerReady = false;
 
 /* ゲーム関連の状態 */
 let currentGameType = "daifugo";
@@ -892,7 +898,7 @@ async function startApp() {
     await updateOnlineStatus(true);
     listenFriends();
     listenGroups();
-    initializeNotifications();
+    restoreNotificationsIfGranted();
     listenMyCoins();
     listenMyBetHistory();
     listenIncomingMessageNotifications();
@@ -1152,6 +1158,7 @@ changeNameButton?.addEventListener("click", async () => {
     }
 
     if (myName) myName.textContent = username;
+    updateFcmTokenUsername();
     alert("名前を変更しました。");
 
     listenFriends();
@@ -1266,6 +1273,7 @@ function listenFriends() {
       });
       friendsData = friends;
       renderFriends();
+      applyPendingNotificationTarget("friends");
     },
     (error) => console.error("友達監視エラー:", error)
   );
@@ -1391,6 +1399,7 @@ function listenGroups() {
     (snapshot) => {
       groupsData = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
       renderGroups();
+      applyPendingNotificationTarget("groups");
     },
     (error) => console.error("グループ監視エラー:", error)
   );
@@ -1932,7 +1941,8 @@ async function sendMessage() {
       messageData.replyTo = { id: replyingMessage.id, text: replyingMessage.text || "" };
     }
 
-    await addDoc(collection(db, "messages"), messageData);
+    const messageRef = await addDoc(collection(db, "messages"), messageData);
+    requestPushNotification(messageRef.id);
 
     if (messageInput) messageInput.value = "";
     pendingImageData = null;
@@ -2017,78 +2027,319 @@ async function markMessagesAsRead(messages) {
 }
 
 /* =========================================================
-   通知
+   通知（Firebase Cloud Messaging）
+   ・通知の許可はマイページの「🔔 通知をONにする」ボタンからだけ求める
+     （iPhone / iPad のPWAでは、ユーザー操作の中で許可を求める必要があるため）
+   ・トークンは fcmTokens/{トークン} に端末ごとに保存する（uid で持ち主を判断する）
+   ・メッセージを送ったら、Cloudflare Worker（NOTIFY_ENDPOINT）に通知の送信を頼む。
+     Worker が受信者の全端末へ FCM で送る（送った本人には送らない）
+   ・アプリを開いているときは onMessage と Firestore 監視の両方から同じ出来事が来るので、
+     notifyOnce() で1回にまとめる。ブラウザ通知は tag をそろえて1件にまとめる
 ========================================================= */
 
-async function initializeNotifications() {
-  if (notificationsInitialized || !currentUser) return;
-  notificationsInitialized = true;
+const FCM_TOKEN_STORAGE_KEY = "yuuchat_fcm_token";
+const notificationButton = document.getElementById("notificationButton");
+const notificationStatusEl = document.getElementById("notificationStatus");
+
+function isIOSDevice() {
+  const ua = navigator.userAgent || "";
+  return /iPhone|iPad|iPod/.test(ua) || (ua.includes("Macintosh") && navigator.maxTouchPoints > 1);
+}
+
+function isStandaloneApp() {
+  return window.matchMedia?.("(display-mode: standalone)").matches || navigator.standalone === true;
+}
+
+function setNotificationStatus(text, state) {
+  if (notificationStatusEl) notificationStatusEl.textContent = text;
+  if (notificationButton) {
+    notificationButton.dataset.state = state || "";
+    notificationButton.textContent = state === "on" ? "🔔 通知はONです" : "🔔 通知をONにする";
+    notificationButton.disabled = state === "unsupported" || state === "denied" || state === "busy";
+  }
+}
+
+function getUnsupportedNotificationText() {
+  if (isIOSDevice() && !isStandaloneApp()) {
+    return "iPhone / iPad では、Safari の共有ボタンから「ホーム画面に追加」したアプリを開くと通知を利用できます。";
+  }
+  return "この端末・ブラウザでは通知を利用できません。";
+}
+
+async function isFcmAvailable() {
+  if (typeof Notification === "undefined" || !("serviceWorker" in navigator)) return false;
+  try {
+    return await isSupported();
+  } catch (error) {
+    console.error("通知の対応確認エラー:", error);
+    return false;
+  }
+}
+
+/* 今の状態をボタンと説明文に反映する（許可は求めない） */
+async function refreshNotificationStatus() {
+  if (!(await isFcmAvailable())) {
+    setNotificationStatus(getUnsupportedNotificationText(), "unsupported");
+    return;
+  }
+  if (Notification.permission === "denied") {
+    setNotificationStatus("通知がブロックされています。ブラウザや端末の設定から、このサイトの通知を許可してください。", "denied");
+    return;
+  }
+  if (Notification.permission === "granted" && localStorage.getItem(FCM_TOKEN_STORAGE_KEY)) {
+    setNotificationStatus("この端末に通知が届きます。", "on");
+    return;
+  }
+  setNotificationStatus("ボタンを押すと、アプリを閉じていてもメッセージの通知が届くようになります。", "off");
+}
+
+/* 「🔔 通知をONにする」ボタン */
+notificationButton?.addEventListener("click", async () => {
+  if (!currentUser || !username) return;
+
+  /* iOS Safari はユーザー操作の直後でないと許可ダイアログを出さないので、
+     他の await より前に許可を求める */
+  let permission = typeof Notification === "undefined" ? "unsupported" : Notification.permission;
+  if (permission === "default") {
+    try {
+      permission = await Notification.requestPermission();
+    } catch (error) {
+      console.error("通知許可エラー:", error);
+    }
+  }
+
+  if (!(await isFcmAvailable())) {
+    setNotificationStatus(getUnsupportedNotificationText(), "unsupported");
+    return;
+  }
+  if (permission !== "granted") {
+    await refreshNotificationStatus();
+    return;
+  }
+
+  setNotificationStatus("設定しています...", "busy");
+  const ok = await registerFcmToken();
+  if (ok) {
+    setNotificationStatus("この端末に通知が届きます。", "on");
+  } else {
+    setNotificationStatus("通知の設定に失敗しました。時間をおいてもう一度お試しください。", "off");
+  }
+});
+
+/* ログイン後：すでに許可済みの端末だけ、許可を求めずにトークンを更新する */
+async function restoreNotificationsIfGranted() {
+  try {
+    if (await isFcmAvailable() && Notification.permission === "granted") {
+      await registerFcmToken();
+    }
+  } catch (error) {
+    console.error("通知の再設定エラー:", error);
+  }
+  refreshNotificationStatus();
+}
+
+async function getFcmMessaging() {
+  if (fcmMessaging) return fcmMessaging;
+  if (!(await isFcmAvailable())) return null;
+  fcmMessaging = getMessaging(firebaseApp);
+  return fcmMessaging;
+}
+
+async function registerFcmToken() {
+  if (!currentUser || !username) return false;
 
   try {
-    if (typeof Notification === "undefined") return;
-
-    if (Notification.permission === "default") {
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted") return;
-    }
-    if (Notification.permission !== "granted") return;
-    if (!("serviceWorker" in navigator)) return;
+    const messaging = await getFcmMessaging();
+    if (!messaging) return false;
 
     const registration = await navigator.serviceWorker.register("./firebase-messaging-sw.js");
-    const messaging = getMessaging(firebaseApp);
-
     const token = await getToken(messaging, {
       vapidKey: VAPID_PUBLIC_KEY,
       serviceWorkerRegistration: registration
     });
+    if (!token) return false;
 
-    if (token) await saveNotificationToken(token);
+    /* この端末で前に使っていたトークンが変わっていたら、古い方だけ消す */
+    const previousToken = localStorage.getItem(FCM_TOKEN_STORAGE_KEY);
+    if (previousToken && previousToken !== token) {
+      try { await deleteDoc(doc(db, "fcmTokens", previousToken)); } catch (error) { console.warn("古い通知トークン削除失敗:", error); }
+    }
 
-    onMessage(messaging, (payload) => {
-      console.log("通知を受信:", payload);
-      showInAppNotification(payload);
-    });
+    await setDoc(doc(db, "fcmTokens", token), {
+      uid: currentUser.uid,
+      username,
+      userAgent: (navigator.userAgent || "").slice(0, 200),
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+
+    localStorage.setItem(FCM_TOKEN_STORAGE_KEY, token);
+    setupForegroundMessageListener(messaging);
+    return true;
   } catch (error) {
-    console.error("通知初期化エラー:", error);
+    console.error(`[通知トークン登録エラー] code=${error?.code || "(なし)"} message=${error?.message || error}`, error);
+    return false;
   }
 }
 
-async function saveNotificationToken(token) {
-  if (!currentUser || !username || !token) return;
+/* ログアウト時：この端末のトークンだけ削除する（他の端末のトークンはそのまま） */
+async function unregisterFcmTokenForThisDevice() {
+  const token = localStorage.getItem(FCM_TOKEN_STORAGE_KEY);
+  localStorage.removeItem(FCM_TOKEN_STORAGE_KEY);
+  if (!token) return;
+
+  try { await deleteDoc(doc(db, "fcmTokens", token)); } catch (error) { console.warn("通知トークン削除失敗:", error); }
+
   try {
-    await setDoc(doc(db, "users", username), {
-      notificationToken: token,
-      notificationUpdatedAt: serverTimestamp()
+    const messaging = await getFcmMessaging();
+    if (messaging) await deleteToken(messaging);
+  } catch (error) {
+    console.warn("FCMトークン無効化失敗:", error);
+  }
+}
+
+/* 名前変更時：この端末のトークンの username を新しい名前にする（uid は変わらない） */
+async function updateFcmTokenUsername() {
+  const token = localStorage.getItem(FCM_TOKEN_STORAGE_KEY);
+  if (!token || !currentUser || !username) return;
+  try {
+    await setDoc(doc(db, "fcmTokens", token), {
+      uid: currentUser.uid, username, updatedAt: serverTimestamp()
     }, { merge: true });
   } catch (error) {
-    console.error("通知トークン保存エラー:", error);
+    console.warn("通知トークンの名前更新失敗:", error);
   }
 }
 
-function showInAppNotification(payload) {
-  const notification = document.createElement("div");
-  notification.className = "notification";
+/* メッセージを送ったあと、Worker に相手への通知を頼む（失敗してもメッセージ送信には影響しない） */
+async function requestPushNotification(messageId) {
+  if (!NOTIFY_ENDPOINT || !currentUser || !messageId) return;
+  try {
+    const idToken = await currentUser.getIdToken();
+    const response = await fetch(NOTIFY_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+      body: JSON.stringify({ messageId })
+    });
+    if (!response.ok) console.warn("通知の送信依頼に失敗:", response.status, await response.text());
+  } catch (error) {
+    console.warn("通知の送信依頼エラー:", error);
+  }
+}
 
-  const title = payload?.notification?.title || payload?.data?.title || "ゆうChat";
-  const body = payload?.notification?.body || payload?.data?.body || "新しい通知があります。";
+/* アプリを開いて見ているときに FCM で届いた通知 → アプリ内トースト */
+function setupForegroundMessageListener(messaging) {
+  if (fcmForegroundListenerReady || !messaging) return;
+  fcmForegroundListenerReady = true;
 
-  const titleElement = document.createElement("div");
-  titleElement.className = "notification-title";
-  titleElement.textContent = title;
+  onMessage(messaging, (payload) => {
+    const data = payload?.data || {};
+    const title = data.title || payload?.notification?.title || "ゆうChat";
+    const body = data.body || payload?.notification?.body || "新しい通知があります。";
+    const key = data.messageId ? `message:${data.messageId}` : null;
 
-  const bodyElement = document.createElement("div");
-  bodyElement.className = "notification-body";
-  bodyElement.textContent = body;
+    /* 今まさに開いているチャットのメッセージならトーストは出さない */
+    if (isChatOpenAndFocused(data.friendshipId, data.groupId)) {
+      markNotified(key);
+      return;
+    }
 
-  notification.append(titleElement, bodyElement);
-  document.body.appendChild(notification);
+    notifyOnce(key, title, body);
+  });
+}
 
-  requestAnimationFrame(() => notification.classList.add("show"));
+function isChatOpenAndFocused(friendshipId, groupId) {
+  if (document.visibilityState !== "visible" || !document.hasFocus()) return false;
+  if (friendshipId && selectedChatType === "friend" && selectedFriendshipId === friendshipId) return true;
+  if (groupId && selectedChatType === "group" && selectedChat === groupId) return true;
+  return false;
+}
 
-  setTimeout(() => {
-    notification.classList.remove("show");
-    setTimeout(() => notification.remove(), 300);
-  }, 4000);
+/* ----- 同じ出来事の通知を1回にまとめる ----- */
+
+const NOTIFIED_KEY_TTL_MS = 10 * 60 * 1000;
+const notifiedKeys = new Map();
+
+function markNotified(key) {
+  if (!key) return;
+  const now = Date.now();
+  notifiedKeys.forEach((time, k) => { if (now - time > NOTIFIED_KEY_TTL_MS) notifiedKeys.delete(k); });
+  notifiedKeys.set(key, now);
+}
+
+/* key が同じ通知は10分以内に1回だけ表示する。options.browser でブラウザ通知も出す */
+function notifyOnce(key, title, body, options = {}) {
+  if (key && notifiedKeys.has(key) && Date.now() - notifiedKeys.get(key) < NOTIFIED_KEY_TTL_MS) return;
+  markNotified(key);
+  showAppToast(title, body);
+  if (options.browser) showBrowserNotification(options.browserTitle || title, options.browserBody || body, { tag: options.tag, link: options.link });
+}
+
+/* ----- 通知をタップして開いたときの移動先 -----
+   リンクは「./?open=chat&friendship=…」のような相対URL。
+   公開URL（GitHub Pages のサブパス）は Service Worker のスコープから決まるので決め打ちしない */
+
+let pendingNotificationTarget = parseNotificationTarget(window.location.search);
+
+function parseNotificationTarget(search) {
+  try {
+    const params = new URLSearchParams(search || "");
+    if (params.get("open") !== "chat") return null;
+    return { open: "chat", friendship: params.get("friendship") || null, group: params.get("group") || null };
+  } catch (error) {
+    return null;
+  }
+}
+
+function clearNotificationParamsFromUrl() {
+  try {
+    const url = new URL(window.location.href);
+    ["open", "friendship", "group"].forEach((key) => url.searchParams.delete(key));
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  } catch (error) {
+    /* URLを書き換えられなくても動作には影響しない */
+  }
+}
+
+/* ログイン後・友達/グループ読み込み後に呼ばれる。開けたら保留を消す。
+   source: "friends" / "groups" は、その一覧を読み込み終わった直後の呼び出し */
+function applyPendingNotificationTarget(source) {
+  const target = pendingNotificationTarget;
+  if (!target || !currentUser || !username) return;
+
+  if (!target.viewApplied) { target.viewApplied = true; switchView("chat"); }
+
+  if (target.friendship) {
+    const friend = friendsData.find((f) => f.friendshipId === target.friendship);
+    if (!friend) {
+      /* 友達一覧を読み込んでも見つからない（削除済みなど）ならあきらめる */
+      if (source === "friends") { pendingNotificationTarget = null; clearNotificationParamsFromUrl(); }
+      return;
+    }
+    selectFriendChat(friend);
+  } else if (target.group) {
+    const group = groupsData.find((g) => g.id === target.group);
+    if (!group) {
+      if (source === "groups") { pendingNotificationTarget = null; clearNotificationParamsFromUrl(); }
+      return;
+    }
+    selectGroupChat(group);
+  }
+
+  pendingNotificationTarget = null;
+  clearNotificationParamsFromUrl();
+}
+
+/* アプリがすでに開いていて通知をタップした場合は、Service Worker から知らせが来る */
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data?.type !== "yuuchat-open-link" || !event.data.link) return;
+    try {
+      pendingNotificationTarget = parseNotificationTarget(new URL(event.data.link, window.location.href).search);
+      applyPendingNotificationTarget();
+    } catch (error) {
+      console.error("通知リンク処理エラー:", error);
+    }
+  });
 }
 
 /* =========================================================
@@ -2120,15 +2371,30 @@ function showAppToast(title, body) {
   }, 4000);
 }
 
-function showBrowserNotification(title, body) {
+async function showBrowserNotification(title, body, options = {}) {
   if (typeof Notification === "undefined") return;
   if (Notification.permission !== "granted") return;
 
   /* 今まさにこのタブを見ている間は、ブラウザ通知は出さない（アプリ内トーストだけで十分なため） */
   if (document.visibilityState === "visible" && document.hasFocus()) return;
 
+  /* tag を FCM（Service Worker）側と同じにしておくと、両方から出ても1件にまとまる */
+  const notificationOptions = {
+    body,
+    icon: "./icons/icon-192.png",
+    badge: "./icons/icon-192.png",
+    data: { link: options.link || "./" }
+  };
+  if (options.tag) notificationOptions.tag = options.tag;
+
   try {
-    new Notification(title, { body });
+    /* スマホのブラウザは new Notification() が使えないので、Service Worker 経由を優先する */
+    const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : null;
+    if (registration) {
+      await registration.showNotification(title, notificationOptions);
+      return;
+    }
+    new Notification(title, notificationOptions);
   } catch (error) {
     console.error("ブラウザ通知エラー:", error);
   }
@@ -2183,9 +2449,18 @@ function listenIncomingMessageNotifications() {
 
       const title = message.type === "group" ? `${message.sender}（グループ）` : message.sender;
       const body = message.image ? "画像を送信しました" : (message.text || "メッセージが届きました");
+      const groupName = groupsData.find((g) => g.id === message.groupId)?.name || "グループ";
+      const link = message.type === "group"
+        ? `./?open=chat&group=${encodeURIComponent(message.groupId || "")}`
+        : `./?open=chat&friendship=${encodeURIComponent(message.friendshipId || "")}`;
 
-      showAppToast(title, body);
-      showBrowserNotification(`ゆうChat - ${title}`, body);
+      notifyOnce(`message:${message.id}`, title, body, {
+        browser: true,
+        browserTitle: "ゆうChat",
+        browserBody: message.type === "group" ? `${groupName}グループに新しいメッセージがあります` : `${message.sender}さんからメッセージが届きました`,
+        tag: `message-${message.id}`,
+        link
+      });
     },
     (error) => console.error("メッセージ通知監視エラー:", error)
   );
@@ -2257,6 +2532,7 @@ logoutButton?.addEventListener("click", async () => {
     messageWatchInitialized = false;
     lastNotifiedMessageId = null;
 
+    await unregisterFcmTokenForThisDevice();
     await updateOnlineStatus(false);
 
     /* 次に別のアカウントでログインしたときに引き継がれないようにする */
