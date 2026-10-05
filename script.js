@@ -42,10 +42,9 @@ const firebaseConfig = {
 const VAPID_PUBLIC_KEY =
   "BNKlLucsJnYok43m4muAEkcQq8cOcNrUKFyNYkCeo2jKhm1RwJVAU6tC7p3PjoaidOU08Hh7oEeRz43S8X73Ppw";
 
-/* 通知を送る Cloudflare Worker の URL（notify-worker を公開したあとに設定する）
-   例："https://yuuchat-notify.xxxx.workers.dev/notify"
-   空のあいだは、アプリを閉じている端末への通知は送られない（アプリ内の通知はこれまで通り動く） */
-const NOTIFY_ENDPOINT = "";
+/* 通知を送る Cloudflare Worker（notify-worker）の URL
+   空にすると、アプリを閉じている端末への通知は送られない（アプリ内の通知はこれまで通り動く） */
+const NOTIFY_ENDPOINT = "https://yuuchat-notify.yuchin08092010.workers.dev/notify";
 
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
