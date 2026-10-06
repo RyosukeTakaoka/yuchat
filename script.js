@@ -3384,7 +3384,7 @@ betButton?.addEventListener("click", async () => {
        万一 totalBetAmount の書き込みが拒否されても投票はできるよう、そのときは従来どおりの内容でやり直す
        （累計は derby-runner が馬券の記録から計算し直す） */
     const manualRef = isManualRaceId(raceId) ? doc(db, "derbyManualRaces", raceId) : null;
-    const placeBet = (withTotal) => runTransaction(db, async (transaction) => {
+    const placeBet = (withTotal) => (manualRef ? runCountedTransaction : (fn) => runTransaction(db, fn))(async (transaction) => {
       const userRef = doc(db, "users", username);
       const userSnap = await transaction.get(userRef);
       const coins = userSnap.exists() ? Number(userSnap.data().coins || 0) : 0;
@@ -4446,13 +4446,29 @@ function initializeSafeRace() {
    管理者（ゆうダービー管理・イベント管理）
    ・管理者は Firebase Authentication の UID だけで判定する（メールアドレスや名前では判定しない）
    ・管理者以外には管理画面・管理ボタンを表示しない
-   ※ Firestore のルールでの制限は今回は入れていない（画面で隠しているだけ）
+   ・Firestore のルール（firestore.rules）でも同じ UID を確かめていて、
+     管理者以外が手動レース・イベントを直接書き換えようとしても拒否される
 ========================================================= */
 
 const ADMIN_UID = "g51wzTvJFsZiYEfre5aDuDckJXY2";
 
 function isAdminUser() {
   return Boolean(currentUser && currentUser.uid === ADMIN_UID);
+}
+
+/* 手動レースの投票数（betCount）とイベントの参加人数（participantCount）は、
+   Firestore のルールで「読んだ値 + 1（または - 1）」になっているかを確かめている。
+   同時に何人かが書き込むと、古い値で計算した側は（競合なのに自動でやり直されず）permission-denied で拒否されるので、
+   そのときは少し待って最新の値で数回やり直す（拒否された書き込みは何も反映されていないので、二重にはならない） */
+async function runCountedTransaction(updateFunction, attempts = 8) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await runTransaction(db, updateFunction);
+    } catch (error) {
+      if (error?.code !== "permission-denied" || attempt >= attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100 * attempt + Math.random() * 300 * attempt));
+    }
+  }
 }
 
 function updateAdminVisibility() {
@@ -5016,9 +5032,14 @@ document.getElementById("eventAdminList")?.addEventListener("click", (event) => 
 
 /* 参加・取り消し：受付中のイベントだけ。参加者の記録と人数を同じトランザクションで更新する
    （参加者の記録は「イベントID_UID」なので、連打・複数端末でも1人1件） */
+/* 同じ端末での連打は、処理中のあいだ受け付けない（同時に送るとルールで拒否されてエラー表示になるため） */
+const eventActionsInFlight = new Set();
+
 async function joinEvent(id) {
+  if (eventActionsInFlight.has(id)) return;
+  eventActionsInFlight.add(id);
   try {
-    await runTransaction(db, async (transaction) => {
+    await runCountedTransaction(async (transaction) => {
       const ref = doc(db, "events", id);
       const entryRef = doc(db, "eventParticipants", `${id}_${currentUser.uid}`);
       const snap = await transaction.get(ref);
@@ -5037,13 +5058,17 @@ async function joinEvent(id) {
     const messages = { NOT_FOUND: "このイベントは見つかりませんでした。", CANCELLED: "このイベントはキャンセルされました。", NOT_OPEN: "いまは参加受付の時間外です。", FULL: "定員に達したため参加できません。" };
     if (!messages[error.message]) console.error("イベント参加エラー:", error);
     alert(messages[error.message] || "参加できませんでした。もう一度お試しください。");
+  } finally {
+    eventActionsInFlight.delete(id);
   }
 }
 
 async function leaveEvent(id) {
+  if (eventActionsInFlight.has(id)) return;
   if (!confirm("このイベントへの参加をやめますか？")) return;
+  eventActionsInFlight.add(id);
   try {
-    await runTransaction(db, async (transaction) => {
+    await runCountedTransaction(async (transaction) => {
       const ref = doc(db, "events", id);
       const entryRef = doc(db, "eventParticipants", `${id}_${currentUser.uid}`);
       const snap = await transaction.get(ref);
@@ -5059,6 +5084,8 @@ async function leaveEvent(id) {
     const messages = { NOT_FOUND: "このイベントは見つかりませんでした。", NOT_OPEN: "受付期間を過ぎたため、参加の取り消しはできません。" };
     if (!messages[error.message]) console.error("イベント参加取り消しエラー:", error);
     alert(messages[error.message] || "取り消せませんでした。もう一度お試しください。");
+  } finally {
+    eventActionsInFlight.delete(id);
   }
 }
 
