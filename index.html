@@ -28,7 +28,7 @@
 
     <link
         rel="stylesheet"
-        href="./style.css?v=20261007-twice"
+        href="./style.css?v=20261008-admin"
     >
 </head>
 
@@ -545,6 +545,17 @@
 
 
         <button
+            data-view="events"
+            type="button"
+        >
+            🎪
+            <span>
+                イベント
+            </span>
+        </button>
+
+
+        <button
             data-view="games"
             type="button"
         >
@@ -813,6 +824,54 @@
 
 
 
+                    <!-- 管理者だけに表示（手動レースの作成・確認・キャンセル） -->
+
+                    <div
+                        id="derbyAdminPanel"
+                        class="admin-panel hidden"
+                    >
+                        <h3>
+                            🏇 ゆうダービー管理
+                        </h3>
+
+                        <form
+                            id="manualRaceForm"
+                            class="admin-form"
+                            autocomplete="off"
+                        >
+                            <label>
+                                開催日
+                                <input id="manualRaceDateInput" type="date" required>
+                            </label>
+                            <div class="admin-form-row">
+                                <label>
+                                    投票受付開始
+                                    <input id="manualRaceOpenInput" type="time" required>
+                                </label>
+                                <label>
+                                    投票受付終了
+                                    <input id="manualRaceCloseInput" type="time" required>
+                                </label>
+                                <label>
+                                    レース開催
+                                    <input id="manualRaceStartInput" type="time" required>
+                                </label>
+                            </div>
+                            <p id="manualRaceFormError" class="admin-form-error"></p>
+                            <div class="admin-form-buttons">
+                                <button id="manualRaceSubmitButton" type="submit">レースを作成する</button>
+                            </div>
+                        </form>
+
+                        <h4>
+                            作成した手動レース
+                        </h4>
+                        <div
+                            id="manualRaceAdminList"
+                            class="admin-list"
+                        ></div>
+                    </div>
+
                     <!-- レース場 -->
 
                     <div
@@ -882,6 +941,19 @@
 
 
                         <div class="bet-controls">
+
+
+                            <label
+                                id="betRaceLabel"
+                                class="hidden"
+                            >
+                                投票するレース
+                            </label>
+
+                            <select
+                                id="betRaceSelect"
+                                class="hidden"
+                            ></select>
 
 
                             <label>
@@ -986,6 +1058,115 @@
                         ></div>
 
                     </div>
+
+                </div>
+
+            </section>
+
+
+
+            <!-- ==================================================
+                 イベント
+            ================================================== -->
+
+            <section
+                id="eventsView"
+                class="view hidden"
+            >
+
+                <div class="panel">
+
+                    <div class="panel-head">
+                        <div>
+                            <h2>
+                                🎪 イベント
+                            </h2>
+                            <p>
+                                参加したいイベントに申し込めます
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- 管理者だけに表示（イベント管理） -->
+                    <div
+                        id="eventAdminPanel"
+                        class="admin-panel hidden"
+                    >
+                        <h3>
+                            🎪 イベント管理
+                        </h3>
+
+                        <form
+                            id="eventForm"
+                            class="admin-form"
+                            autocomplete="off"
+                        >
+                            <label>
+                                タイトル
+                                <input id="eventTitleInput" type="text" maxlength="40" required>
+                            </label>
+                            <label>
+                                説明
+                                <textarea id="eventDescriptionInput" maxlength="300" rows="3"></textarea>
+                            </label>
+                            <label>
+                                場所
+                                <input id="eventLocationInput" type="text" maxlength="40">
+                            </label>
+                            <div class="admin-form-row">
+                                <label>
+                                    開催日
+                                    <input id="eventDateInput" type="date" required>
+                                </label>
+                                <label>
+                                    開始時刻
+                                    <input id="eventTimeInput" type="time" required>
+                                </label>
+                            </div>
+                            <div class="admin-form-row">
+                                <label>
+                                    受付開始日
+                                    <input id="eventEntryOpenDateInput" type="date" required>
+                                </label>
+                                <label>
+                                    受付開始時刻
+                                    <input id="eventEntryOpenTimeInput" type="time" required>
+                                </label>
+                            </div>
+                            <div class="admin-form-row">
+                                <label>
+                                    受付終了日
+                                    <input id="eventEntryCloseDateInput" type="date" required>
+                                </label>
+                                <label>
+                                    受付終了時刻
+                                    <input id="eventEntryCloseTimeInput" type="time" required>
+                                </label>
+                            </div>
+                            <label>
+                                定員（0 または空欄で制限なし）
+                                <input id="eventCapacityInput" type="number" min="0" max="999" step="1">
+                            </label>
+                            <p id="eventFormError" class="admin-form-error"></p>
+                            <div class="admin-form-buttons">
+                                <button id="eventSubmitButton" type="submit">イベントを作成する</button>
+                                <button id="eventEditCancelButton" class="hidden secondary" type="button">編集をやめる</button>
+                            </div>
+                        </form>
+
+                        <h4>
+                            作成したイベント
+                        </h4>
+                        <div
+                            id="eventAdminList"
+                            class="admin-list"
+                        ></div>
+                    </div>
+
+                    <div
+                        id="eventsList"
+                        class="events-list"
+                    ></div>
 
                 </div>
 
@@ -1254,7 +1435,7 @@
 
 <script
     type="module"
-    src="./script.js?v=20261007-twice"
+    src="./script.js?v=20261008-admin"
 ></script>
 
 
