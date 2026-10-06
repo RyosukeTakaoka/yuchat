@@ -38,14 +38,14 @@ service cloud.firestore {
   }
 }`;
 
-/* 公開・確認に必要な権限（Google Cloud IAM） */
+/* 公開に必要な権限（Google Cloud IAM）。test API に必要な権限名は公開されていないので、候補も一緒に調べて表示する */
 const REQUIRED_PERMISSIONS = [
   "firebaserules.releases.get",
   "firebaserules.rulesets.get",
-  "firebaserules.projects.test",
   "firebaserules.rulesets.create",
   "firebaserules.releases.update"
 ];
+const EXTRA_PERMISSIONS = ["firebaserules.releases.create", "firebaserules.rulesets.test", "firebaserules.projects.test"];
 
 const summary = [];
 const out = (line = "") => { console.log(line); summary.push(line); };
@@ -180,15 +180,20 @@ function knownRuleVersions() {
   return versions;
 }
 
-/* 本番を変える前に、必要な権限がそろっているかを確かめる（確かめるだけで何も変えない） */
+/* 本番を変える前に、必要な権限がそろっているかを確かめる（確かめるだけで何も変えない）。
+   存在しない権限名が混ざると全体がエラーになるので、1つずつ調べる */
 async function checkPermissions(api, projectId) {
-  try {
-    const result = await api("POST", `https://cloudresourcemanager.googleapis.com/v1/projects/${projectId}:testIamPermissions`, { permissions: REQUIRED_PERMISSIONS });
-    const granted = new Set(result.permissions || []);
-    return { known: true, missing: REQUIRED_PERMISSIONS.filter((p) => !granted.has(p)) };
-  } catch (error) {
-    return { known: false, missing: [], error: error.message };
+  const status = {};
+  for (const permission of [...REQUIRED_PERMISSIONS, ...EXTRA_PERMISSIONS]) {
+    try {
+      const result = await api("POST", `https://cloudresourcemanager.googleapis.com/v1/projects/${projectId}:testIamPermissions`, { permissions: [permission] });
+      status[permission] = (result.permissions || []).includes(permission) ? "あり" : "なし";
+    } catch (error) {
+      status[permission] = /not valid/i.test(error.message) ? "（権限名として無効）" : `確認できず：${error.message}`;
+    }
   }
+  const known = REQUIRED_PERMISSIONS.every((p) => status[p] === "あり" || status[p] === "なし");
+  return { known, status, missing: REQUIRED_PERMISSIONS.filter((p) => status[p] === "なし") };
 }
 
 async function check(api, projectId, credentials) {
@@ -198,7 +203,8 @@ async function check(api, projectId, credentials) {
   out(`- プロジェクト：${projectId}`);
   out(`- サービスアカウント：${describeServiceAccount(credentials)}`);
   const permissions = await checkPermissions(api, projectId);
-  if (!permissions.known) out(`- 権限の事前確認：できませんでした（${permissions.error}）。実際の操作で確かめます`);
+  out(`- 権限：${Object.entries(permissions.status).map(([p, v]) => `${p}=${v}`).join(" / ")}`);
+  if (!permissions.known) out("- 権限の事前確認：一部を確かめられませんでした。実際の操作で確かめます");
   else if (permissions.missing.length) out(`- 権限の事前確認：**足りない権限があります** → ${permissions.missing.join(", ")}（「Firebase Rules 管理者」roles/firebaserules.admin に含まれます）`);
   else out("- 権限の事前確認：必要な権限はすべてあります");
 
