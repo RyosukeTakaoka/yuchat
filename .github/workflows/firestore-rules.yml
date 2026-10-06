@@ -1,0 +1,133 @@
+# Firestore ルール（firestore.rules）のテスト・本番確認・本番への公開
+#
+# ・プルリクエスト（firestore.rules などを変えたとき）
+#     Emulator でルールのテスト → 本番のルールを読んで差分を表示し、本番のルールエンジンで新しいルールをテスト
+#     （本番のルールもデータも変えない）
+# ・main に firestore.rules の変更が入ったとき（プルリクエストのマージ）
+#     上と同じ確認がすべて通ったときだけ、本番に公開する
+#     本番のルールが「リポジトリの過去の版」か「最初のルール」と違う（Firebase Console で直接変えた）ときは公開しない
+# ・手動実行（Actions タブ → Firestore ルール → Run workflow）
+#     check（確認だけ）/ deploy（公開）/ rollback（rollback_ruleset に戻す）
+#
+# 鍵は「ゆうダービー自動開催」と同じ FIREBASE_SERVICE_ACCOUNT（Secrets）を使う。新しい鍵は不要。
+# フォークからのプルリクエストには Secrets が渡らないので、本番の確認はスキップされる。
+
+name: Firestore ルール
+
+on:
+  pull_request:
+    paths:
+      - "firestore.rules"
+      - "firestore-rules/**"
+      - ".github/workflows/firestore-rules.yml"
+  push:
+    branches: [main]
+    paths:
+      - "firestore.rules"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check（確認だけ）/ deploy（公開）/ rollback（元に戻す）"
+        type: choice
+        options: [check, deploy, rollback]
+        default: check
+      rollback_ruleset:
+        description: "rollback のときだけ：戻す先（projects/yuuchat-be666/rulesets/…）"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firestore-rules
+  cancel-in-progress: false
+
+jobs:
+  emulator-test:
+    name: ルールのテスト（Emulator）
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'rollback'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: firestore-rules
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+
+  production:
+    name: 本番の確認・公開
+    needs: emulator-test
+    if: always() && (needs.emulator-test.result == 'success' || needs.emulator-test.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: firestore-rules
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 鍵が登録されているか確認
+        id: secret
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "::warning::FIREBASE_SERVICE_ACCOUNT が使えないため、本番の確認をスキップしました"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.secret.outputs.ready == 'true'
+        with:
+          node-version: 22
+
+      - name: 依存パッケージのインストール
+        if: steps.secret.outputs.ready == 'true'
+        run: npm ci --no-audit --no-fund --omit=dev
+
+      - name: リポジトリの過去の firestore.rules を集める
+        if: steps.secret.outputs.ready == 'true'
+        run: |
+          mkdir -p known-rules
+          for c in $(git log --format=%H -- ../firestore.rules); do
+            git show "$c:firestore.rules" > "known-rules/$c.rules" 2>/dev/null || rm -f "known-rules/$c.rules"
+          done
+          ls known-rules
+
+      - name: 確認・公開
+        id: run
+        if: steps.secret.outputs.ready == 'true'
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          KNOWN_RULES_DIR: known-rules
+          ROLLBACK_RULESET: ${{ inputs.rollback_ruleset }}
+          MODE: ${{ github.event_name == 'push' && 'deploy' || github.event_name == 'workflow_dispatch' && inputs.mode || 'check' }}
+        run: |
+          echo "モード: $MODE"
+          node prod-rules.mjs "$MODE"
+
+      - name: 本番のルールと今回のルールの差分
+        if: always() && steps.secret.outputs.ready == 'true'
+        run: |
+          if [ -f production.rules ]; then
+            {
+              echo "### 本番のルール → 今回の firestore.rules の差分"
+              echo '```diff'
+              git diff --no-index -- production.rules ../firestore.rules || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

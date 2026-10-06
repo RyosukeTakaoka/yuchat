@@ -1,0 +1,22 @@
+{
+  "name": "yuuchat-firestore-rules",
+  "description": "Firestore ルール（../firestore.rules）のテストと、本番への確認・公開（GitHub Actions から実行）",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "firebase emulators:exec --only firestore --project demo-yuuchat-rules \"node rules.test.cjs && node concurrency.test.cjs\"",
+    "check": "node prod-rules.mjs check",
+    "deploy": "node prod-rules.mjs deploy"
+  },
+  "dependencies": {
+    "google-auth-library": "^11.1.0"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "firebase": "^12.19.0",
+    "firebase-tools": "15.31.0"
+  }
+}
