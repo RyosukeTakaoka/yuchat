@@ -38,14 +38,16 @@ service cloud.firestore {
   }
 }`;
 
-/* 公開に必要な権限（Google Cloud IAM）。test API に必要な権限名は公開されていないので、候補も一緒に調べて表示する */
+/* 確認・公開に必要な権限（Google Cloud IAM）
+   rulesets.test は、公開前に本番のルールエンジンで新しいルールをテストするために使う */
 const REQUIRED_PERMISSIONS = [
   "firebaserules.releases.get",
   "firebaserules.rulesets.get",
+  "firebaserules.rulesets.test",
   "firebaserules.rulesets.create",
   "firebaserules.releases.update"
 ];
-const EXTRA_PERMISSIONS = ["firebaserules.releases.create", "firebaserules.rulesets.test", "firebaserules.projects.test"];
+const EXTRA_PERMISSIONS = [];
 
 const summary = [];
 const out = (line = "") => { console.log(line); summary.push(line); };
@@ -84,7 +86,7 @@ async function createApi(credentials) {
       const status = error.response?.status;
       const message = error.response?.data?.error?.message || error.message;
       const hint = status === 403
-        ? "（サービスアカウントに Firestore ルールを操作する権限がありません。Google Cloud Console の IAM で、このサービスアカウントに「Firebase Rules 管理者」（roles/firebaserules.admin）を付けると使えます）"
+        ? "（サービスアカウントにこの操作の権限がありません。Google Cloud Console の IAM で、このサービスアカウントに「Firebase Rules 管理者」（roles/firebaserules.admin）を追加してください）"
         : "";
       throw new Error(`${method} ${urlPath} → ${status || ""} ${message}${hint}`);
     }
