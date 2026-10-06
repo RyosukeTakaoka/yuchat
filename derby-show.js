@@ -359,15 +359,14 @@ export function buildRaceShow(raceData, { horses, raceId }) {
     batch.push(n);
   });
   flushBatch();
-  addEvent(endTime + 0.6, pick(["全馬がゴールしました！", "全馬ゴールイン！"]), [{ type: "finished", horses: [...resultOrder] }], "final");
-  addEvent(revealTime, "レース終了！結果をご覧ください", [{ type: "finished", horses: [...resultOrder] }], "final");
+  const allFinishedText = pick(["全馬がゴールしました！", "全馬ゴールイン！"]);
 
   /* 表示時間をそろえる：ゴールなどの大事な実況は少し後ろにずらしてでも出す。その他は間に合わなければ出さない */
   rawEvents.sort((a, b) => a.time - b.time);
   const events = [];
   let lastShownAt = -Infinity;
   rawEvents.forEach((e) => {
-    const minHold = e.kind === "finish" || e.kind === "final" ? 1.3 : 1.6;
+    const minHold = e.kind === "finish" ? 1.3 : 1.6;
     let time = e.time;
     if (time < lastShownAt + minHold) {
       if (e.kind === "status" || e.kind === "leader") return;
@@ -376,6 +375,15 @@ export function buildRaceShow(raceData, { horses, raceId }) {
     events.push({ ...e, time });
     lastShownAt = time;
   });
+
+  /* 締めの実況は時刻を固定する：「全馬ゴール」は結果表示の0.8秒前まで、「レース終了」は結果表示と同時。
+     （ゴールの実況が混んで後ろにずれても、締めの実況が結果表示より後ろにずれて出なくならないように。
+      それより後ろにずれたゴールの実況は「全馬ゴール」に含まれるので出さない） */
+  const allFinishedAt = Math.min(Math.max(endTime + 0.6, lastShownAt + 1.3), revealTime - 0.8);
+  while (events.length && events[events.length - 1].time >= allFinishedAt) events.pop();
+  const allFinishedClaims = [{ type: "finished", horses: [...resultOrder] }];
+  events.push({ time: allFinishedAt, text: allFinishedText, claims: allFinishedClaims, kind: "final" });
+  events.push({ time: revealTime, text: "レース終了！結果をご覧ください", claims: allFinishedClaims, kind: "final" });
 
   const neutralText = {
     start: "スタートしました！",
