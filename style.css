@@ -3624,3 +3624,326 @@ button:disabled {
     background: #111;
     color: #fff;
 }
+
+
+/* ==================================================
+   タブ5項目（チャット・ダービー・イベント・ゲーム・マイページ）
+   ・幅の狭いスマホでも1行に収まるように
+================================================== */
+
+.tabs button {
+    min-width: 0;
+}
+
+.tabs button span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+@media (max-width: 360px) {
+    .tabs button {
+        font-size: 16px;
+    }
+
+    .tabs button span {
+        font-size: 9px;
+    }
+}
+
+
+/* ==================================================
+   管理者パネル（ゆうダービー管理・イベント管理）
+================================================== */
+
+.admin-panel {
+    margin: 12px 0;
+    padding: 12px;
+
+    border: 1.5px dashed #111;
+    border-radius: 14px;
+
+    background: #fff;
+}
+
+.admin-panel h3 {
+    margin: 0 0 8px;
+    font-size: 15px;
+}
+
+.admin-panel h4 {
+    margin: 14px 0 6px;
+    font-size: 13px;
+}
+
+.admin-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.admin-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+
+    flex: 1;
+    min-width: 0;
+
+    font-size: 12px;
+    font-weight: 700;
+    color: #444;
+}
+
+.admin-form input,
+.admin-form textarea {
+    width: 100%;
+    min-width: 0;
+
+    padding: 8px 10px;
+
+    border: 1px solid #ddd;
+    border-radius: 10px;
+
+    font-size: 16px;
+    font-weight: 400;
+    color: #111;
+
+    background: #fff;
+}
+
+.admin-form-row {
+    display: flex;
+    gap: 8px;
+}
+
+.admin-form-error {
+    min-height: 1em;
+    margin: 0;
+
+    color: #c62828;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.admin-form-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.admin-form-buttons button,
+.admin-item button,
+.event-actions button {
+    padding: 8px 14px;
+
+    border: none;
+    border-radius: 10px;
+
+    background: #111;
+    color: #fff;
+
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.admin-form-buttons button {
+    flex: 1;
+    min-height: 42px;
+}
+
+.admin-form-buttons button:disabled {
+    opacity: .5;
+}
+
+button.secondary {
+    background: #fff;
+    color: #111;
+    border: 1.5px solid #111;
+}
+
+button.secondary.danger {
+    color: #c62828;
+    border-color: #c62828;
+}
+
+.admin-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.admin-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+
+    padding: 8px 10px;
+
+    border: 1px solid #e1e4e8;
+    border-radius: 10px;
+
+    font-size: 13px;
+}
+
+.admin-item.cancelled {
+    opacity: .6;
+}
+
+.admin-item-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.admin-item-main small {
+    display: block;
+    color: #c62828;
+}
+
+.admin-item-sub {
+    margin-top: 2px;
+    font-size: 11px;
+    color: #555;
+}
+
+.admin-item-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px;
+}
+
+.admin-item-buttons button {
+    padding: 6px 10px;
+    font-size: 12px;
+}
+
+.admin-badge {
+    display: inline-block;
+
+    margin-left: 6px;
+    padding: 1px 8px;
+
+    border-radius: 999px;
+
+    background: #f1f2f4;
+    color: #333;
+
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.admin-participants {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #333;
+    word-break: break-all;
+}
+
+@media (max-width: 500px) {
+    .admin-form-row {
+        flex-direction: column;
+    }
+
+    .admin-item {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .admin-item-buttons {
+        justify-content: flex-start;
+    }
+}
+
+
+/* ==================================================
+   イベント一覧
+================================================== */
+
+.events-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+
+    margin-top: 10px;
+}
+
+.event-card {
+    padding: 12px;
+
+    border: 1px solid #e1e4e8;
+    border-radius: 14px;
+
+    background: #fff;
+
+    font-size: 13px;
+}
+
+.event-card.cancelled {
+    background: #f7f7f7;
+}
+
+.event-cancelled-banner {
+    margin-bottom: 6px;
+    padding: 6px 10px;
+
+    border-radius: 8px;
+
+    background: #c62828;
+    color: #fff;
+
+    font-weight: 800;
+    font-size: 12px;
+}
+
+.event-card-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+
+    font-size: 15px;
+}
+
+.event-joined {
+    font-size: 11px;
+    font-weight: 800;
+    color: #2e7d32;
+}
+
+.event-meta {
+    margin-top: 4px;
+    color: #555;
+    font-size: 12px;
+}
+
+.event-desc {
+    margin-top: 6px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.event-actions {
+    margin-top: 8px;
+}
+
+.event-note {
+    font-size: 12px;
+    color: #555;
+}
+
+
+/* ==================================================
+   ゆうダービー：今後のレース・投票するレースの選択
+================================================== */
+
+.race-upcoming-line {
+    font-size: 12px;
+    color: #555;
+
+    margin-bottom: 4px;
+}
+
+.race-upcoming-line:empty {
+    display: none;
+}

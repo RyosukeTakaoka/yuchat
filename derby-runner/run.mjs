@@ -1,7 +1,7 @@
 /* =========================================================
    ゆうダービー 自動開催（GitHub Actions から毎日実行）
 
-   毎日 11:30 と 15:02（日本時間）の2回開催。
+   毎日 11:30 と 15:02（日本時間）の2回開催。管理者が作った手動レース（derbyManualRaces）も同じように開催する。
    誰もサイトを開いていなくても、開催時刻を過ぎたレースについて
      1. races/{raceId} にレース結果を作る（まだ無ければ）
      2. そのレースの未精算の馬券をすべて精算し、当たった人のコインを増やす
@@ -54,6 +54,9 @@ const MORNING_RACE_HOUR = 11;
 const MORNING_RACE_MINUTE = 30;
 const MORNING_RACE_SUFFIX = "-1130";
 const TWICE_DAILY_FROM = "2026-10-07";
+
+/* 手動レース（特別レース）：raceId は「YYYY-MM-DD-mHHMM」。予定は derbyManualRaces/{raceId}（script.js と同じ） */
+const MANUAL_RACE_ID_PATTERN = /^\d{4}-\d{2}-\d{2}-m\d{4}$/;
 
 /* 開催時刻は日本時間。何日前までさかのぼって「作られていないレース・未精算の馬券」を処理するか */
 const JST_OFFSET_HOURS = 9;
@@ -308,54 +311,71 @@ async function settleRaceBets(db, raceId, resultOrder) {
   return result;
 }
 
+/* 開催時刻を過ぎた手動レース（キャンセルされていないもの）。開催時刻は保存された raceAt を使う */
+export async function getDueManualRaces(db, now, lookbackDays = LOOKBACK_DAYS) {
+  const since = new Date(now.getTime() - (lookbackDays + 1) * 24 * 3600 * 1000);
+  const snap = await db.collection("derbyManualRaces").where("raceAt", ">=", Timestamp.fromDate(since)).get();
+  return snap.docs
+    .filter((d) => MANUAL_RACE_ID_PATTERN.test(d.id) && d.data().status !== "cancelled" && d.data().raceAt)
+    .map((d) => ({ raceId: d.id, raceTime: d.data().raceAt.toDate() }))
+    .filter((race) => race.raceTime <= now);
+}
+
 export async function runDerby({ db, now = new Date(), lookbackDays = LOOKBACK_DAYS, log = console.log }) {
   const summary = [];
 
+  /* 自動開催の回（11:30・15:02）と手動レースを、開催時刻の順に処理する */
+  const races = [];
   for (let daysAgo = lookbackDays; daysAgo >= 0; daysAgo--) {
-    for (const { raceId, raceTime } of getRacesForJstDay(now, daysAgo)) {
-      if (now < raceTime) continue; /* まだ開催時刻になっていない */
+    for (const race of getRacesForJstDay(now, daysAgo)) {
+      if (now < race.raceTime) continue; /* まだ開催時刻になっていない */
+      races.push(race);
+    }
+  }
+  races.push(...await getDueManualRaces(db, now, lookbackDays));
+  races.sort((a, b) => a.raceTime - b.raceTime);
 
-      const logRef = db.collection("raceLogs").doc(raceId);
-      const entry = { raceId, status: "ok" };
+  for (const { raceId, raceTime } of races) {
+    const logRef = db.collection("raceLogs").doc(raceId);
+    const entry = { raceId, status: "ok" };
 
+    try {
+      const { created, race } = await ensureRaceResult(db, raceId, raceTime);
+      entry.result = created ? "created" : `exists(${race.generatedBy || "client"})`;
+
+      const settle = await settleRaceBets(db, raceId, race.resultOrder);
+      Object.assign(entry, settle);
+      if (settle.errors.length) entry.status = "error";
+
+      await logRef.set({
+        raceId,
+        scheduledAt: Timestamp.fromDate(raceTime),
+        lastRunnerRunAt: FieldValue.serverTimestamp(),
+        lastRunnerStatus: entry.status,
+        lastRunnerError: settle.errors.join("\n").slice(0, 1500) || null,
+        betsTotal: settle.betsTotal,
+        betsSettledByRunner: FieldValue.increment(settle.settledNow),
+        payoutTotalByRunner: FieldValue.increment(settle.payoutTotal),
+        unsettledAfterRun: settle.unsettledRemaining
+      }, { merge: true });
+    } catch (error) {
+      entry.status = "error";
+      entry.error = error.message || String(error);
       try {
-        const { created, race } = await ensureRaceResult(db, raceId, raceTime);
-        entry.result = created ? "created" : `exists(${race.generatedBy || "client"})`;
-
-        const settle = await settleRaceBets(db, raceId, race.resultOrder);
-        Object.assign(entry, settle);
-        if (settle.errors.length) entry.status = "error";
-
         await logRef.set({
           raceId,
           scheduledAt: Timestamp.fromDate(raceTime),
           lastRunnerRunAt: FieldValue.serverTimestamp(),
-          lastRunnerStatus: entry.status,
-          lastRunnerError: settle.errors.join("\n").slice(0, 1500) || null,
-          betsTotal: settle.betsTotal,
-          betsSettledByRunner: FieldValue.increment(settle.settledNow),
-          payoutTotalByRunner: FieldValue.increment(settle.payoutTotal),
-          unsettledAfterRun: settle.unsettledRemaining
+          lastRunnerStatus: "error",
+          lastRunnerError: entry.error.slice(0, 1500)
         }, { merge: true });
-      } catch (error) {
-        entry.status = "error";
-        entry.error = error.message || String(error);
-        try {
-          await logRef.set({
-            raceId,
-            scheduledAt: Timestamp.fromDate(raceTime),
-            lastRunnerRunAt: FieldValue.serverTimestamp(),
-            lastRunnerStatus: "error",
-            lastRunnerError: entry.error.slice(0, 1500)
-          }, { merge: true });
-        } catch (logError) {
-          entry.logError = logError.message || String(logError);
-        }
+      } catch (logError) {
+        entry.logError = logError.message || String(logError);
       }
-
-      log(JSON.stringify(entry));
-      summary.push(entry);
     }
+
+    log(JSON.stringify(entry));
+    summary.push(entry);
   }
 
   return summary;

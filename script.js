@@ -104,6 +104,14 @@ let unsubscribeMyBetHistory = null;
 let raceCountdownTimer = null;
 let currentWinPool = {};
 let liveRaceResult = null;
+/* 手動レース（derbyManualRaces）：raceId → 予定。管理者が作ったものを全員が読む */
+let manualRaces = new Map();
+let unsubscribeManualRaces = null;
+/* イベント（events）と、自分が参加しているイベント（eventParticipants） */
+let latestEvents = [];
+let myEventEntries = new Map();
+let unsubscribeEvents = null;
+let unsubscribeMyEventEntries = null;
 let lastGenerationAttemptAt = -999;
 let lastActiveBettingRaceId = null;
 let lastLiveRaceId = null;
@@ -180,6 +188,7 @@ const imageInput = document.getElementById("imageInput");
 
 const chatView = document.getElementById("chatView");
 const derbyView = document.getElementById("derbyView");
+const eventsView = document.getElementById("eventsView");
 const gamesView = document.getElementById("gamesView");
 const mypageView = document.getElementById("mypageView");
 
@@ -911,6 +920,9 @@ async function startApp() {
     listenMyBetHistory();
     listenIncomingMessageNotifications();
     listenGameInvites();
+    listenManualRaces();
+    listenEvents();
+    updateAdminVisibility();
     catchUpMissedRaces();
     try { initializeSafeRace(); } catch (e) { console.error("レース初期化エラー:", e); }
   } catch (error) {
@@ -2630,7 +2642,7 @@ tabButtons.forEach((button) => {
 });
 
 function switchView(view) {
-  const views = { chat: chatView, derby: derbyView, games: gamesView, mypage: mypageView };
+  const views = { chat: chatView, derby: derbyView, events: eventsView, games: gamesView, mypage: mypageView };
 
   Object.entries(views).forEach(([name, element]) => {
     if (!element) return;
@@ -2645,6 +2657,7 @@ function switchView(view) {
   if (view === "mypage") loadMyPage();
   if (view === "derby") { renderRaceInfo(); renderRaceInfoHeavyParts(); }
   if (view === "games") loadGameRooms();
+  if (view === "events") { renderEventsList(); renderEventAdminList(); }
 }
 
 /* =========================================================
@@ -2661,6 +2674,15 @@ logoutButton?.addEventListener("click", async () => {
     if (unsubscribeGameRooms) { unsubscribeGameRooms(); unsubscribeGameRooms = null; }
     if (unsubscribeCurrentGame) { unsubscribeCurrentGame(); unsubscribeCurrentGame = null; }
     if (unsubscribeGameInvites) { unsubscribeGameInvites(); unsubscribeGameInvites = null; }
+    if (unsubscribeManualRaces) { unsubscribeManualRaces(); unsubscribeManualRaces = null; }
+    if (unsubscribeEvents) { unsubscribeEvents(); unsubscribeEvents = null; }
+    if (unsubscribeMyEventEntries) { unsubscribeMyEventEntries(); unsubscribeMyEventEntries = null; }
+    manualRaces = new Map();
+    latestEvents = [];
+    myEventEntries = new Map();
+    selectedBetRaceId = null;
+    document.getElementById("derbyAdminPanel")?.classList.add("hidden");
+    document.getElementById("eventAdminPanel")?.classList.add("hidden");
     pendingGameInvites = [];
     gameInvitesInitialized = false;
     if (unsubscribeMyCoins) { unsubscribeMyCoins(); unsubscribeMyCoins = null; }
@@ -2843,6 +2865,12 @@ const MORNING_RACE_HOUR = 11;
 const MORNING_RACE_MINUTE = 30;
 const MORNING_RACE_SUFFIX = "-1130";
 const TWICE_DAILY_FROM = "2026-10-07";
+/* 管理者が作る手動レース（特別レース）：raceId は「YYYY-MM-DD-mHHMM」（例：2026-10-10-m1800）。
+   自動開催の raceId（「YYYY-MM-DD」「YYYY-MM-DD-1130」）とは形が違うので衝突しない。
+   予定（投票受付開始・終了・開催時刻・キャンセル）は derbyManualRaces/{raceId} に保存する */
+const MANUAL_RACE_ID_PATTERN = /^(\d{4}-\d{2}-\d{2})-m(\d{2})(\d{2})$/;
+/* 他のレースと開催時刻をこれ以上あける（演出・結果表示が重ならないように） */
+const MANUAL_RACE_MIN_GAP_MINUTES = 3;
 const ODDS_VIRTUAL_SEED_TOTAL = 200;
 
 /* style: start=逃げ / front=先行 / mid=差し / closer=追込 / stamina=スタミナ / longshot=大穴
@@ -2920,23 +2948,40 @@ function isMorningRaceId(raceId) {
   return String(raceId).endsWith(MORNING_RACE_SUFFIX);
 }
 
+function isManualRaceId(raceId) {
+  return MANUAL_RACE_ID_PATTERN.test(String(raceId));
+}
+
 function parseRaceIdToDate(raceId) {
+  const manual = String(raceId).match(MANUAL_RACE_ID_PATTERN);
+  if (manual) {
+    const [my, mm, md] = manual[1].split("-").map(Number);
+    return new Date(Date.UTC(my, mm - 1, md, Number(manual[2]), Number(manual[3]), 0, 0) - JST_OFFSET_MS);
+  }
   const [y, m, d] = String(raceId).slice(0, 10).split("-").map(Number);
   const morning = isMorningRaceId(raceId);
   return new Date(Date.UTC(y, m - 1, d, morning ? MORNING_RACE_HOUR : RACE_HOUR, morning ? MORNING_RACE_MINUTE : RACE_MINUTE, 0, 0) - JST_OFFSET_MS);
 }
 
 function makeRaceContextFromId(raceId) {
+  const manual = manualRaces.get(raceId);
+  if (manual) {
+    /* 手動レース：投票受付の開始・終了は管理者が決めた時刻 */
+    return { raceId, dayId: manual.dayId, raceTime: manual.raceTime, openTime: manual.openTime, closeTime: manual.closeTime, manual: true };
+  }
   const raceTime = parseRaceIdToDate(raceId);
   const closeTime = new Date(raceTime.getTime() - RACE_CLOSE_MINUTES_BEFORE * 60000);
   return { raceId, dayId: String(raceId).slice(0, 10), raceTime, closeTime };
 }
 
-/* その日（日本時間）に開催されるレース（開催時刻の早い順） */
+/* その日（日本時間）に開催されるレース（開催時刻の早い順）。キャンセルされていない手動レースも含む */
 function getRaceContextsForDay(dayId) {
   const ids = [];
   if (dayId >= TWICE_DAILY_FROM) ids.push(`${dayId}${MORNING_RACE_SUFFIX}`);
   ids.push(dayId);
+  manualRaces.forEach((race) => {
+    if (race.dayId === dayId && race.status !== "cancelled") ids.push(race.raceId);
+  });
   return ids.map(makeRaceContextFromId).sort((a, b) => a.raceTime - b.raceTime);
 }
 
@@ -2945,10 +2990,25 @@ function getRaceContextsAround(now) {
   return [-1, 0, 1].flatMap((offset) => getRaceContextsForDay(formatRaceId(new Date(now.getTime() + offset * DAY_MS))));
 }
 
-/* 投票の対象：締切前のいちばん早いレース。締切を過ぎたら、その瞬間から次の回（11:30→15:02→翌日11:30）が対象になる
+/* いま投票を受け付けているレース（開催時刻の早い順）。
+   ・自動開催の回は、これまでどおり「締切前のいちばん早い回」の1つだけ（前の回の締切から受付）
+   ・手動レースは、管理者が決めた受付開始〜受付終了のあいだだけ */
+function getOpenBettingRaceContexts(now = derbyNow()) {
+  const contexts = getRaceContextsAround(now);
+  const nextAuto = contexts.find((c) => !c.manual && now < c.closeTime);
+  const manualOpen = contexts.filter((c) => c.manual && now >= c.openTime && now < c.closeTime);
+  return [...(nextAuto ? [nextAuto] : []), ...manualOpen].sort((a, b) => a.raceTime - b.raceTime);
+}
+
+/* 受付中のレースが複数あるときに、投票フォームで選んだレース */
+let selectedBetRaceId = null;
+
+/* 投票の対象：受付中のいちばん早いレース（受付中が複数あるときは選んだレース）。
+   締切を過ぎたら、その瞬間から次の回（11:30→15:02→翌日11:30）が対象になる
    （1日のどこかの時間帯で投票が完全に止まることがないようにする） */
 function getActiveBettingRaceContext(now = derbyNow()) {
-  return getRaceContextsAround(now).find((c) => now < c.closeTime);
+  const open = getOpenBettingRaceContexts(now);
+  return open.find((c) => c.raceId === selectedBetRaceId) || open[0];
 }
 
 /* 直近に発走した（または、まさに発走中の）レース。演出・結果表示・精算の対象。 */
@@ -2965,7 +3025,7 @@ function getNextRaceStartContext(now = derbyNow()) {
 /* 画面に出すレース名（例：10/7 11:30） */
 function formatRaceLabel(raceId) {
   const [, m, d] = String(raceId).slice(0, 10).split("-").map(Number);
-  return `${m}/${d} ${formatJstHourMinute(parseRaceIdToDate(raceId))}`;
+  return `${m}/${d} ${formatJstHourMinute(parseRaceIdToDate(raceId))}${isManualRaceId(raceId) ? " 特別" : ""}`;
 }
 
 /* 右上のカウントダウンの文字（レース中は「レース中」、それ以外は次のレースまでの残り） */
@@ -3323,11 +3383,23 @@ betButton?.addEventListener("click", async () => {
        （馬券1枚につき1回だけ。払い戻しや外れでは減らさない）。
        万一 totalBetAmount の書き込みが拒否されても投票はできるよう、そのときは従来どおりの内容でやり直す
        （累計は derby-runner が馬券の記録から計算し直す） */
+    const manualRef = isManualRaceId(raceId) ? doc(db, "derbyManualRaces", raceId) : null;
     const placeBet = (withTotal) => runTransaction(db, async (transaction) => {
       const userRef = doc(db, "users", username);
       const userSnap = await transaction.get(userRef);
       const coins = userSnap.exists() ? Number(userSnap.data().coins || 0) : 0;
       if (coins < amount) throw new Error("NOT_ENOUGH_COINS");
+
+      /* 手動レース：受付時間内で、キャンセルされていないことを同じトランザクションの中で確かめ、
+         投票数（betCount）を増やす（投票があるレースは管理者がキャンセルできないようにするため） */
+      const manualSnap = manualRef ? await transaction.get(manualRef) : null;
+      if (manualRef) {
+        const race = manualSnap.exists() ? manualSnap.data() : null;
+        if (!race || race.status === "cancelled") throw new Error("MANUAL_RACE_CANCELLED");
+        const now = derbyNow();
+        if (now < toDateValue(race.openAt) || now >= toDateValue(race.closeAt)) throw new Error("MANUAL_RACE_CLOSED");
+        transaction.update(manualRef, { betCount: Number(race.betCount || 0) + 1 });
+      }
 
       const userUpdate = { coins: coins - amount };
       if (withTotal) userUpdate.totalBetAmount = Number(userSnap.data().totalBetAmount || 0) + amount;
@@ -3353,6 +3425,8 @@ betButton?.addEventListener("click", async () => {
   } catch (error) {
     console.error("投票エラー:", error);
     if (error.message === "NOT_ENOUGH_COINS") alert("ゆうcoinが足りません。");
+    else if (error.message === "MANUAL_RACE_CANCELLED") alert("このレースはキャンセルされました。");
+    else if (error.message === "MANUAL_RACE_CLOSED") alert("このレースは投票受付時間外です。");
     else alert("投票に失敗しました。");
   } finally {
     updateBetFormEnabled();
@@ -4063,6 +4137,7 @@ function ensureDerbyLiveStructure() {
   raceInfo.dataset.liveReady = "1";
   raceInfo.innerHTML = `
     <div id="raceScheduleLine" class="race-schedule-line"></div>
+    <div id="raceUpcomingLine" class="race-upcoming-line"></div>
     <div id="racePhaseBanner" class="race-phase-banner hidden"></div>
     <div id="raceCommentary" class="race-commentary hidden"></div>
     <div id="raceLeaderboard" class="race-leaderboard"></div>
@@ -4139,6 +4214,9 @@ function renderRaceInfo() {
   if (scheduleLine) {
     scheduleLine.textContent = `次のレース：${isToday ? "本日" : "明日"} ${formatJstHourMinute(activeContext.raceTime)}（${formatRaceLabel(activeContext.raceId)}）`;
   }
+
+  renderUpcomingRacesLine();
+  renderBetRaceSelect();
 
   /* 馬券表示は手元のデータ(myAllBets)だけで組み立てられるので、毎ティック更新してもチラつかない */
   renderMyActiveTickets();
@@ -4363,6 +4441,633 @@ function initializeSafeRace() {
   if (raceCountdownTimer) clearInterval(raceCountdownTimer);
   raceCountdownTimer = setInterval(tickDerbyCountdown, 150);
 }
+
+/* =========================================================
+   管理者（ゆうダービー管理・イベント管理）
+   ・管理者は Firebase Authentication の UID だけで判定する（メールアドレスや名前では判定しない）
+   ・管理者以外には管理画面・管理ボタンを表示しない
+   ※ Firestore のルールでの制限は今回は入れていない（画面で隠しているだけ）
+========================================================= */
+
+const ADMIN_UID = "g51wzTvJFsZiYEfre5aDuDckJXY2";
+
+function isAdminUser() {
+  return Boolean(currentUser && currentUser.uid === ADMIN_UID);
+}
+
+function updateAdminVisibility() {
+  const admin = isAdminUser();
+  document.getElementById("derbyAdminPanel")?.classList.toggle("hidden", !admin);
+  document.getElementById("eventAdminPanel")?.classList.toggle("hidden", !admin);
+  if (admin) {
+    renderManualRaceAdminList();
+    renderEventAdminList();
+  }
+}
+
+/* Firestore の Timestamp / Date / 文字列 → Date */
+function toDateValue(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value.toDate === "function") return value.toDate();
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/* 入力欄の日付（YYYY-MM-DD）と時刻（HH:MM）を日本時間として Date にする。正しくなければ null */
+function parseJstDateTimeInput(dateText, timeText) {
+  const dm = String(dateText || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const tm = String(timeText || "").match(/^(\d{2}):(\d{2})$/);
+  if (!dm || !tm) return null;
+  const [y, mo, d, h, mi] = [Number(dm[1]), Number(dm[2]), Number(dm[3]), Number(tm[1]), Number(tm[2])];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59) return null;
+  const date = new Date(Date.UTC(y, mo - 1, d, h, mi, 0, 0) - JST_OFFSET_MS);
+  /* 2/30 などの存在しない日付は弾く */
+  if (formatRaceId(date) !== `${dm[1]}-${dm[2]}-${dm[3]}`) return null;
+  return date;
+}
+
+function formatJstDateTime(date) {
+  if (!date) return "-";
+  const jst = toJstFields(date);
+  return `${jst.getUTCMonth() + 1}/${jst.getUTCDate()} ${formatJstHourMinute(date)}`;
+}
+
+/* 日本時間の「YYYY-MM-DD」と「HH:MM」（入力欄に入れる値） */
+function toJstInputValues(date) {
+  return { date: formatRaceId(date), time: formatJstHourMinute(date) };
+}
+
+/* ----- ゆうダービー：手動レース（特別レース） ----- */
+
+function listenManualRaces() {
+  if (unsubscribeManualRaces) { unsubscribeManualRaces(); unsubscribeManualRaces = null; }
+  const since = new Date(derbyNow().getTime() - 2 * DAY_MS);
+  unsubscribeManualRaces = onSnapshot(
+    query(collection(db, "derbyManualRaces"), where("raceAt", ">=", since)),
+    (snap) => {
+      const next = new Map();
+      snap.forEach((d) => {
+        const data = d.data();
+        if (!MANUAL_RACE_ID_PATTERN.test(d.id)) return;
+        const raceTime = toDateValue(data.raceAt), openTime = toDateValue(data.openAt), closeTime = toDateValue(data.closeAt);
+        if (!raceTime || !openTime || !closeTime) return;
+        next.set(d.id, {
+          raceId: d.id, dayId: d.id.slice(0, 10), raceTime, openTime, closeTime,
+          status: data.status || "scheduled", betCount: Number(data.betCount || 0)
+        });
+      });
+      manualRaces = next;
+      renderManualRaceAdminList();
+    },
+    (error) => console.error("手動レースの読み込みエラー:", error)
+  );
+}
+
+function getManualRaceStatusText(race, now = derbyNow()) {
+  if (race.status === "cancelled") return "キャンセル済み";
+  if (now < race.openTime) return "受付前";
+  if (now < race.closeTime) return "投票受付中";
+  if (now < race.raceTime) return "締切（開催待ち）";
+  return "開催済み";
+}
+
+function renderManualRaceAdminList() {
+  const el = document.getElementById("manualRaceAdminList");
+  if (!el || !isAdminUser()) return;
+  const now = derbyNow();
+  const races = [...manualRaces.values()].sort((a, b) => b.raceTime - a.raceTime);
+  if (races.length === 0) {
+    el.innerHTML = `<div class="empty-state">まだ手動レースはありません</div>`;
+    return;
+  }
+  el.innerHTML = races.map((race) => {
+    const canCancel = race.status !== "cancelled" && now < race.raceTime && race.betCount === 0;
+    const note = race.status !== "cancelled" && now < race.raceTime && race.betCount > 0 ? `<small>投票があるためキャンセルできません</small>` : "";
+    return `<div class="admin-item ${race.status === "cancelled" ? "cancelled" : ""}">
+      <div class="admin-item-main">
+        <b>${escapeHTML(formatRaceLabel(race.raceId))}</b>
+        <span class="admin-badge">${escapeHTML(getManualRaceStatusText(race, now))}</span>
+        <div class="admin-item-sub">受付 ${escapeHTML(formatJstDateTime(race.openTime))}〜${escapeHTML(formatJstHourMinute(race.closeTime))} ／ 投票 ${race.betCount}件</div>
+        ${note}
+      </div>
+      ${canCancel ? `<button type="button" class="secondary" data-cancel-manual-race="${escapeHTML(race.raceId)}">キャンセル</button>` : ""}
+    </div>`;
+  }).join("");
+}
+
+function validateManualRaceInput(dateText, openText, closeText, startText) {
+  const raceTime = parseJstDateTimeInput(dateText, startText);
+  const openTime = parseJstDateTimeInput(dateText, openText);
+  const closeTime = parseJstDateTimeInput(dateText, closeText);
+  if (!raceTime || !openTime || !closeTime) return { error: "開催日と時刻を正しく入力してください。" };
+  const now = derbyNow();
+  if (dateText < formatRaceId(now)) return { error: "開催日が過去の日付です。" };
+  if (raceTime <= now) return { error: "レース開催の日時が過去です。" };
+  if (openTime >= closeTime) return { error: "投票受付開始は、投票受付終了より前の時刻にしてください。" };
+  if (closeTime >= raceTime) return { error: "投票受付終了は、レース開催より前の時刻にしてください。" };
+  if (raceTime.getTime() - now.getTime() > 60 * DAY_MS) return { error: "レースは60日以内の日付で作成してください。" };
+
+  const raceId = `${dateText}-m${startText.replace(":", "")}`;
+  if (!MANUAL_RACE_ID_PATTERN.test(raceId)) return { error: "開催日と時刻を正しく入力してください。" };
+  /* 同じ日の他のレース（自動開催・手動レース）と開催時刻が近すぎないか */
+  const gap = MANUAL_RACE_MIN_GAP_MINUTES * 60000;
+  const near = getRaceContextsForDay(dateText).find((c) => c.raceId !== raceId && Math.abs(c.raceTime - raceTime) < gap);
+  if (near) return { error: `${formatRaceLabel(near.raceId)} のレースと開催時刻が近すぎます（前後${MANUAL_RACE_MIN_GAP_MINUTES}分以上あけてください）。` };
+  return { raceId, raceTime, openTime, closeTime };
+}
+
+let manualRaceSubmitting = false;
+
+document.getElementById("manualRaceForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!isAdminUser() || manualRaceSubmitting) return;
+  const errorEl = document.getElementById("manualRaceFormError");
+  const button = document.getElementById("manualRaceSubmitButton");
+  const value = (id) => document.getElementById(id)?.value || "";
+  const result = validateManualRaceInput(value("manualRaceDateInput"), value("manualRaceOpenInput"), value("manualRaceCloseInput"), value("manualRaceStartInput"));
+  if (result.error) { if (errorEl) errorEl.textContent = result.error; return; }
+
+  manualRaceSubmitting = true;
+  if (button) button.disabled = true;
+  if (errorEl) errorEl.textContent = "";
+  try {
+    /* 同じ raceId（日付＋開催時刻）が無いときだけ作る。連打・再読み込み・複数端末でも1つだけになる */
+    await runTransaction(db, async (transaction) => {
+      const ref = doc(db, "derbyManualRaces", result.raceId);
+      const snap = await transaction.get(ref);
+      const raceSnap = await transaction.get(doc(db, "races", result.raceId));
+      if (raceSnap.exists()) throw new Error("RACE_EXISTS");
+      if (snap.exists() && snap.data().status !== "cancelled") throw new Error("DUPLICATE");
+      transaction.set(ref, {
+        raceId: result.raceId,
+        dayId: result.raceId.slice(0, 10),
+        openAt: result.openTime,
+        closeAt: result.closeTime,
+        raceAt: result.raceTime,
+        status: "scheduled",
+        betCount: 0,
+        createdByUid: currentUser.uid,
+        createdAt: serverTimestamp()
+      });
+    });
+    showAppToast("🏇 ゆうダービー管理", `${formatRaceLabel(result.raceId)} のレースを作成しました`);
+    document.getElementById("manualRaceForm")?.reset();
+  } catch (error) {
+    const messages = {
+      DUPLICATE: "同じ日時の手動レースはすでに作成されています。",
+      RACE_EXISTS: "この日時のレースはすでに開催されています。別の時刻にしてください。"
+    };
+    if (!messages[error.message]) console.error("手動レース作成エラー:", error);
+    if (errorEl) errorEl.textContent = messages[error.message] || "レースを作成できませんでした。通信状態を確認して、もう一度お試しください。";
+  } finally {
+    manualRaceSubmitting = false;
+    if (button) button.disabled = false;
+  }
+});
+
+/* キャンセル：開催前で、まだ投票が1件も無いレースだけ（投票数はトランザクションの中で確かめる） */
+document.getElementById("manualRaceAdminList")?.addEventListener("click", async (event) => {
+  const raceId = event.target?.closest?.("[data-cancel-manual-race]")?.dataset.cancelManualRace;
+  if (!raceId || !isAdminUser()) return;
+  if (!confirm(`${formatRaceLabel(raceId)} のレースをキャンセルしますか？\n（キャンセルすると元に戻せません）`)) return;
+  try {
+    await runTransaction(db, async (transaction) => {
+      const ref = doc(db, "derbyManualRaces", raceId);
+      const snap = await transaction.get(ref);
+      if (!snap.exists() || snap.data().status === "cancelled") throw new Error("ALREADY_CANCELLED");
+      if (Number(snap.data().betCount || 0) > 0) throw new Error("HAS_BETS");
+      if (derbyNow() >= toDateValue(snap.data().raceAt)) throw new Error("ALREADY_STARTED");
+      transaction.update(ref, { status: "cancelled", cancelledAt: serverTimestamp(), cancelledByUid: currentUser.uid });
+    });
+    showAppToast("🏇 ゆうダービー管理", `${formatRaceLabel(raceId)} のレースをキャンセルしました`);
+  } catch (error) {
+    const messages = {
+      ALREADY_CANCELLED: "このレースはすでにキャンセルされています。",
+      HAS_BETS: "投票があるため、このレースはキャンセルできません。",
+      ALREADY_STARTED: "開催時刻を過ぎたレースはキャンセルできません。"
+    };
+    if (!messages[error.message]) console.error("手動レースのキャンセルエラー:", error);
+    alert(messages[error.message] || "キャンセルできませんでした。もう一度お試しください。");
+  }
+});
+
+/* 投票するレースの選択（受付中のレースが複数あるときだけ表示） */
+function renderBetRaceSelect() {
+  const select = document.getElementById("betRaceSelect");
+  const label = document.getElementById("betRaceLabel");
+  if (!select) return;
+  const now = derbyNow();
+  const open = getOpenBettingRaceContexts(now);
+  const active = getActiveBettingRaceContext(now);
+  const multiple = open.length > 1;
+  select.classList.toggle("hidden", !multiple);
+  label?.classList.toggle("hidden", !multiple);
+  const key = open.map((c) => c.raceId).join("|");
+  if (select.dataset.key !== key) {
+    select.dataset.key = key;
+    select.innerHTML = open.map((c) => {
+      const day = c.dayId === formatRaceId(now) ? "本日" : (c.raceTime > now ? "明日" : "");
+      return `<option value="${escapeHTML(c.raceId)}">${escapeHTML(`${day} ${formatJstHourMinute(c.raceTime)}${c.manual ? " 特別レース" : ""}（締切 ${formatJstHourMinute(c.closeTime)}）`)}</option>`;
+    }).join("");
+  }
+  if (active && select.value !== active.raceId) select.value = active.raceId;
+}
+
+document.getElementById("betRaceSelect")?.addEventListener("change", (event) => {
+  selectedBetRaceId = event.target.value || null;
+  resetBetHorsesSelection();
+  refreshDerbySubscriptionsIfNeeded();
+  renderOdds();
+  renderRaceInfo();
+});
+
+/* 今後のレース（自動開催・手動レース）を一行で案内する */
+function renderUpcomingRacesLine() {
+  const el = document.getElementById("raceUpcomingLine");
+  if (!el) return;
+  const now = derbyNow();
+  const upcoming = getRaceContextsAround(now).filter((c) => c.raceTime > now).slice(0, 4);
+  const text = upcoming.map((c) => {
+    const day = c.dayId === formatRaceId(now) ? "本日" : "明日";
+    return `${day} ${formatJstHourMinute(c.raceTime)}${c.manual ? `（特別・受付 ${formatJstHourMinute(c.openTime)}〜${formatJstHourMinute(c.closeTime)}）` : ""}`;
+  }).join(" ／ ");
+  const html = text ? `今後のレース：${escapeHTML(text)}` : "";
+  if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
+}
+
+/* =========================================================
+   イベント
+   ・events/{eventId}：イベントの内容（管理者が作成・編集・キャンセル）
+   ・eventParticipants/{eventId}_{uid}：参加（1人1件。参加と取り消しはトランザクションで人数と一緒に更新）
+   ・eventId は「開催日時＋タイトル」から決めるので、同じイベントを二重に作れない
+========================================================= */
+
+function hashText(text) {
+  let h = 2166136261;
+  for (const ch of String(text)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+
+function makeEventId(startAt, title) {
+  const jst = toJstFields(startAt);
+  const stamp = `${jst.getUTCFullYear()}${String(jst.getUTCMonth() + 1).padStart(2, "0")}${String(jst.getUTCDate()).padStart(2, "0")}-${String(jst.getUTCHours()).padStart(2, "0")}${String(jst.getUTCMinutes()).padStart(2, "0")}`;
+  return `ev-${stamp}-${hashText(String(title).trim().toLowerCase())}`;
+}
+
+function normalizeEvent(id, data) {
+  return {
+    id,
+    title: data.title || "",
+    description: data.description || "",
+    location: data.location || "",
+    startAt: toDateValue(data.startAt),
+    entryOpenAt: toDateValue(data.entryOpenAt),
+    entryCloseAt: toDateValue(data.entryCloseAt),
+    capacity: Number(data.capacity || 0),
+    participantCount: Number(data.participantCount || 0),
+    status: data.status || "scheduled",
+    createdByUid: data.createdByUid || "",
+    createdByName: data.createdByName || ""
+  };
+}
+
+function getEventPhase(ev, now = derbyNow()) {
+  if (ev.status === "cancelled") return "cancelled";
+  if (!ev.startAt || now >= ev.startAt) return "held";
+  if (now < ev.entryOpenAt) return "before";
+  if (now < ev.entryCloseAt) return "open";
+  return "closed";
+}
+
+const EVENT_PHASE_LABELS = { before: "受付前", open: "受付中", closed: "受付終了", held: "開催済み", cancelled: "キャンセル" };
+
+let adminListsRefreshTimer = null;
+
+function startAdminListsRefresh() {
+  if (adminListsRefreshTimer) return;
+  adminListsRefreshTimer = setInterval(() => {
+    if (!currentUser) return;
+    if (eventsView?.classList.contains("active")) { renderEventsList(); renderEventAdminList(); }
+    if (derbyView?.classList.contains("active")) renderManualRaceAdminList();
+  }, 15000);
+}
+
+function listenEvents() {
+  startAdminListsRefresh();
+  if (unsubscribeEvents) { unsubscribeEvents(); unsubscribeEvents = null; }
+  if (unsubscribeMyEventEntries) { unsubscribeMyEventEntries(); unsubscribeMyEventEntries = null; }
+  if (!currentUser) return;
+  const since = new Date(derbyNow().getTime() - 14 * DAY_MS);
+  let firstLoad = true;
+  unsubscribeEvents = onSnapshot(
+    query(collection(db, "events"), where("startAt", ">=", since)),
+    (snap) => {
+      const previous = new Map(latestEvents.map((e) => [e.id, e]));
+      latestEvents = snap.docs.map((d) => normalizeEvent(d.id, d.data())).filter((e) => e.startAt).sort((a, b) => a.startAt - b.startAt);
+      /* 参加しているイベントがキャンセルされたら知らせる */
+      if (!firstLoad) {
+        latestEvents.forEach((ev) => {
+          if (ev.status === "cancelled" && previous.get(ev.id)?.status !== "cancelled" && myEventEntries.has(ev.id)) {
+            showAppToast("🎪 イベント", `「${ev.title}」はキャンセルされました`);
+          }
+        });
+      }
+      firstLoad = false;
+      renderEventsList();
+      renderEventAdminList();
+    },
+    (error) => console.error("イベントの読み込みエラー:", error)
+  );
+  unsubscribeMyEventEntries = onSnapshot(
+    query(collection(db, "eventParticipants"), where("uid", "==", currentUser.uid)),
+    (snap) => {
+      myEventEntries = new Map(snap.docs.map((d) => [d.data().eventId, d.id]));
+      renderEventsList();
+    },
+    (error) => console.error("イベント参加状況の読み込みエラー:", error)
+  );
+}
+
+function renderEventsList() {
+  const el = document.getElementById("eventsList");
+  if (!el) return;
+  const now = derbyNow();
+  const visible = latestEvents.filter((ev) => ev.startAt.getTime() > now.getTime() - 3 * DAY_MS);
+  if (visible.length === 0) {
+    el.innerHTML = `<div class="empty-state">いま予定されているイベントはありません</div>`;
+    return;
+  }
+  el.innerHTML = visible.map((ev) => {
+    const phase = getEventPhase(ev, now);
+    const joined = myEventEntries.has(ev.id);
+    const full = ev.capacity > 0 && ev.participantCount >= ev.capacity;
+    let action = "";
+    if (phase === "open" && joined) action = `<button type="button" class="secondary" data-event-leave="${escapeHTML(ev.id)}">参加をやめる</button>`;
+    else if (phase === "open" && full) action = `<span class="event-note">定員に達しました</span>`;
+    else if (phase === "open") action = `<button type="button" data-event-join="${escapeHTML(ev.id)}">参加する</button>`;
+    else if (phase === "before") action = `<span class="event-note">受付開始：${escapeHTML(formatJstDateTime(ev.entryOpenAt))}</span>`;
+    return `<div class="event-card ${phase === "cancelled" ? "cancelled" : ""}">
+      ${phase === "cancelled" ? `<div class="event-cancelled-banner">このイベントはキャンセルされました</div>` : ""}
+      <div class="event-card-head">
+        <b>${escapeHTML(ev.title)}</b>
+        <span class="admin-badge">${EVENT_PHASE_LABELS[phase]}</span>
+        ${joined ? `<span class="event-joined">✔ 参加中</span>` : ""}
+      </div>
+      <div class="event-meta">📅 ${escapeHTML(formatJstDateTime(ev.startAt))}${ev.location ? `　📍 ${escapeHTML(ev.location)}` : ""}</div>
+      ${ev.description ? `<div class="event-desc">${escapeHTML(ev.description)}</div>` : ""}
+      <div class="event-meta">受付 ${escapeHTML(formatJstDateTime(ev.entryOpenAt))}〜${escapeHTML(formatJstDateTime(ev.entryCloseAt))} ／ 参加 ${ev.participantCount}人${ev.capacity > 0 ? ` / 定員 ${ev.capacity}人` : ""}</div>
+      <div class="event-actions">${action}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderEventAdminList() {
+  const el = document.getElementById("eventAdminList");
+  if (!el || !isAdminUser()) return;
+  const now = derbyNow();
+  const mine = latestEvents.filter((ev) => ev.createdByUid === currentUser.uid).sort((a, b) => b.startAt - a.startAt);
+  if (mine.length === 0) {
+    el.innerHTML = `<div class="empty-state">まだイベントはありません</div>`;
+    return;
+  }
+  el.innerHTML = mine.map((ev) => {
+    const phase = getEventPhase(ev, now);
+    const canEdit = phase === "before";
+    const canCancel = phase !== "cancelled" && phase !== "held";
+    return `<div class="admin-item ${phase === "cancelled" ? "cancelled" : ""}">
+      <div class="admin-item-main">
+        <b>${escapeHTML(ev.title)}</b>
+        <span class="admin-badge">${EVENT_PHASE_LABELS[phase]}</span>
+        <div class="admin-item-sub">📅 ${escapeHTML(formatJstDateTime(ev.startAt))} ／ 参加 ${ev.participantCount}人${ev.capacity > 0 ? ` / 定員 ${ev.capacity}人` : ""}</div>
+        <div class="admin-participants hidden" data-participants-for="${escapeHTML(ev.id)}"></div>
+      </div>
+      <div class="admin-item-buttons">
+        <button type="button" class="secondary" data-event-participants="${escapeHTML(ev.id)}">参加者</button>
+        ${canEdit ? `<button type="button" class="secondary" data-event-edit="${escapeHTML(ev.id)}">編集</button>` : ""}
+        ${canCancel ? `<button type="button" class="secondary danger" data-event-cancel="${escapeHTML(ev.id)}">キャンセル</button>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+let editingEventId = null;
+let eventSubmitting = false;
+
+function readEventForm() {
+  const value = (id) => (document.getElementById(id)?.value || "").trim();
+  const title = value("eventTitleInput");
+  const startAt = parseJstDateTimeInput(value("eventDateInput"), value("eventTimeInput"));
+  const entryOpenAt = parseJstDateTimeInput(value("eventEntryOpenDateInput"), value("eventEntryOpenTimeInput"));
+  const entryCloseAt = parseJstDateTimeInput(value("eventEntryCloseDateInput"), value("eventEntryCloseTimeInput"));
+  const capacityText = value("eventCapacityInput");
+  const capacity = capacityText === "" ? 0 : Number(capacityText);
+  const now = derbyNow();
+  if (!title) return { error: "タイトルを入力してください。" };
+  if (!startAt || !entryOpenAt || !entryCloseAt) return { error: "日付と時刻を正しく入力してください。" };
+  if (startAt <= now) return { error: "開催日時が過去です。" };
+  if (entryOpenAt >= entryCloseAt) return { error: "受付開始は、受付終了より前にしてください。" };
+  if (entryCloseAt > startAt) return { error: "受付終了は、開催日時より前（同じ時刻まで）にしてください。" };
+  if (!Number.isInteger(capacity) || capacity < 0 || capacity > 999) return { error: "定員は0〜999の整数で入力してください。" };
+  return {
+    title: title.slice(0, 40),
+    description: value("eventDescriptionInput").slice(0, 300),
+    location: value("eventLocationInput").slice(0, 40),
+    startAt, entryOpenAt, entryCloseAt, capacity
+  };
+}
+
+function resetEventForm() {
+  editingEventId = null;
+  document.getElementById("eventForm")?.reset();
+  const submit = document.getElementById("eventSubmitButton");
+  if (submit) submit.textContent = "イベントを作成する";
+  document.getElementById("eventEditCancelButton")?.classList.add("hidden");
+  const errorEl = document.getElementById("eventFormError");
+  if (errorEl) errorEl.textContent = "";
+}
+
+document.getElementById("eventForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!isAdminUser() || eventSubmitting) return;
+  const errorEl = document.getElementById("eventFormError");
+  const button = document.getElementById("eventSubmitButton");
+  const input = readEventForm();
+  if (input.error) { if (errorEl) errorEl.textContent = input.error; return; }
+
+  eventSubmitting = true;
+  if (button) button.disabled = true;
+  if (errorEl) errorEl.textContent = "";
+  try {
+    if (editingEventId) {
+      /* 編集：開催前かつ受付開始前で、キャンセルされていないイベントだけ（トランザクションの中で確かめる） */
+      const id = editingEventId;
+      await runTransaction(db, async (transaction) => {
+        const ref = doc(db, "events", id);
+        const snap = await transaction.get(ref);
+        if (!snap.exists()) throw new Error("NOT_FOUND");
+        const ev = normalizeEvent(id, snap.data());
+        if (getEventPhase(ev) !== "before") throw new Error("NOT_EDITABLE");
+        transaction.update(ref, { ...input, updatedAt: serverTimestamp() });
+      });
+      showAppToast("🎪 イベント管理", `「${input.title}」を更新しました`);
+    } else {
+      /* 作成：同じ開催日時＋タイトルのイベントが無いときだけ作る（連打・再読み込み・複数端末・再送でも1つだけ） */
+      const id = makeEventId(input.startAt, input.title);
+      await runTransaction(db, async (transaction) => {
+        const ref = doc(db, "events", id);
+        const snap = await transaction.get(ref);
+        if (snap.exists()) throw new Error("DUPLICATE");
+        transaction.set(ref, {
+          ...input,
+          status: "scheduled",
+          participantCount: 0,
+          createdByUid: currentUser.uid,
+          createdByName: username || "",
+          createdAt: serverTimestamp()
+        });
+      });
+      showAppToast("🎪 イベント管理", `「${input.title}」を作成しました`);
+    }
+    resetEventForm();
+  } catch (error) {
+    const messages = {
+      DUPLICATE: "同じ日時・同じタイトルのイベントはすでに作成されています。",
+      NOT_FOUND: "このイベントは見つかりませんでした。",
+      NOT_EDITABLE: "受付開始後・開催後・キャンセル済みのイベントは編集できません。"
+    };
+    if (!messages[error.message]) console.error("イベント保存エラー:", error);
+    if (errorEl) errorEl.textContent = messages[error.message] || "保存できませんでした。通信状態を確認して、もう一度お試しください。";
+  } finally {
+    eventSubmitting = false;
+    if (button) button.disabled = false;
+  }
+});
+
+document.getElementById("eventEditCancelButton")?.addEventListener("click", resetEventForm);
+
+function startEditingEvent(id) {
+  const ev = latestEvents.find((e) => e.id === id);
+  if (!ev || getEventPhase(ev) !== "before") return alert("受付開始後・開催後・キャンセル済みのイベントは編集できません。");
+  editingEventId = id;
+  const set = (inputId, value) => { const el = document.getElementById(inputId); if (el) el.value = value; };
+  set("eventTitleInput", ev.title);
+  set("eventDescriptionInput", ev.description);
+  set("eventLocationInput", ev.location);
+  const start = toJstInputValues(ev.startAt), open = toJstInputValues(ev.entryOpenAt), close = toJstInputValues(ev.entryCloseAt);
+  set("eventDateInput", start.date); set("eventTimeInput", start.time);
+  set("eventEntryOpenDateInput", open.date); set("eventEntryOpenTimeInput", open.time);
+  set("eventEntryCloseDateInput", close.date); set("eventEntryCloseTimeInput", close.time);
+  set("eventCapacityInput", ev.capacity ? String(ev.capacity) : "");
+  const submit = document.getElementById("eventSubmitButton");
+  if (submit) submit.textContent = "変更を保存する";
+  document.getElementById("eventEditCancelButton")?.classList.remove("hidden");
+  document.getElementById("eventForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function cancelEvent(id) {
+  const ev = latestEvents.find((e) => e.id === id);
+  if (!ev) return;
+  const who = ev.participantCount > 0 ? `\n参加者が${ev.participantCount}人います。参加者には「キャンセルされました」と表示されます。` : "";
+  if (!confirm(`「${ev.title}」をキャンセルしますか？${who}\n（キャンセルすると元に戻せません）`)) return;
+  try {
+    await runTransaction(db, async (transaction) => {
+      const ref = doc(db, "events", id);
+      const snap = await transaction.get(ref);
+      if (!snap.exists()) throw new Error("NOT_FOUND");
+      const phase = getEventPhase(normalizeEvent(id, snap.data()));
+      if (phase === "cancelled") throw new Error("ALREADY_CANCELLED");
+      if (phase === "held") throw new Error("ALREADY_HELD");
+      transaction.update(ref, { status: "cancelled", cancelledAt: serverTimestamp(), cancelledByUid: currentUser.uid });
+    });
+    if (editingEventId === id) resetEventForm();
+    showAppToast("🎪 イベント管理", `「${ev.title}」をキャンセルしました`);
+  } catch (error) {
+    const messages = { NOT_FOUND: "このイベントは見つかりませんでした。", ALREADY_CANCELLED: "このイベントはすでにキャンセルされています。", ALREADY_HELD: "開催時刻を過ぎたイベントはキャンセルできません。" };
+    if (!messages[error.message]) console.error("イベントのキャンセルエラー:", error);
+    alert(messages[error.message] || "キャンセルできませんでした。もう一度お試しください。");
+  }
+}
+
+async function toggleEventParticipants(id) {
+  const box = document.querySelector(`[data-participants-for="${CSS.escape(id)}"]`);
+  if (!box) return;
+  if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  box.textContent = "読み込み中…";
+  try {
+    const snap = await getDocs(query(collection(db, "eventParticipants"), where("eventId", "==", id)));
+    const names = snap.docs.map((d) => d.data()).sort((a, b) => (toDateValue(a.joinedAt) || 0) - (toDateValue(b.joinedAt) || 0)).map((p) => p.username || "（名前なし）");
+    box.innerHTML = names.length ? `参加者（${names.length}人）：${names.map(escapeHTML).join("、")}` : "まだ参加者はいません";
+  } catch (error) {
+    console.error("参加者の読み込みエラー:", error);
+    box.textContent = "参加者を読み込めませんでした";
+  }
+}
+
+document.getElementById("eventAdminList")?.addEventListener("click", (event) => {
+  if (!isAdminUser()) return;
+  const target = event.target?.closest?.("button");
+  if (!target) return;
+  if (target.dataset.eventParticipants) toggleEventParticipants(target.dataset.eventParticipants);
+  if (target.dataset.eventEdit) startEditingEvent(target.dataset.eventEdit);
+  if (target.dataset.eventCancel) cancelEvent(target.dataset.eventCancel);
+});
+
+/* 参加・取り消し：受付中のイベントだけ。参加者の記録と人数を同じトランザクションで更新する
+   （参加者の記録は「イベントID_UID」なので、連打・複数端末でも1人1件） */
+async function joinEvent(id) {
+  try {
+    await runTransaction(db, async (transaction) => {
+      const ref = doc(db, "events", id);
+      const entryRef = doc(db, "eventParticipants", `${id}_${currentUser.uid}`);
+      const snap = await transaction.get(ref);
+      const entrySnap = await transaction.get(entryRef);
+      if (!snap.exists()) throw new Error("NOT_FOUND");
+      const ev = normalizeEvent(id, snap.data());
+      const phase = getEventPhase(ev);
+      if (phase === "cancelled") throw new Error("CANCELLED");
+      if (phase !== "open") throw new Error("NOT_OPEN");
+      if (entrySnap.exists()) return;
+      if (ev.capacity > 0 && ev.participantCount >= ev.capacity) throw new Error("FULL");
+      transaction.set(entryRef, { eventId: id, uid: currentUser.uid, username: username || "", joinedAt: serverTimestamp() });
+      transaction.update(ref, { participantCount: ev.participantCount + 1 });
+    });
+  } catch (error) {
+    const messages = { NOT_FOUND: "このイベントは見つかりませんでした。", CANCELLED: "このイベントはキャンセルされました。", NOT_OPEN: "いまは参加受付の時間外です。", FULL: "定員に達したため参加できません。" };
+    if (!messages[error.message]) console.error("イベント参加エラー:", error);
+    alert(messages[error.message] || "参加できませんでした。もう一度お試しください。");
+  }
+}
+
+async function leaveEvent(id) {
+  if (!confirm("このイベントへの参加をやめますか？")) return;
+  try {
+    await runTransaction(db, async (transaction) => {
+      const ref = doc(db, "events", id);
+      const entryRef = doc(db, "eventParticipants", `${id}_${currentUser.uid}`);
+      const snap = await transaction.get(ref);
+      const entrySnap = await transaction.get(entryRef);
+      if (!snap.exists()) throw new Error("NOT_FOUND");
+      const ev = normalizeEvent(id, snap.data());
+      if (getEventPhase(ev) !== "open") throw new Error("NOT_OPEN");
+      if (!entrySnap.exists()) return;
+      transaction.delete(entryRef);
+      transaction.update(ref, { participantCount: Math.max(0, ev.participantCount - 1) });
+    });
+  } catch (error) {
+    const messages = { NOT_FOUND: "このイベントは見つかりませんでした。", NOT_OPEN: "受付期間を過ぎたため、参加の取り消しはできません。" };
+    if (!messages[error.message]) console.error("イベント参加取り消しエラー:", error);
+    alert(messages[error.message] || "取り消せませんでした。もう一度お試しください。");
+  }
+}
+
+document.getElementById("eventsList")?.addEventListener("click", (event) => {
+  const target = event.target?.closest?.("button");
+  if (!target || !currentUser) return;
+  if (target.dataset.eventJoin) joinEvent(target.dataset.eventJoin);
+  if (target.dataset.eventLeave) leaveEvent(target.dataset.eventLeave);
+});
 
 /* =========================================================
    ゲーム部屋 共通
