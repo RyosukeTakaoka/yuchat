@@ -1,6 +1,7 @@
 /* =========================================================
    ゆうダービー 自動開催（GitHub Actions から毎日実行）
 
+   毎日 11:30 と 15:02（日本時間）の2回開催。
    誰もサイトを開いていなくても、開催時刻を過ぎたレースについて
      1. races/{raceId} にレース結果を作る（まだ無ければ）
      2. そのレースの未精算の馬券をすべて精算し、当たった人のコインを増やす
@@ -17,7 +18,7 @@
      FIREBASE_SERVICE_ACCOUNT  サービスアカウントの鍵（JSON）。GitHub Secrets に登録する
      FIRESTORE_EMULATOR_HOST   テスト用（Emulator を使うとき）
      DERBY_NOW                 テスト用（現在時刻を ISO 形式で上書き）
-     DERBY_WAIT_FOR_RACE       "1" なら、今日の開催時刻の前に起動したときは開催時刻まで待ってから実行する
+     DERBY_WAIT_FOR_RACE       "1" なら、次の開催時刻（11:30 か 15:02）の前に起動したときは開催時刻まで待ってから実行する
                                （GitHub の定期実行は15〜20分ほど遅れるので、早めに起動して待つ）
      GITHUB_STEP_SUMMARY       GitHub Actions が設定する。実行結果の表をここに書き出す
 ========================================================= */
@@ -46,6 +47,13 @@ const SAFE_RACE_HORSES = [
 
 /* ----- ゆうcoin（script.js と同じ） ----- */
 const YUU_BONUS_COINS = 500;
+
+/* 1日2回開催：11:30 の回（raceId は「YYYY-MM-DD-1130」）。15:02 の回の raceId は従来どおり「YYYY-MM-DD」。
+   11:30 の回は TWICE_DAILY_FROM の日から（それより前の日にさかのぼって作らない）。script.js と同じ設定にすること */
+const MORNING_RACE_HOUR = 11;
+const MORNING_RACE_MINUTE = 30;
+const MORNING_RACE_SUFFIX = "-1130";
+const TWICE_DAILY_FROM = "2026-10-07";
 
 /* 開催時刻は日本時間。何日前までさかのぼって「作られていないレース・未精算の馬券」を処理するか */
 const JST_OFFSET_HOURS = 9;
@@ -207,14 +215,20 @@ function computePayouts(allBets, resultOrder) {
 
 /* ----- 日付（日本時間） ----- */
 
-/* raceId（YYYY-MM-DD、日本時間の日付）と、その日の開催時刻 */
-function getRaceForJstDay(now, daysAgo) {
+/* その日（日本時間）に開催されるレースの raceId と開催時刻（開催時刻の早い順）
+   ・11:30 の回：「YYYY-MM-DD-1130」（TWICE_DAILY_FROM の日から）
+   ・15:02 の回：「YYYY-MM-DD」（従来どおり） */
+export function getRacesForJstDay(now, daysAgo) {
   const jst = new Date(now.getTime() + JST_OFFSET_HOURS * 3600 * 1000);
   const y = jst.getUTCFullYear(), m = jst.getUTCMonth(), d = jst.getUTCDate() - daysAgo;
-  const raceTime = new Date(Date.UTC(y, m, d, RACE_HOUR - JST_OFFSET_HOURS, RACE_MINUTE, 0, 0));
   const day = new Date(Date.UTC(y, m, d));
-  const raceId = `${day.getUTCFullYear()}-${String(day.getUTCMonth() + 1).padStart(2, "0")}-${String(day.getUTCDate()).padStart(2, "0")}`;
-  return { raceId, raceTime };
+  const dayId = `${day.getUTCFullYear()}-${String(day.getUTCMonth() + 1).padStart(2, "0")}-${String(day.getUTCDate()).padStart(2, "0")}`;
+  const at = (hour, minute) => new Date(Date.UTC(y, m, d, hour - JST_OFFSET_HOURS, minute, 0, 0));
+
+  const races = [];
+  if (dayId >= TWICE_DAILY_FROM) races.push({ raceId: `${dayId}${MORNING_RACE_SUFFIX}`, raceTime: at(MORNING_RACE_HOUR, MORNING_RACE_MINUTE) });
+  races.push({ raceId: dayId, raceTime: at(RACE_HOUR, RACE_MINUTE) });
+  return races;
 }
 
 /* ----- 処理本体 ----- */
@@ -298,49 +312,50 @@ export async function runDerby({ db, now = new Date(), lookbackDays = LOOKBACK_D
   const summary = [];
 
   for (let daysAgo = lookbackDays; daysAgo >= 0; daysAgo--) {
-    const { raceId, raceTime } = getRaceForJstDay(now, daysAgo);
-    if (now < raceTime) continue; /* まだ開催時刻になっていない */
+    for (const { raceId, raceTime } of getRacesForJstDay(now, daysAgo)) {
+      if (now < raceTime) continue; /* まだ開催時刻になっていない */
 
-    const logRef = db.collection("raceLogs").doc(raceId);
-    const entry = { raceId, status: "ok" };
+      const logRef = db.collection("raceLogs").doc(raceId);
+      const entry = { raceId, status: "ok" };
 
-    try {
-      const { created, race } = await ensureRaceResult(db, raceId, raceTime);
-      entry.result = created ? "created" : `exists(${race.generatedBy || "client"})`;
-
-      const settle = await settleRaceBets(db, raceId, race.resultOrder);
-      Object.assign(entry, settle);
-      if (settle.errors.length) entry.status = "error";
-
-      await logRef.set({
-        raceId,
-        scheduledAt: Timestamp.fromDate(raceTime),
-        lastRunnerRunAt: FieldValue.serverTimestamp(),
-        lastRunnerStatus: entry.status,
-        lastRunnerError: settle.errors.join("\n").slice(0, 1500) || null,
-        betsTotal: settle.betsTotal,
-        betsSettledByRunner: FieldValue.increment(settle.settledNow),
-        payoutTotalByRunner: FieldValue.increment(settle.payoutTotal),
-        unsettledAfterRun: settle.unsettledRemaining
-      }, { merge: true });
-    } catch (error) {
-      entry.status = "error";
-      entry.error = error.message || String(error);
       try {
+        const { created, race } = await ensureRaceResult(db, raceId, raceTime);
+        entry.result = created ? "created" : `exists(${race.generatedBy || "client"})`;
+
+        const settle = await settleRaceBets(db, raceId, race.resultOrder);
+        Object.assign(entry, settle);
+        if (settle.errors.length) entry.status = "error";
+
         await logRef.set({
           raceId,
           scheduledAt: Timestamp.fromDate(raceTime),
           lastRunnerRunAt: FieldValue.serverTimestamp(),
-          lastRunnerStatus: "error",
-          lastRunnerError: entry.error.slice(0, 1500)
+          lastRunnerStatus: entry.status,
+          lastRunnerError: settle.errors.join("\n").slice(0, 1500) || null,
+          betsTotal: settle.betsTotal,
+          betsSettledByRunner: FieldValue.increment(settle.settledNow),
+          payoutTotalByRunner: FieldValue.increment(settle.payoutTotal),
+          unsettledAfterRun: settle.unsettledRemaining
         }, { merge: true });
-      } catch (logError) {
-        entry.logError = logError.message || String(logError);
+      } catch (error) {
+        entry.status = "error";
+        entry.error = error.message || String(error);
+        try {
+          await logRef.set({
+            raceId,
+            scheduledAt: Timestamp.fromDate(raceTime),
+            lastRunnerRunAt: FieldValue.serverTimestamp(),
+            lastRunnerStatus: "error",
+            lastRunnerError: entry.error.slice(0, 1500)
+          }, { merge: true });
+        } catch (logError) {
+          entry.logError = logError.message || String(logError);
+        }
       }
-    }
 
-    log(JSON.stringify(entry));
-    summary.push(entry);
+      log(JSON.stringify(entry));
+      summary.push(entry);
+    }
   }
 
   return summary;
@@ -413,10 +428,12 @@ export async function runCoinMaintenance({ db, log = console.log }) {
   return result;
 }
 
-/* 今日のレースの開催時刻より前に起動していたら、開催時刻まで待つ（待ち時間が長すぎるときは待たない） */
+/* 今日の次のレース（11:30 か 15:02）の開催時刻より前に起動していたら、開催時刻まで待つ
+   （待ち時間が長すぎるときは待たない） */
 export function getWaitMillisUntilTodayRace(now) {
-  const { raceTime } = getRaceForJstDay(now, 0);
-  const wait = raceTime.getTime() - now.getTime();
+  const next = getRacesForJstDay(now, 0).find((race) => race.raceTime > now);
+  if (!next) return 0;
+  const wait = next.raceTime.getTime() - now.getTime();
   if (wait <= 0 || wait > MAX_WAIT_MINUTES * 60 * 1000) return 0;
   return wait + 2000; /* 開催時刻ちょうど＋2秒 */
 }
@@ -465,9 +482,12 @@ if (isMain) {
   let now = process.env.DERBY_NOW ? new Date(process.env.DERBY_NOW) : new Date();
   console.log(`ゆうダービー自動開催 起動 now=${now.toISOString()}`);
 
+  /* 開催時刻まで待つ前に、すでに過ぎた回（例：15:02 を待つ間の 11:30）を先に開催・精算しておく */
+  const earlierSummary = [];
   if (process.env.DERBY_WAIT_FOR_RACE === "1" && !process.env.DERBY_NOW) {
     const wait = getWaitMillisUntilTodayRace(now);
     if (wait > 0) {
+      earlierSummary.push(...await runDerby({ db: getFirestore(), now }));
       console.log(`開催時刻まで ${Math.round(wait / 1000)} 秒待ちます`);
       await new Promise((resolve) => setTimeout(resolve, wait));
       now = new Date();
@@ -475,7 +495,12 @@ if (isMain) {
     }
   }
 
-  const summary = await runDerby({ db: getFirestore(), now });
+  /* 待つ前に作ったレースは、結果の表で「created(開催時刻を待つ前)」と分かるようにする */
+  const createdBeforeWait = new Set(earlierSummary.filter((e) => e.result === "created").map((e) => e.raceId));
+  const summary = [
+    ...earlierSummary.filter((e) => e.status !== "ok"),
+    ...(await runDerby({ db: getFirestore(), now })).map((e) => (createdBeforeWait.has(e.raceId) ? { ...e, result: "created(開催時刻を待つ前)" } : e))
+  ];
 
   /* ゆうcoin の整備は、レースの開催・精算が終わってから行う（失敗してもレースの処理には影響しない） */
   let coinResult;

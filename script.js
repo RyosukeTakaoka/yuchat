@@ -2834,6 +2834,15 @@ const RACE_TAKEOUT_RATE = 0.8;
 const RACE_HOUR = 15;
 const RACE_MINUTE = 2;
 const RACE_CLOSE_MINUTES_BEFORE = 10;
+/* 1日2回開催：15:02 の回に加えて 11:30 の回を開催する（どちらも締切は10分前）。
+   ・15:02 の回の raceId は従来どおり「YYYY-MM-DD」（過去のレース・馬券はそのまま使える）
+   ・11:30 の回の raceId は「YYYY-MM-DD-1130」（同じ日の2レースが衝突しない）
+   ・11:30 の回は TWICE_DAILY_FROM の日から（それより前の日にさかのぼって作らない）
+   derby-runner/run.mjs と同じ設定にすること */
+const MORNING_RACE_HOUR = 11;
+const MORNING_RACE_MINUTE = 30;
+const MORNING_RACE_SUFFIX = "-1130";
+const TWICE_DAILY_FROM = "2026-10-07";
 const ODDS_VIRTUAL_SEED_TOTAL = 200;
 
 /* style: start=逃げ / front=先行 / mid=差し / closer=追込 / stamina=スタミナ / longshot=大穴
@@ -2906,43 +2915,57 @@ function formatRaceId(date) {
 
 function getTodayRaceId() { return formatRaceId(derbyNow()); }
 
-/* その日（日本時間）の 15:02:00 JST */
+/* raceId → 開催時刻（日本時間）。「YYYY-MM-DD」は 15:02、「YYYY-MM-DD-1130」は 11:30 */
+function isMorningRaceId(raceId) {
+  return String(raceId).endsWith(MORNING_RACE_SUFFIX);
+}
+
 function parseRaceIdToDate(raceId) {
-  const [y, m, d] = raceId.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d, RACE_HOUR, RACE_MINUTE, 0, 0) - JST_OFFSET_MS);
+  const [y, m, d] = String(raceId).slice(0, 10).split("-").map(Number);
+  const morning = isMorningRaceId(raceId);
+  return new Date(Date.UTC(y, m - 1, d, morning ? MORNING_RACE_HOUR : RACE_HOUR, morning ? MORNING_RACE_MINUTE : RACE_MINUTE, 0, 0) - JST_OFFSET_MS);
 }
 
-function getRaceScheduleFor(date) {
-  const raceTime = parseRaceIdToDate(formatRaceId(date));
+function makeRaceContextFromId(raceId) {
+  const raceTime = parseRaceIdToDate(raceId);
   const closeTime = new Date(raceTime.getTime() - RACE_CLOSE_MINUTES_BEFORE * 60000);
-  return { raceTime, closeTime };
+  return { raceId, dayId: String(raceId).slice(0, 10), raceTime, closeTime };
 }
 
-function makeRaceContext(date) {
-  const { raceTime, closeTime } = getRaceScheduleFor(date);
-  return { raceId: formatRaceId(date), raceTime, closeTime };
+/* その日（日本時間）に開催されるレース（開催時刻の早い順） */
+function getRaceContextsForDay(dayId) {
+  const ids = [];
+  if (dayId >= TWICE_DAILY_FROM) ids.push(`${dayId}${MORNING_RACE_SUFFIX}`);
+  ids.push(dayId);
+  return ids.map(makeRaceContextFromId).sort((a, b) => a.raceTime - b.raceTime);
 }
 
-/* レースは毎日15:02（日本時間）に開催。締切(14:52)を過ぎたら、その瞬間から「次の日のレース」を
-   投票対象にする（＝1日のどこかの時間帯で投票が完全に止まることがないようにする） */
+/* 前日・当日・翌日のレース（開催時刻の早い順） */
+function getRaceContextsAround(now) {
+  return [-1, 0, 1].flatMap((offset) => getRaceContextsForDay(formatRaceId(new Date(now.getTime() + offset * DAY_MS))));
+}
+
+/* 投票の対象：締切前のいちばん早いレース。締切を過ぎたら、その瞬間から次の回（11:30→15:02→翌日11:30）が対象になる
+   （1日のどこかの時間帯で投票が完全に止まることがないようにする） */
 function getActiveBettingRaceContext(now = derbyNow()) {
-  const today = makeRaceContext(now);
-  if (now < today.closeTime) return today;
-  return makeRaceContext(new Date(now.getTime() + DAY_MS));
+  return getRaceContextsAround(now).find((c) => now < c.closeTime);
 }
 
 /* 直近に発走した（または、まさに発走中の）レース。演出・結果表示・精算の対象。 */
 function getLiveRaceContext(now = derbyNow()) {
-  const today = makeRaceContext(now);
-  if (now >= today.raceTime) return today;
-  return makeRaceContext(new Date(now.getTime() - DAY_MS));
+  const started = getRaceContextsAround(now).filter((c) => now >= c.raceTime);
+  return started[started.length - 1];
 }
 
-/* 次に始まるレース（カウントダウンの対象）。締切ではなく開催時刻 15:02:00 で切り替える */
+/* 次に始まるレース（カウントダウンの対象）。締切ではなく開催時刻で切り替える */
 function getNextRaceStartContext(now = derbyNow()) {
-  const today = makeRaceContext(now);
-  if (now < today.raceTime) return today;
-  return makeRaceContext(new Date(now.getTime() + DAY_MS));
+  return getRaceContextsAround(now).find((c) => now < c.raceTime);
+}
+
+/* 画面に出すレース名（例：10/7 11:30） */
+function formatRaceLabel(raceId) {
+  const [, m, d] = String(raceId).slice(0, 10).split("-").map(Number);
+  return `${m}/${d} ${formatJstHourMinute(parseRaceIdToDate(raceId))}`;
 }
 
 /* 右上のカウントダウンの文字（レース中は「レース中」、それ以外は次のレースまでの残り） */
@@ -2954,7 +2977,7 @@ function getDerbyCountdownText(now = derbyNow()) {
   if (sinceStart >= 0 && sinceStart < showSeconds * 1000) return "🏇 レース中";
 
   const next = getNextRaceStartContext(now);
-  const dayLabel = next.raceId === formatRaceId(now) ? "本日" : "明日";
+  const dayLabel = next.dayId === formatRaceId(now) ? "本日" : "明日";
   return `${dayLabel} ${formatCountdown(next.raceTime.getTime() - now.getTime())}`;
 }
 
@@ -3125,7 +3148,7 @@ function renderHorseList() {
 /* ----- 投票フォームの有効/無効 ----- */
 
 function updateBetFormEnabled() {
-  /* 毎日15:02に開催される仕組み上、締切(14:52)を過ぎた瞬間から
+  /* 毎日11:30・15:02に開催される仕組み上、締切(11:20・14:52)を過ぎた瞬間から
      投票対象が自動的に「次の日のレース」に切り替わるため、
      ログインさえしていれば常に投票できる（投票自体が止まることはない） */
   /* 前回レースのリプレイを見ている間は投票を受け付けない（リプレイ終了で元に戻る） */
@@ -3909,7 +3932,7 @@ function drawRaceStageFrame() {
     const t = (performance.now() - derbyReplay.startedAt) / 1000 - REPLAY_LEAD_IN_SECONDS;
     raceStage.render({ show: t >= 0 ? show : null, t: Math.min(t, show.revealTime + 2), myHorses: getMyBetHorseNumbersForRace(derbyReplay.raceId), snapCamera: raceStageSnapCamera });
     raceStageSnapCamera = false;
-    setStageOverlay("raceStageBadge", `📼 前回レース リプレイ（${escapeHTML(derbyReplay.raceId)}）`);
+    setStageOverlay("raceStageBadge", `📼 前回レース リプレイ（${escapeHTML(formatRaceLabel(derbyReplay.raceId))}）`);
     setStageOverlay("raceStageTop3", renderStageTop3(show, t), t > 0 && t < show.revealTime);
     const subtitle = t < 0 ? `まもなくスタート… ${Math.ceil(-t)}` : show.commentaryAt(t);
     setStageOverlay("raceSubtitle", escapeHTML(subtitle), !derbyReplay.ended);
@@ -3941,15 +3964,15 @@ function drawRaceStageFrame() {
   } else if (elapsed < show.revealTime + 4) {
     /* 最後の馬のゴール →「レース終了」の字幕を少し見せてから、次のレースの案内に切り替える */
     raceStage.render({ show, t: elapsed, myHorses, snapCamera: raceStageSnapCamera });
-    setStageOverlay("raceStageBadge", elapsed < show.revealTime ? "🔴 LIVE" : `🏁 ${escapeHTML(liveContext.raceId)} レース終了`);
+    setStageOverlay("raceStageBadge", elapsed < show.revealTime ? "🔴 LIVE" : `🏁 ${escapeHTML(formatRaceLabel(liveContext.raceId))} レース終了`);
     setStageOverlay("raceStageTop3", renderStageTop3(show, elapsed), elapsed > 0 && elapsed < show.revealTime);
     setStageOverlay("raceSubtitle", escapeHTML(show.commentaryAt(elapsed)));
   } else {
     /* レースが終わったあと：ゴール後の全体の様子で止めておく */
     raceStage.render({ show, t: show.revealTime + 2, myHorses, snapCamera: raceStageSnapCamera });
-    setStageOverlay("raceStageBadge", `🏁 ${escapeHTML(liveContext.raceId)} レース終了`);
+    setStageOverlay("raceStageBadge", `🏁 ${escapeHTML(formatRaceLabel(liveContext.raceId))} レース終了`);
     setStageOverlay("raceStageTop3", "", false);
-    const dayLabel = next.raceId === formatRaceId(now) ? "本日" : "明日";
+    const dayLabel = next.dayId === formatRaceId(now) ? "本日" : "明日";
     setStageOverlay("raceSubtitle", `次のレースは${dayLabel} ${formatJstHourMinute(next.raceTime)} 発走`);
   }
   raceStageSnapCamera = false;
@@ -3958,17 +3981,18 @@ function drawRaceStageFrame() {
 /* ----- 前回のレースを再生（閲覧専用。結果を読み込むだけで、何も書き込まない） ----- */
 
 function getPreviousRaceForReplay(now = derbyNow()) {
-  const liveId = getLiveRaceContext(now).raceId;
+  const live = getLiveRaceContext(now);
+  const liveId = live.raceId;
   if (liveRaceResult && Array.isArray(liveRaceResult.resultOrder) && isLiveRaceResultRevealed(now)) {
     return { raceId: liveId, data: liveRaceResult };
   }
-  const found = recentRacesCache.find((r) => r && typeof r.raceId === "string" && r.raceId < liveId && Array.isArray(r.resultOrder) && r.resultOrder.length > 0);
+  /* recentRacesCache は開催時刻の新しい順。今のレースより前に開催されたうち、いちばん新しいもの */
+  const found = recentRacesCache.find((r) => r && /^\d{4}-\d{2}-\d{2}/.test(String(r.raceId)) && parseRaceIdToDate(r.raceId) < live.raceTime && Array.isArray(r.resultOrder) && r.resultOrder.length > 0);
   return found ? { raceId: found.raceId, data: found } : null;
 }
 
 function formatRaceIdShort(raceId) {
-  const m = String(raceId || "").match(/^\d{4}-(\d{2})-(\d{2})$/);
-  return m ? `${Number(m[1])}/${Number(m[2])}` : raceId;
+  return /^\d{4}-\d{2}-\d{2}/.test(String(raceId || "")) ? formatRaceLabel(raceId) : raceId;
 }
 
 function updateReplayControls() {
@@ -4007,7 +4031,7 @@ function finishDerbyReplay() {
   const medals = ["🥇", "🥈", "🥉"];
   const rows = order.slice(0, 3).map((n, i) => `<div>${medals[i]} ${i + 1}着　${n}番 ${escapeHTML(getHorseName(n))}</div>`).join("");
   setStageOverlay("raceReplayEnd", `
-    <div class="race-replay-end-title">📼 リプレイ終了（${escapeHTML(derbyReplay.raceId)}）</div>
+    <div class="race-replay-end-title">📼 リプレイ終了（${escapeHTML(formatRaceLabel(derbyReplay.raceId))}）</div>
     ${rows}
     <div class="race-replay-end-buttons">
       <button type="button" data-replay-action="again">↺ もう一度見る</button>
@@ -4109,11 +4133,11 @@ function renderRaceInfo() {
 
   const activeContext = getActiveBettingRaceContext();
   const now = derbyNow();
-  const isToday = formatRaceId(now) === activeContext.raceId;
+  const isToday = formatRaceId(now) === activeContext.dayId;
 
   const scheduleLine = document.getElementById("raceScheduleLine");
   if (scheduleLine) {
-    scheduleLine.textContent = `次のレース：${isToday ? "本日" : "明日"} ${formatJstHourMinute(activeContext.raceTime)}（${activeContext.raceId}）`;
+    scheduleLine.textContent = `次のレース：${isToday ? "本日" : "明日"} ${formatJstHourMinute(activeContext.raceTime)}（${formatRaceLabel(activeContext.raceId)}）`;
   }
 
   /* 馬券表示は手元のデータ(myAllBets)だけで組み立てられるので、毎ティック更新してもチラつかない */
@@ -4126,7 +4150,7 @@ function renderRaceInfo() {
   if (finalResultEl) {
     finalResultEl.innerHTML = revealed ? `
       <div class="race-final-result">
-        <div class="race-final-result-title">レース結果（${escapeHTML(liveContext.raceId)}）</div>
+        <div class="race-final-result-title">レース結果（${escapeHTML(formatRaceLabel(liveContext.raceId))}）</div>
         <div>🥇 1着　${escapeHTML(getHorseName(liveRaceResult.resultOrder[0]))}</div>
         <div>🥈 2着　${escapeHTML(getHorseName(liveRaceResult.resultOrder[1]))}</div>
         <div>🥉 3着　${escapeHTML(getHorseName(liveRaceResult.resultOrder[2]))}</div>
@@ -4165,8 +4189,12 @@ async function loadRecentRaceResults(excludeRaceId) {
   if (!el) return;
 
   try {
-    const snap = await getDocs(query(collection(db, "races"), orderBy("raceId", "desc"), limit(6)));
-    recentRacesCache = snap.docs.map((d) => d.data());
+    /* raceId の並び（「日付-1130」が「日付」より後ろ）ではなく、開催時刻の新しい順に並べ直す */
+    const snap = await getDocs(query(collection(db, "races"), orderBy("raceId", "desc"), limit(8)));
+    recentRacesCache = snap.docs
+      .map((d) => d.data())
+      .filter((r) => /^\d{4}-\d{2}-\d{2}/.test(String(r.raceId)))
+      .sort((a, b) => parseRaceIdToDate(b.raceId) - parseRaceIdToDate(a.raceId));
     const races = recentRacesCache.filter((r) => r.raceId !== excludeRaceId && r.resultOrder);
 
     if (races.length === 0) { el.innerHTML = ""; return; }
@@ -4174,7 +4202,7 @@ async function loadRecentRaceResults(excludeRaceId) {
     let html = `<div class="race-past-title">過去のレース結果</div>`;
     races.slice(0, 5).forEach((race) => {
       html += `<div class="race-past-item">
-        ${escapeHTML(race.raceId)}　1着:${escapeHTML(getHorseName(race.resultOrder[0]))}　
+        ${escapeHTML(formatRaceLabel(race.raceId))}　1着:${escapeHTML(getHorseName(race.resultOrder[0]))}　
         2着:${escapeHTML(getHorseName(race.resultOrder[1]))}　
         3着:${escapeHTML(getHorseName(race.resultOrder[2]))}
       </div>`;
@@ -4246,8 +4274,8 @@ function tickDerbyCountdown() {
   const liveContext = getLiveRaceContext(now);
   const elapsed = (now.getTime() - liveContext.raceTime.getTime()) / 1000;
 
-  /* 以前は「馬券を買える対象のレース」の時刻を使っていたため、締切(14:52)〜15:02 の間は
-     明日のレースまでの約24時間が表示されていた。開催時刻 15:02:00 JST を基準にする */
+  /* 以前は「馬券を買える対象のレース」の時刻を使っていたため、締切〜開催の間は
+     次の回までの時間が表示されていた。開催時刻（11:30:00・15:02:00 JST）を基準にする */
   if (derbyCountdown) derbyCountdown.textContent = getDerbyCountdownText(now);
 
   if (now >= liveContext.raceTime && !liveRaceResult && elapsed - lastGenerationAttemptAt > 5) {
