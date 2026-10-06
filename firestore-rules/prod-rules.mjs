@@ -38,6 +38,15 @@ service cloud.firestore {
   }
 }`;
 
+/* 公開・確認に必要な権限（Google Cloud IAM） */
+const REQUIRED_PERMISSIONS = [
+  "firebaserules.releases.get",
+  "firebaserules.rulesets.get",
+  "firebaserules.projects.test",
+  "firebaserules.rulesets.create",
+  "firebaserules.releases.update"
+];
+
 const summary = [];
 const out = (line = "") => { console.log(line); summary.push(line); };
 const writeSummary = () => { if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary.join("\n") + "\n"); };
@@ -57,12 +66,19 @@ function loadServiceAccount() {
   return credentials;
 }
 
+/* ログは公開されるので、サービスアカウントのアドレスは一部だけ表示する（IAM の画面で見分けられる程度） */
+function describeServiceAccount(credentials) {
+  const [local, domain] = String(credentials.client_email || "").split("@");
+  return `${local.slice(0, Math.min(local.length, 20))}…@${domain || "?"}（キーID ${String(credentials.private_key_id || "").slice(0, 8)}…）`;
+}
+
 async function createApi(credentials) {
   const auth = new GoogleAuth({ credentials, scopes: ["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/firebase"] });
   const client = await auth.getClient();
   return async (method, urlPath, data) => {
     try {
-      const response = await client.request({ url: `${API}/${urlPath}`, method, data });
+      const url = /^https:/.test(urlPath) ? urlPath : `${API}/${urlPath}`;
+      const response = await client.request({ url, method, data });
       return response.data;
     } catch (error) {
       const status = error.response?.status;
@@ -164,13 +180,30 @@ function knownRuleVersions() {
   return versions;
 }
 
-async function check(api, projectId) {
+/* 本番を変える前に、必要な権限がそろっているかを確かめる（確かめるだけで何も変えない） */
+async function checkPermissions(api, projectId) {
+  try {
+    const result = await api("POST", `https://cloudresourcemanager.googleapis.com/v1/projects/${projectId}:testIamPermissions`, { permissions: REQUIRED_PERMISSIONS });
+    const granted = new Set(result.permissions || []);
+    return { known: true, missing: REQUIRED_PERMISSIONS.filter((p) => !granted.has(p)) };
+  } catch (error) {
+    return { known: false, missing: [], error: error.message };
+  }
+}
+
+async function check(api, projectId, credentials) {
   const newSource = fs.readFileSync(RULES_FILE, "utf8");
-  const prod = await getProductionRules(api, projectId);
-  fs.writeFileSync("production.rules", prod.source.endsWith("\n") ? prod.source : prod.source + "\n");
 
   out("## Firestore ルール：本番の確認");
   out(`- プロジェクト：${projectId}`);
+  out(`- サービスアカウント：${describeServiceAccount(credentials)}`);
+  const permissions = await checkPermissions(api, projectId);
+  if (!permissions.known) out(`- 権限の事前確認：できませんでした（${permissions.error}）。実際の操作で確かめます`);
+  else if (permissions.missing.length) out(`- 権限の事前確認：**足りない権限があります** → ${permissions.missing.join(", ")}（「Firebase Rules 管理者」roles/firebaserules.admin に含まれます）`);
+  else out("- 権限の事前確認：必要な権限はすべてあります");
+
+  const prod = await getProductionRules(api, projectId);
+  fs.writeFileSync("production.rules", prod.source.endsWith("\n") ? prod.source : prod.source + "\n");
   out(`- 本番で公開中のルール：\`${prod.release.rulesetName}\`（公開日時 ${prod.release.updateTime || "不明"}）`);
 
   const same = normalizeRules(prod.source) === normalizeRules(newSource);
@@ -194,17 +227,22 @@ async function check(api, projectId) {
   out(`- いまの本番ルール：${before.rows.filter((r) => r.ok).length} / ${before.rows.length} 期待どおり（⚠️ は、いまの本番では防げていない操作）`);
   for (const row of engine.rows.filter((r) => !r.ok)) console.error(`期待と違う: ${row.label} ${row.debug}`);
 
-  const safeToDeploy = !engine.errors.length && passed === engine.rows.length && (same || Boolean(match));
+  const safeToDeploy = !engine.errors.length && passed === engine.rows.length && (same || Boolean(match)) && !permissions.missing.length;
   out(`- 公開してよいか：${safeToDeploy ? (same ? "公開済み（変更なし）" : "**はい**（安全確認がすべて通った）") : "**いいえ**"}`);
   return { safeToDeploy, same, prod, newSource };
 }
 
-async function deploy(api, projectId) {
-  const result = await check(api, projectId);
+function setOutput(name, value) {
+  if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`);
+}
+
+async function deploy(api, projectId, credentials) {
+  const result = await check(api, projectId, credentials);
   if (!result.safeToDeploy) throw new Error("安全確認が通らなかったため、本番のルールは変更していません");
   if (result.same) { out("- 本番はすでに今回のルールなので、何もしませんでした"); return; }
 
   const previous = result.prod.release.rulesetName;
+  setOutput("previous_ruleset", previous);
   const created = await api("POST", `projects/${projectId}/rulesets`, { source: { files: [{ name: "firestore.rules", content: result.newSource }] } });
   await api("PATCH", `projects/${projectId}/releases/cloud.firestore`, { release: { name: `projects/${projectId}/releases/cloud.firestore`, rulesetName: created.name } });
 
@@ -213,6 +251,7 @@ async function deploy(api, projectId) {
     throw new Error(`公開後の確認に失敗しました（本番：${after.release.rulesetName}）`);
   }
   out("");
+  setOutput("deployed_ruleset", created.name);
   out("### 公開しました");
   out(`- 新しいルール：\`${created.name}\``);
   out(`- 公開前のルール（戻すときはこれを ROLLBACK_RULESET に指定）：\`${previous}\``);
@@ -238,11 +277,11 @@ try {
   const credentials = loadServiceAccount();
   const api = await createApi(credentials);
   if (mode === "check") {
-    const { safeToDeploy } = await check(api, credentials.project_id);
+    const { safeToDeploy } = await check(api, credentials.project_id, credentials);
     writeSummary();
     if (!safeToDeploy) process.exit(1);
   } else if (mode === "deploy") {
-    await deploy(api, credentials.project_id);
+    await deploy(api, credentials.project_id, credentials);
     writeSummary();
   } else if (mode === "rollback") {
     await rollback(api, credentials.project_id);

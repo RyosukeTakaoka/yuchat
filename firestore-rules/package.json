@@ -9,10 +9,12 @@
   "scripts": {
     "test": "firebase emulators:exec --only firestore --project demo-yuuchat-rules \"node rules.test.cjs && node concurrency.test.cjs\"",
     "check": "node prod-rules.mjs check",
-    "deploy": "node prod-rules.mjs deploy"
+    "deploy": "node prod-rules.mjs deploy",
+    "verify": "node verify-production.mjs"
   },
   "dependencies": {
-    "google-auth-library": "^11.1.0"
+    "google-auth-library": "^11.1.0",
+    "firebase-admin": "^14.5.0"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^5.0.2",

@@ -1,12 +1,16 @@
 # Firestore ルール（firestore.rules）のテスト・本番確認・本番への公開
 #
 # ・プルリクエスト（firestore.rules などを変えたとき）
-#     Emulator でルールのテスト → 本番のルールを読んで差分を表示し、本番のルールエンジンで新しいルールをテスト
+#     Emulator でルールのテスト → 必要な権限の確認 → 本番のルールを読んで差分を表示し、本番のルールエンジンで新しいルールをテスト
 #     （本番のルールもデータも変えない）
+# ・プルリクエストに「firestore-rules-deploy」ラベルが付いているとき（マージ前に本番へ公開して確かめたいとき）
 # ・main に firestore.rules の変更が入ったとき（プルリクエストのマージ）
 #     上と同じ確認がすべて通ったときだけ、本番に公開する
 #     本番のルールが「リポジトリの過去の版」か「最初のルール」と違う（Firebase Console で直接変えた）ときは公開しない
-# ・手動実行（Actions タブ → Firestore ルール → Run workflow）
+#     公開した後、確認用の一般ユーザーで本番の Firestore に直接書き込み、管理用データへの書き込みが拒否されること・
+#     通常の参加/取り消しや既存データへの書き込みができることを確かめる（verify-production.mjs）
+#     本番での確認に失敗したら、公開前のルールに自動で戻す
+# ・手動実行（Actions タブ → Firestore ルール → Run workflow。main に入った後に使える）
 #     check（確認だけ）/ deploy（公開）/ rollback（rollback_ruleset に戻す）
 #
 # 鍵は「ゆうダービー自動開催」と同じ FIREBASE_SERVICE_ACCOUNT（Secrets）を使う。新しい鍵は不要。
@@ -16,6 +20,7 @@ name: Firestore ルール
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "firestore.rules"
       - "firestore-rules/**"
@@ -115,10 +120,25 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           KNOWN_RULES_DIR: known-rules
           ROLLBACK_RULESET: ${{ inputs.rollback_ruleset }}
-          MODE: ${{ github.event_name == 'push' && 'deploy' || github.event_name == 'workflow_dispatch' && inputs.mode || 'check' }}
+          MODE: ${{ github.event_name == 'push' && 'deploy' || github.event_name == 'workflow_dispatch' && inputs.mode || contains(github.event.pull_request.labels.*.name, 'firestore-rules-deploy') && 'deploy' || 'check' }}
         run: |
           echo "モード: $MODE"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
           node prod-rules.mjs "$MODE"
+
+      - name: 本番での確認（確認用の一般ユーザーで直接書き込み）
+        id: verify
+        if: steps.run.outputs.mode == 'deploy'
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node verify-production.mjs
+
+      - name: 本番での確認に失敗したので、公開前のルールに戻す
+        if: failure() && steps.verify.outcome == 'failure' && steps.run.outputs.deployed_ruleset != ''
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          ROLLBACK_RULESET: ${{ steps.run.outputs.previous_ruleset }}
+        run: node prod-rules.mjs rollback
 
       - name: 本番のルールと今回のルールの差分
         if: always() && steps.secret.outputs.ready == 'true'
