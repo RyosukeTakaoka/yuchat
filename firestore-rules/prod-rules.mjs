@@ -67,7 +67,10 @@ async function createApi(credentials) {
     } catch (error) {
       const status = error.response?.status;
       const message = error.response?.data?.error?.message || error.message;
-      throw new Error(`${method} ${urlPath} → ${status || ""} ${message}`);
+      const hint = status === 403
+        ? "（サービスアカウントに Firestore ルールを操作する権限がありません。Google Cloud Console の IAM で、このサービスアカウントに「Firebase Rules 管理者」（roles/firebaserules.admin）を付けると使えます）"
+        : "";
+      throw new Error(`${method} ${urlPath} → ${status || ""} ${message}${hint}`);
     }
   };
 }
