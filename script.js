@@ -7784,7 +7784,15 @@ function renderEconomyView() {
       ${assets.coins < bank.loan ? `<p class="econ-note">返済には手持ちのゆうcoinが${formatCoins(bank.loan)}コイン必要です。</p>` : ""}`;
   } else {
     const canBorrow = assets.coins <= BANK_LOAN_MAX_COINS;
-    loanHtml = `
+    /* 13:00 の自動返済で完済した場合も、直近（7日以内）の自動返済の結果を表示する（bank.lastAutoRepay。新しい読み取りは無い） */
+    const autoAge = auto?.date ? (Date.parse(`${getTodayRaceId()}T00:00:00Z`) - Date.parse(`${auto.date}T00:00:00Z`)) / 86400000 : null;
+    const paidOffNotice = auto && Number(auto.amount) > 0 && autoAge !== null && autoAge >= 0 && autoAge <= 7
+      ? `<div class="econ-paid-off" role="status">
+          <strong>✅ ${escapeHTML(formatEconomyDate(auto.date))} 13:00に自動返済：${formatCoins(auto.amount)}コイン（預金${formatCoins(auto.fromDeposit)}・手持ち${formatCoins(auto.fromCoins)}）</strong>
+          <div>返済期限を過ぎていたため、預金 → 手持ちの順に自動で返済され、借入は完済しました。</div>
+        </div>`
+      : "";
+    loanHtml = `${paidOffNotice}
       <p class="econ-note">手持ちが${BANK_LOAN_MAX_COINS}コイン以下のときに、${BANK_LOAN_AMOUNT}コインを借りられます（手数料なし・返済額${BANK_LOAN_AMOUNT}・期限${BANK_LOAN_DAYS}日）。</p>
       <button type="button" class="econ-button" data-econ="borrow" ${disabled} ${canBorrow ? "" : "disabled"}>🆘 緊急融資で${BANK_LOAN_AMOUNT}コイン借りる</button>
       ${canBorrow ? "" : `<p class="econ-note">いまの手持ちは${formatCoins(assets.coins)}コインなので、まだ利用できません。</p>`}`;

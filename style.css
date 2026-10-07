@@ -4494,6 +4494,20 @@ button.secondary.danger {
     line-height: 1.5;
 }
 
+.econ-paid-off {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+    padding: 12px;
+    border: 1px solid #b7dfc0;
+    border-radius: 12px;
+    background: #effaf1;
+    color: #1f5f2c;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
 .econ-alert strong {
     font-size: 15px;
 }

@@ -69,5 +69,8 @@ jobs:
         if: steps.secret.outputs.ready == 'true'
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          # ゆう株の株価・ニュースの乱数に使う秘密値（公開リポジトリから翌日の株価を計算されないように）。
+          # 未登録のときは、サービスアカウントの鍵から作った値を使う（鍵そのものは使わない）
+          STOCK_SEED_SECRET: ${{ secrets.STOCK_SEED_SECRET }}
           DERBY_WAIT_FOR_RACE: "1"
         run: node run.mjs

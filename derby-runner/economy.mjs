@@ -14,8 +14,39 @@
    会社の設定・銀行の設定は script.js と同じにすること
 ========================================================= */
 
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import crypto from "crypto";
+import { FieldValue } from "firebase-admin/firestore";
 import { STOCK_NEWS } from "./stock-news.mjs";
+
+/* ----- 株価の秘密値（事前に計算されないように） -----
+   株価・ニュース・急騰／暴落の乱数は「秘密値 ＋ 日付 ＋ 会社」から HMAC-SHA256 で作る。
+   リポジトリは公開なので、秘密値が無いと翌日の株価を誰でも計算できてしまう。
+   ・同じ秘密値・同じ日付なら必ず同じ結果（13:00 の処理を再実行しても変わらない）
+   ・秘密値はブラウザにも Firestore にも置かない（derby-runner＝GitHub Actions の中だけで使う）
+   秘密値の取り出し方（上から順に使う）：
+     1. 環境変数 STOCK_SEED_SECRET（GitHub Secrets に登録した専用の秘密値。推奨）
+     2. 環境変数 FIREBASE_SERVICE_ACCOUNT の秘密鍵から作った値（鍵そのものは使わず、ハッシュだけ使う）
+     3. Emulator のテストのときだけ、テスト用の固定値
+   どれも無いときは株価を更新しない（予測できる乱数では動かさない） */
+const TEST_STOCK_SEED_SECRET = "emulator-test-stock-seed";
+
+export function getStockSeedSecret(env = process.env) {
+  if (env.STOCK_SEED_SECRET) return { secret: env.STOCK_SEED_SECRET, source: "STOCK_SEED_SECRET" };
+  if (env.FIREBASE_SERVICE_ACCOUNT) {
+    try {
+      const key = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT).private_key;
+      if (key) return { secret: crypto.createHash("sha256").update(`yuuchat-stock-seed:v1:${key}`).digest("hex"), source: "FIREBASE_SERVICE_ACCOUNT" };
+    } catch {}
+  }
+  if (env.FIRESTORE_EMULATOR_HOST) return { secret: TEST_STOCK_SEED_SECRET, source: "test" };
+  return null;
+}
+
+/* 秘密値と見出し（日付・会社など）から、乱数の種を作る */
+function secretSeed(secret, label) {
+  if (typeof secret !== "string" || secret.length === 0) throw new Error("STOCK_SEED_SECRET が必要です（株価の秘密値が無いため、株価を更新しません）");
+  return crypto.createHmac("sha256", secret).update(label).digest("hex");
+}
 
 /* ----- script.js と同じ設定 ----- */
 export const STOCK_COMPANIES = [
@@ -94,8 +125,8 @@ export function createInitialMarket() {
 }
 
 /* その日のニュース（1〜3社・平均2社）。日付から決まる */
-export function pickDailyNews(dateText, recentNewsIds = []) {
-  const rand = seededRandom(`${dateText}:news`);
+export function pickDailyNews(dateText, recentNewsIds = [], secret) {
+  const rand = seededRandom(secretSeed(secret, `${dateText}:news`));
   const roll = rand();
   const count = roll < 0.25 ? 1 : roll < 0.75 ? 2 : 3;
   const codes = STOCK_COMPANIES.map((c) => c.code);
@@ -113,18 +144,18 @@ export function pickDailyNews(dateText, recentNewsIds = []) {
 }
 
 /* 前日の株価のまとめから、その日の株価を計算する（純粋な関数。同じ入力なら必ず同じ結果） */
-export function computeDailyMarket(previous, dateText) {
+export function computeDailyMarket(previous, dateText, secret) {
   const prev = previous && previous.companies ? previous : createInitialMarket();
   const startDate = prev.startDate || dateText;
   const days = daysBetween(startDate, dateText);
-  const news = pickDailyNews(dateText, prev.recentNewsIds || []);
+  const news = pickDailyNews(dateText, prev.recentNewsIds || [], secret);
   const companies = {};
   const events = [];
 
   STOCK_COMPANIES.forEach((c) => {
     const before = prev.companies[c.code] || { price: c.initialPrice, history: [c.initialPrice] };
     const price = Math.max(STOCK_MIN_PRICE, Number(before.price) || c.initialPrice);
-    const rand = seededRandom(`${dateText}:${c.code}`);
+    const rand = seededRandom(secretSeed(secret, `${dateText}:${c.code}`));
     const trend = c.initialPrice * Math.pow(1 + STOCK_DRIFT, days);
     let change = STOCK_DRIFT + gaussian(rand) * STOCK_VOLATILITY + STOCK_PULL * Math.log(trend / price);
 
@@ -238,7 +269,7 @@ export function buildAssetRanking(entries) {
 }
 
 /* ----- 1日1回の処理（13:00 以降。同じ日は1回だけ） ----- */
-export async function runDailyJobs({ db, now = new Date(), log = console.log }) {
+export async function runDailyJobs({ db, now = new Date(), log = console.log, stockSecret = getStockSeedSecret() }) {
   const today = jstDateString(now);
   const result = { date: today, status: "skipped", errors: [] };
   if (now < getDailyJobTime(now)) { result.reason = "13:00 前"; return result; }
@@ -253,11 +284,13 @@ export async function runDailyJobs({ db, now = new Date(), log = console.log }) 
     const snap = await transaction.get(marketRef);
     const current = snap.exists ? snap.data() : null;
     if (current && current.date === today) return { data: current, updated: false };
-    const next = computeDailyMarket(current, today);
+    if (!stockSecret?.secret) throw new Error("株価の秘密値（STOCK_SEED_SECRET）がありません。株価を更新できません");
+    const next = computeDailyMarket(current, today, stockSecret.secret);
     transaction.set(marketRef, { ...next, updatedAt: FieldValue.serverTimestamp(), updatedBy: "github-actions" });
     return { data: next, updated: true };
   });
   result.marketUpdated = market.updated;
+  if (market.updated) result.stockSeedSource = stockSecret.source; /* どの秘密値を使ったか（値そのものは出さない） */
   result.news = market.data.todayNews || [];
   result.events = market.data.events || [];
   const prices = Object.fromEntries(Object.entries(market.data.companies).map(([code, c]) => [code, c.price]));

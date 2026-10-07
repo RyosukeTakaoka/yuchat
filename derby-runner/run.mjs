@@ -15,6 +15,7 @@
 
    環境変数：
      FIREBASE_SERVICE_ACCOUNT  サービスアカウントの鍵（JSON）。GitHub Secrets に登録する
+     STOCK_SEED_SECRET         ゆう株の株価・ニュースの乱数に使う秘密値（GitHub Secrets。無ければサービスアカウントの鍵から作る）
      FIRESTORE_EMULATOR_HOST   テスト用（Emulator を使うとき）
      DERBY_NOW                 テスト用（現在時刻を ISO 形式で上書き）
      DERBY_WAIT_FOR_RACE       "1" なら、次の開催時刻（11:30 か 15:02）の前に起動したときは開催時刻まで待ってから実行する
@@ -418,7 +419,7 @@ function writeStepSummary(summary, startedAt, finishedAt, dailyResult) {
     "",
     ...(dailyResult && dailyResult.status !== "skipped" ? [
       `### 1日1回の処理（${dailyResult.date} 13:00）`,
-      `株価 ${dailyResult.marketUpdated ? "更新" : "更新済み"} ／ ニュース ${(dailyResult.news || []).map((n) => `${n.code}${n.kind === "good" ? "↑" : "↓"}`).join(" ") || "なし"}` +
+      `株価 ${dailyResult.marketUpdated ? `更新（秘密値：${dailyResult.stockSeedSource === "STOCK_SEED_SECRET" ? "STOCK_SEED_SECRET" : "サービスアカウントの鍵から作った値"}）` : "更新済み"} ／ ニュース ${(dailyResult.news || []).map((n) => `${n.code}${n.kind === "good" ? "↑" : "↓"}`).join(" ") || "なし"}` +
         ` ／ 急騰・暴落 ${(dailyResult.events || []).map((e) => `${e.code}${e.kind === "surge" ? "急騰" : "暴落"}`).join(" ") || "なし"}`,
       `ユーザー ${dailyResult.users} 人 ／ 利息 ${dailyResult.interestUsers} 人（計 ${dailyResult.interestTotal}） ／ 期限切れの自動返済 ${dailyResult.autoRepaid} 人（計 ${dailyResult.autoRepaidTotal}）` +
         ` ／ 追加ボーナス ${dailyResult.bonusGranted} 人 ／ 総資産ランキング ${dailyResult.rankingUsers ?? "-"} 人` +
