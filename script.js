@@ -160,7 +160,6 @@ const recoverError = document.getElementById("recoverError");
 const recoverBackButton = document.getElementById("recoverBackButton");
 
 const myName = document.getElementById("myName");
-const statusElement = document.getElementById("status");
 
 const friendsList = document.getElementById("friendsList");
 const groupsList = document.getElementById("groupsList");
@@ -817,8 +816,6 @@ async function saveUserProfile() {
     name: username,
     photoURL: currentUser.photoURL || "",
     profileImage: getMyProfileImage(),
-    online: true,
-    lastSeen: serverTimestamp(),
     updatedAt: serverTimestamp(),
     createdAt: oldData.createdAt || serverTimestamp()
   }, { merge: true });
@@ -911,7 +908,6 @@ async function startApp() {
   if (!currentUser || !username) return;
 
   try {
-    await updateOnlineStatus(true);
     listenFriends();
     listenGroups();
     restoreNotificationsIfGranted();
@@ -929,59 +925,6 @@ async function startApp() {
     console.error("アプリ起動エラー:", error);
   }
 }
-
-/* =========================================================
-   オンライン状態
-========================================================= */
-
-async function updateOnlineStatus(isOnline) {
-  if (!currentUser || !username) return;
-
-  try {
-    await updateDoc(doc(db, "users", username), {
-      online: isOnline,
-      lastSeen: serverTimestamp()
-    });
-    await syncOnlineStatusToFriendships(isOnline);
-  } catch (error) {
-    console.error("オンライン状態更新エラー:", error);
-  }
-}
-
-/* 友達ドキュメント側のオンライン表示も更新する（友達一覧の表示に使われるため） */
-async function syncOnlineStatusToFriendships(isOnline) {
-  if (!username) return;
-
-  try {
-    const snapshot = await getDocs(collection(db, "friends"));
-    const batch = writeBatch(db);
-    let count = 0;
-
-    snapshot.forEach((item) => {
-      const data = item.data();
-      if (data.user1 === username) {
-        batch.update(item.ref, { user1Online: isOnline });
-        count++;
-      }
-      if (data.user2 === username) {
-        batch.update(item.ref, { user2Online: isOnline });
-        count++;
-      }
-    });
-
-    if (count > 0) await batch.commit();
-  } catch (error) {
-    console.error("友達オンライン状態同期エラー:", error);
-  }
-}
-
-window.addEventListener("beforeunload", () => {
-  if (currentUser && username) updateOnlineStatus(false);
-});
-
-setInterval(() => {
-  if (currentUser && username) updateOnlineStatus(true);
-}, 20000);
 
 /* =========================================================
    プロフィール画像
@@ -1162,8 +1105,6 @@ changeNameButton?.addEventListener("click", async () => {
       name: trimmed,
       photoURL: currentUser.photoURL || "",
       profileImage: getMyProfileImage(),
-      online: true,
-      lastSeen: serverTimestamp(),
       updatedAt: serverTimestamp(),
       createdAt: existing.exists() ? existing.data().createdAt : serverTimestamp(),
       ...(isNotifySetupDoneLocally() ? { notificationSetupDone: true } : {})
@@ -1298,13 +1239,13 @@ function listenFriends() {
         if (data.user1 === username) {
           friends.push({
             id: item.id, friend: data.user2, friendshipId: item.id,
-            online: data.user2Online || false, photo: data.user2Photo || ""
+            photo: data.user2Photo || ""
           });
         }
         if (data.user2 === username) {
           friends.push({
             id: item.id, friend: data.user1, friendshipId: item.id,
-            online: data.user1Online || false, photo: data.user1Photo || ""
+            photo: data.user1Photo || ""
           });
         }
       });
@@ -1348,11 +1289,7 @@ function renderFriends() {
     name.className = "friend-name";
     name.textContent = friend.friend;
 
-    const status = document.createElement("div");
-    status.className = `friend-status ${friend.online ? "online" : "offline"}`;
-    status.textContent = friend.online ? "オンライン" : "オフライン";
-
-    info.append(name, status);
+    info.append(name);
     item.append(avatar, info);
 
     item.addEventListener("click", () => selectFriendChat(friend));
@@ -1364,7 +1301,7 @@ function renderFriends() {
     friendsList.appendChild(item);
   });
 
-  /* 選択中の友達チャットのヘッダーも最新のオンライン状態に更新 */
+  /* 選択中の友達チャットのヘッダーも最新の内容（プロフィール画像など）に更新 */
   if (selectedChatType === "friend" && selectedChat) {
     const current = friendsData.find((f) => f.friend === selectedChat);
     if (current) renderChatHeaderForFriend(current);
@@ -1397,8 +1334,6 @@ addFriendButton?.addEventListener("click", async () => {
       user2: isUser1 ? trimmed : username,
       user1Uid: isUser1 ? currentUser.uid : userData.uid,
       user2Uid: isUser1 ? userData.uid : currentUser.uid,
-      user1Online: isUser1 ? true : (userData.online || false),
-      user2Online: isUser1 ? (userData.online || false) : true,
       user1Photo: isUser1 ? myImage : (userData.profileImage || ""),
       user2Photo: isUser1 ? (userData.profileImage || "") : myImage,
       createdAt: serverTimestamp(),
@@ -1545,11 +1480,7 @@ function renderChatHeaderForFriend(friend) {
   name.className = "chat-header-name";
   name.textContent = friend.friend;
 
-  const status = document.createElement("div");
-  status.className = `chat-header-status ${friend.online ? "online" : "offline"}`;
-  status.textContent = friend.online ? "オンライン" : "オフライン";
-
-  info.append(name, status);
+  info.append(name);
   wrap.append(avatar, info);
   chatHeader.appendChild(wrap);
 }
@@ -2707,7 +2638,6 @@ logoutButton?.addEventListener("click", async () => {
 
     resetNotifyAnnouncement();
     await unregisterFcmTokenForThisDevice();
-    await updateOnlineStatus(false);
 
     /* 次に別のアカウントでログインしたときに引き継がれないようにする */
     myProfileImageData = "";
@@ -2728,7 +2658,6 @@ logoutButton?.addEventListener("click", async () => {
 async function loadMyPage() {
   if (!currentUser) return;
   if (myName) myName.textContent = username || "ゲスト";
-  if (statusElement) statusElement.textContent = "🟢 オンライン";
 
   await loadMyPageStats();
   await loadCoinRanking();

@@ -245,14 +245,6 @@ button {
     color: #111;
 }
 
-.status {
-    margin-top: 2px;
-
-    font-size: 11px;
-
-    color: #31a24c;
-}
-
 .header-buttons {
     display: flex;
     align-items: center;
@@ -2000,7 +1992,6 @@ button:disabled {
     color: #fff;
 }
 
-.chips button.friend-item.active .friend-status,
 .chips button.group-item.active .group-members {
     color: #ddd;
 }
@@ -2052,7 +2043,6 @@ button:disabled {
     text-overflow: ellipsis;
 }
 
-.friend-status,
 .group-members {
     font-size: 11px;
 
@@ -2061,25 +2051,6 @@ button:disabled {
     display: flex;
     align-items: center;
     gap: 5px;
-}
-
-.friend-status::before {
-    content: "";
-
-    width: 7px;
-    height: 7px;
-
-    border-radius: 50%;
-
-    background: #c7cad0;
-}
-
-.friend-status.online::before {
-    background: #31a24c;
-}
-
-.friend-status.offline::before {
-    background: #c7cad0;
 }
 
 
@@ -2128,14 +2099,6 @@ button:disabled {
 
     border-radius: 50%;
 
-    background: #c7cad0;
-}
-
-.chat-header-status.online::before {
-    background: #31a24c;
-}
-
-.chat-header-status.offline::before {
     background: #c7cad0;
 }
 
