@@ -5253,7 +5253,7 @@ function startAdminListsRefresh() {
 const ANNOUNCEMENT_TITLE_MAX = 50;
 const ANNOUNCEMENT_BODY_MAX = 500;
 const ANNOUNCEMENT_LIST_LIMIT = 50;
-/* 既読の書き込みを送った直後（サーバーの時刻が返ってくるまで）も既読として表示するための、この端末だけの値 */
+/* この端末で既読にした「いちばん新しいお知らせの投稿日時」（保存された lastAnnouncementReadAt と新しいほうで判定する） */
 let announcementReadLocalAt = null;
 let announcementReadInFlight = false;
 const openedAnnouncementIds = new Set();
@@ -5377,14 +5377,17 @@ async function markAnnouncementsRead() {
   if (!username || !currentUser || announcementReadInFlight) return;
   if (!announcements.some((a) => isAnnouncementUnread(a.createdAt))) return;
   announcementReadInFlight = true;
-  announcementReadLocalAt = new Date();
+  /* この端末では「表示中のいちばん新しいお知らせの投稿日時」までを既読として覚えておく（端末の時計は使わない）。
+     名前を変えたあとは、購読中のユーザーデータが古い名前のまま更新されないことがあるので、
+     書き込みが終わったあともこの値を残し、保存された値と新しいほうで判定する（再読み込みなしでも既読のまま） */
+  const previousLocalAt = announcementReadLocalAt;
+  const newest = announcements.reduce((max, a) => (a.createdAt && (!max || a.createdAt > max) ? a.createdAt : max), null);
+  announcementReadLocalAt = previousLocalAt && previousLocalAt > newest ? previousLocalAt : newest;
   updateAnnouncementUnreadMark();
   try {
     await updateDoc(doc(db, "users", username), { lastAnnouncementReadAt: serverTimestamp() });
-    /* 書き込みが終われば、購読中のユーザーデータにサーバーの時刻が入るので、端末の時刻は使わない */
-    announcementReadLocalAt = null;
   } catch (error) {
-    announcementReadLocalAt = null;
+    announcementReadLocalAt = previousLocalAt;
     console.error("お知らせの既読エラー:", error);
     updateAnnouncementUnreadMark();
   } finally {
