@@ -164,6 +164,26 @@ const min = (m) => new Date(Date.now() + m * 60000);
   await ng("未ログイン：messages への書き込み（今まで通り拒否）", addDoc(collection(anon, "messages"), { text: "x" }));
   await ng("未ログイン：イベントの読み取り", getDocs(collection(anon, "events")));
 
+  log.push("--- ⑦ ゆう経済：株価（market）・総資産ランキング（rankings）は読み取りだけ（書くのは自動処理だけ）");
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const d = ctx.firestore();
+    await setDoc(doc(d, "market/current"), { date: "2030-01-01", companies: { YGM: { price: 180 } } });
+    await setDoc(doc(d, "rankings/assets"), { date: "2030-01-01", users: [{ name: "alice", total: 1000, rank: 1 }] });
+  });
+  await ok("market：株価の読み取り", getDoc(doc(A, "market/current")));
+  await ok("rankings：総資産ランキングの読み取り", getDoc(doc(A, "rankings/assets")));
+  await ng("market：株価の書き換え", updateDoc(doc(A, "market/current"), { "companies.YGM.price": 99999 }));
+  await ng("market：株価の上書き", setDoc(doc(A, "market/current"), { date: "x" }));
+  await ng("market：株価の削除", deleteDoc(doc(A, "market/current")));
+  await ng("market：新しいドキュメントの作成", setDoc(doc(A, "market/other"), { a: 1 }));
+  await ng("rankings：総資産ランキングの書き換え", updateDoc(doc(A, "rankings/assets"), { users: [] }));
+  await ng("rankings：ランキングの作成", setDoc(doc(A, "rankings/coins"), { users: [] }));
+  await ng("market：管理者でもブラウザからは書けない", updateDoc(doc(admin, "market/current"), { date: "y" }));
+  await ng("market：売買と同じトランザクションの中でも書けない", runTransaction(A, async (t) => { await t.get(doc(A, "market/current")); t.update(doc(A, "market/current"), { date: "z" }); t.update(doc(A, "users/alice"), { coins: 1 }); }));
+  await ok("users：自分の銀行・株・ログインボーナスの更新（今まで通り）", updateDoc(doc(A, "users/alice"), { coins: 900, bank: { deposit: 100, interestBase: 0, loan: 0 }, "stocks.YGM": { qty: 1, cost: 180 }, lastLoginBonusDate: "2030-01-01" }));
+  await ok("users：株価を読んで売買するトランザクション（今まで通り）", runTransaction(A, async (t) => { await t.get(doc(A, "market/current")); const u = await t.get(doc(A, "users/alice")); t.update(doc(A, "users/alice"), { coins: u.data().coins - 180 }); }));
+  await ng("未ログイン：株価の読み取り", getDoc(doc(anon, "market/current")));
+
   await env.cleanup();
   console.log(log.join("\n"));
   console.log(`\nRules セキュリティテスト: ${pass} PASS / ${fail} FAIL`);

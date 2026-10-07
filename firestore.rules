@@ -9,6 +9,9 @@ rules_version = '2';
 // races / raceBets / raceLogs / fcmTokens など）は、もとのルールと同じ「ログイン済みなら読み書き可」のまま。
 //
 // derby-runner（GitHub Actions）と通知の Worker はサービスアカウントで書き込むので、このルールの影響を受けない。
+//
+// 株価（market）と総資産ランキング（rankings）は、毎日 13:00 に derby-runner だけが書く。
+// ブラウザからは読み取りだけ（書き換えて株価やランキングを操作できないように）。
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -27,10 +30,15 @@ service cloud.firestore {
       return collection in ['derbyManualRaces', 'events', 'eventParticipants'];
     }
 
-    // ===== もとのルール（管理者用のコレクション以外は今まで通り） =====
+    // 下のコレクションは自動処理（サービスアカウント）だけが書く。ブラウザからは書き込めない
+    function isServerOnlyCollection(collection) {
+      return collection in ['market', 'rankings'];
+    }
+
+    // ===== もとのルール（管理者用・自動処理用のコレクション以外は今まで通り） =====
     match /{collection}/{document=**} {
       allow read: if signedIn();
-      allow write: if signedIn() && !isAdminManagedCollection(collection);
+      allow write: if signedIn() && !isAdminManagedCollection(collection) && !isServerOnlyCollection(collection);
     }
 
     // ===== 手動ゆうダービー（derbyManualRaces/{raceId}） =====

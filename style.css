@@ -4230,3 +4230,577 @@ button.secondary.danger {
 
     border-radius: 6px;
 }
+
+
+/* ==================================================
+   💰 ゆう経済（ゆう銀行・ゆう株・総資産）
+   ・スマホ：縦1列。横スクロールなし。ボタン・入力欄は指で押しやすい大きさ（高さ44px以上・文字16px）
+   ・600px〜（スマホ横・タブレット縦）：株のカードを2列、総資産の内訳を4列
+   ・900px〜（タブレット横・PC）：銀行と株を横並び。株のカードは幅に合わせて並べる
+   ・PC：最大幅 1100px（広がりすぎないように）
+   既存の画面のルールは変更せず、ここから下は追加のみ
+================================================== */
+
+.econ-page {
+    width: min(1100px, calc(100% - 24px));
+    margin: 12px auto 24px;
+}
+
+.econ-page-head {
+    margin: 4px 4px 12px;
+}
+
+.econ-page-head h2 {
+    font-size: 20px;
+}
+
+.econ-page-head p {
+    margin-top: 4px;
+    color: #777;
+    font-size: 12px;
+}
+
+.econ-content,
+.econ-columns {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+}
+
+.econ-card {
+    min-width: 0;
+    padding: 16px;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 18px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.04);
+}
+
+.econ-card h3 {
+    font-size: 18px;
+    margin-bottom: 10px;
+}
+
+.econ-card h4 {
+    margin: 18px 0 8px;
+    font-size: 14px;
+    color: #444;
+}
+
+.econ-label {
+    display: block;
+    color: #777;
+    font-size: 12px;
+}
+
+.econ-sub {
+    display: block;
+    margin-top: 4px;
+    color: #777;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.econ-note {
+    margin: 6px 0;
+    color: #777;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.econ-summary {
+    background: linear-gradient(135deg, #fff8d8, #fff);
+    border-color: #efdf8a;
+}
+
+.econ-total {
+    display: block;
+    margin-top: 2px;
+    font-size: clamp(26px, 8vw, 36px);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.econ-total.negative,
+.econ-card .negative {
+    color: #c62828;
+}
+
+.econ-breakdown {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.econ-breakdown > div {
+    min-width: 0;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.8);
+    border: 1px solid #f0e4a8;
+    border-radius: 12px;
+}
+
+.econ-breakdown dt {
+    color: #777;
+    font-size: 11px;
+}
+
+.econ-breakdown dd {
+    margin-top: 2px;
+    font-size: 16px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.econ-balance strong {
+    display: block;
+    margin: 2px 0;
+    font-size: 28px;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.econ-balance strong small {
+    margin-left: 4px;
+    font-size: 13px;
+    color: #777;
+}
+
+.econ-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 12px;
+    font-size: 12px;
+    color: #555;
+}
+
+.econ-field input,
+.stock-qty input {
+    width: 100%;
+    min-width: 0;
+    min-height: 44px;
+    padding: 8px 12px;
+    font-size: 16px;
+    border: 1px solid #d6d9de;
+    border-radius: 12px;
+    background: #fff;
+    color: #111;
+    font-variant-numeric: tabular-nums;
+}
+
+.econ-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.econ-chips button {
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid #e0e3e8;
+    border-radius: 999px;
+    background: #f6f7f9;
+    color: #333;
+    font-size: 13px;
+}
+
+.econ-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.econ-button {
+    width: 100%;
+    min-height: 46px;
+    padding: 0 12px;
+    border: 1px solid #d6d9de;
+    border-radius: 12px;
+    background: #fff;
+    color: #111;
+    font-size: 15px;
+    font-weight: 700;
+    touch-action: manipulation;
+}
+
+.econ-button.primary {
+    background: #111;
+    border-color: #111;
+    color: #fff;
+}
+
+.econ-button.buy {
+    background: #d93636;
+    border-color: #d93636;
+    color: #fff;
+}
+
+.econ-button.sell {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: #fff;
+}
+
+.econ-button:disabled {
+    opacity: 0.4;
+}
+
+.econ-card > .econ-button {
+    margin-top: 8px;
+}
+
+.econ-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid #f0f1f3;
+    font-size: 14px;
+}
+
+.econ-row span {
+    min-width: 0;
+    color: #555;
+}
+
+.econ-row b {
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.econ-row.total {
+    border-bottom: none;
+    font-weight: 700;
+}
+
+.econ-alert {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+    padding: 12px;
+    border: 1px solid #f3b4b4;
+    border-radius: 12px;
+    background: #fff1f1;
+    color: #8a1c1c;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.econ-alert strong {
+    font-size: 15px;
+}
+
+.econ-alert small {
+    color: #a24646;
+}
+
+.econ-change {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.econ-change.up,
+.stock-holding .up {
+    color: #c62828;
+}
+
+.econ-change.up {
+    background: #ffecec;
+}
+
+.econ-change.down,
+.stock-holding .down {
+    color: #1d4ed8;
+}
+
+.econ-change.down {
+    background: #e9f0ff;
+}
+
+.econ-change.flat {
+    color: #666;
+    background: #f1f2f4;
+}
+
+.econ-news {
+    margin: 8px 0 12px;
+    padding: 12px;
+    border-radius: 12px;
+    background: #f6f7f9;
+}
+
+.econ-news-title {
+    margin-bottom: 6px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.econ-news-item {
+    padding: 6px 0 6px 10px;
+    border-left: 3px solid #cfd3d9;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.econ-news-item + .econ-news-item {
+    margin-top: 6px;
+}
+
+.econ-news-item span {
+    display: block;
+    font-size: 11px;
+    color: #777;
+}
+
+.econ-news-item.good {
+    border-left-color: #d93636;
+}
+
+.econ-news-item.bad {
+    border-left-color: #2563eb;
+}
+
+.stock-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+}
+
+.stock-card {
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid #e6e8eb;
+    border-radius: 14px;
+    background: #fbfbfc;
+}
+
+.stock-head {
+    display: flex;
+    flex-wrap: wrap;            /* カードが狭いときは株価を次の行へ（会社名を省略しない） */
+    align-items: center;
+    gap: 4px 10px;
+}
+
+.stock-emoji {
+    flex-shrink: 0;
+    font-size: 26px;
+}
+
+.stock-title {
+    flex: 1 1 120px;
+    min-width: 0;
+}
+
+.stock-title b {
+    display: block;
+    font-size: 15px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.stock-title small {
+    display: block;
+    color: #777;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.stock-price {
+    flex-shrink: 0;
+    margin-left: auto;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.stock-price strong {
+    font-size: 22px;
+    font-variant-numeric: tabular-nums;
+}
+
+.stock-spark {
+    display: block;
+    width: 100%;
+    height: 30px;
+    margin: 8px 0 4px;
+}
+
+.stock-spark polyline {
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+}
+
+.stock-spark.up polyline {
+    stroke: #d93636;
+}
+
+.stock-spark.down polyline {
+    stroke: #2563eb;
+}
+
+.stock-spark-empty {
+    height: auto;
+    color: #999;
+    font-size: 11px;
+}
+
+.stock-holding {
+    font-size: 12px;
+    color: #555;
+    line-height: 1.6;
+    font-variant-numeric: tabular-nums;
+}
+
+.stock-trade {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+        "qty qty"
+        "total total"
+        "buy sell";
+    gap: 8px;
+    margin-top: 10px;
+    align-items: center;
+}
+
+.stock-qty {
+    grid-area: qty;
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    gap: 6px;
+}
+
+.stock-qty button {
+    min-height: 44px;
+    border: 1px solid #d6d9de;
+    border-radius: 12px;
+    background: #fff;
+    font-size: 20px;
+    color: #111;
+    touch-action: manipulation;
+}
+
+.stock-qty input {
+    text-align: center;
+}
+
+.stock-total {
+    grid-area: total;
+    font-size: 13px;
+    color: #555;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.stock-trade [data-trade="buy"] {
+    grid-area: buy;
+}
+
+.stock-trade [data-trade="sell"] {
+    grid-area: sell;
+}
+
+.econ-holdings {
+    padding: 0 4px;
+}
+
+.ranking-updated {
+    color: #777;
+    font-size: 11px;
+}
+
+/* 画面の幅ではなく「ゆう経済」の表示エリアの幅で並びを変える
+   （タブレット横・PC は左に友達一覧が出るので、画面の幅より狭い。container query は iOS Safari 16 以降で使える。
+   使えないブラウザでは、スマホと同じ縦1列の表示になる） */
+.econ-page {
+    container-type: inline-size;
+    container-name: econ;
+}
+
+.econ-stocks {
+    container-type: inline-size;
+    container-name: econstocks;
+}
+
+/* 表示エリア 540px〜（タブレット縦など） */
+@container econ (min-width: 540px) {
+    .econ-card {
+        padding: 18px;
+    }
+
+    .econ-breakdown {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+}
+
+/* 表示エリア 860px〜（タブレット横・PC）：銀行と株を横並び */
+@container econ (min-width: 860px) {
+    .econ-summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+        align-items: center;
+        gap: 16px;
+    }
+
+    .econ-summary .econ-breakdown {
+        margin-top: 0;
+    }
+
+    .econ-columns {
+        display: grid;
+        grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+        align-items: start;
+        gap: 16px;
+    }
+
+    .econ-bank {
+        position: sticky;
+        top: 12px;
+    }
+}
+
+/* 株の欄が 460px〜：株のカードを2列以上に並べる */
+@container econstocks (min-width: 460px) {
+    .stock-grid {
+        grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    }
+}
+
+@media (min-width: 600px) {
+    .econ-page {
+        width: min(1100px, calc(100% - 32px));
+        margin-top: 16px;
+    }
+}
+
+/* 幅の狭いスマホ（〜360px） */
+@media (max-width: 360px) {
+    .econ-card {
+        padding: 12px;
+    }
+
+    .stock-price strong {
+        font-size: 19px;
+    }
+
+    .econ-breakdown dd {
+        font-size: 14px;
+    }
+}

@@ -23,6 +23,8 @@ import {
   updateDoc, deleteDoc, query, where, onSnapshot, orderBy, limit, arrayUnion, arrayRemove, deleteField,
   serverTimestamp, writeBatch, runTransaction
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+/* ゆう銀行の返済期限（Timestamp）に使う */
+import { Timestamp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
 import {
   getMessaging, getToken, onMessage, isSupported, deleteToken
@@ -191,6 +193,8 @@ const derbyView = document.getElementById("derbyView");
 const eventsView = document.getElementById("eventsView");
 const gamesView = document.getElementById("gamesView");
 const mypageView = document.getElementById("mypageView");
+const economyView = document.getElementById("economyView");
+const economyContent = document.getElementById("economyContent");
 
 const derbyCountdown = document.getElementById("derbyCountdown");
 const raceTrack = document.getElementById("raceTrack");
@@ -1143,10 +1147,10 @@ changeNameButton?.addEventListener("click", async () => {
       ...(isNotifySetupDoneLocally() ? { notificationSetupDone: true } : {})
     });
 
-    /* コイン・ボーナス受け取り済み・累計賭け金を新しい名前に引き継ぐ
+    /* コイン・ボーナス受け取り済み・累計賭け金・ゆう銀行（預金・借入）・ゆう株・ログインボーナスの状態を新しい名前に引き継ぐ
        （引き継がないと、次に開いたときに初期コインやボーナスがもう一度付いてしまう） */
     const carriedCoinFields = {};
-    ["coins", "bonus500Granted", "bonus500GrantedAt", "totalBetAmount"].forEach((key) => {
+    ["coins", "bonus500Granted", "bonus500GrantedAt", "totalBetAmount", "bank", "stocks", "lastLoginBonusDate"].forEach((key) => {
       if (oldUserData[key] !== undefined) carriedCoinFields[key] = oldUserData[key];
     });
     if (Object.keys(carriedCoinFields).length > 0) {
@@ -3131,7 +3135,7 @@ tabButtons.forEach((button) => {
 });
 
 function switchView(view) {
-  const views = { chat: chatView, derby: derbyView, events: eventsView, games: gamesView, mypage: mypageView };
+  const views = { chat: chatView, derby: derbyView, economy: economyView, events: eventsView, games: gamesView, mypage: mypageView };
 
   Object.entries(views).forEach(([name, element]) => {
     if (!element) return;
@@ -3149,6 +3153,7 @@ function switchView(view) {
   else stopDerbySubscriptions();
   if (view === "games") loadGameRooms();
   if (view === "events") { renderEventsList(); renderEventAdminList(); }
+  if (view === "economy") openEconomyView();
 }
 
 /* =========================================================
@@ -3194,6 +3199,8 @@ logoutButton?.addEventListener("click", async () => {
     myCoins = 0;
     myAllBets = [];
     myLatestUserData = null;
+    resetLoginBonusState();
+    economyBankAmount = "";
     cachedPopularityForRaceId = null;
     cachedPopularity = null;
     lastRaceInfoRenderAt = -999;
@@ -3253,111 +3260,47 @@ async function loadMyPageStats() {
   }
 }
 
-/* 「🏆 ユーコインランキング」の見出しに合わせ、実際のゆうcoin残高ランキングを表示
-   （マイページ／ゆうダービー画面の両方から呼べる共通版。コインの仕組み自体は既存のまま） */
-/* ランキングに使うユーザーの一覧（名前・コイン・累計賭け金。コインの多い順、同じなら以前と同じ名前の並び）。
-   ・自動開催が書くまとめ rankings/coins を1件読む（以前は users を全件読んでいた）
-   ・自分の行は、手元の最新の値（listenMyCoins）に置き換える
-   ・まとめがまだ無いときは、これまでどおり users を全件読む */
-async function loadRankingUsers() {
-  const summary = await getDoc(doc(db, "rankings", "coins"));
-  let users;
-  if (summary.exists() && Array.isArray(summary.data().users)) {
-    users = summary.data().users
-      .filter((u) => u && typeof u.name === "string")
-      .map((u) => ({ name: u.name, coins: u.coins, totalBetAmount: Number(u.totalBetAmount || 0) }));
-  } else {
-    const snapshot = await getDocs(query(collection(db, "users"), orderBy("coins", "desc")));
-    users = snapshot.docs.map((item) => ({ name: item.id, coins: item.data().coins, totalBetAmount: Number(item.data().totalBetAmount || 0) }));
-  }
-
-  if (username && myLatestUserData && myLatestUserData.docId === username && typeof myLatestUserData.coins === "number") {
-    users = users.filter((u) => u.name !== username);
-    users.push({ name: username, coins: myLatestUserData.coins, totalBetAmount: Number(myLatestUserData.totalBetAmount || 0) });
-  }
-
-  return users
-    .filter((u) => typeof u.coins === "number")
-    .sort((a, b) => (b.coins - a.coins) || compareNamesLikeFirestore(b.name, a.name));
-}
-
-/* 同じコイン数のときの並びは、以前の users のクエリ（coins の降順・同点は名前＝ドキュメントIDの降順）と同じにする。
-   Firestore はドキュメントIDを UTF-8 のバイト順で比べるので、コードポイント順で比べる（同じ結果になる） */
-function compareNamesLikeFirestore(a, b) {
-  const x = Array.from(String(a), (c) => c.codePointAt(0));
-  const y = Array.from(String(b), (c) => c.codePointAt(0));
-  for (let i = 0; i < Math.min(x.length, y.length); i++) {
-    if (x[i] !== y[i]) return x[i] - y[i];
-  }
-  return x.length - y.length;
-}
-
-async function renderCoinRankingInto(targetEl) {
+/* 「🏆 総資産ランキング」（マイページ／ゆうダービー画面の両方から呼べる共通版）
+   ・毎日 13:00 に自動処理（derby-runner）が作るまとめ rankings/assets を1件読むだけ（users は読まない）
+   ・総資産 = 手持ちコイン + 銀行預金 + 保有株の評価額 − 借入残高。全ユーザーが対象・同額は同じ順位
+   ・まとめは1日1回しか変わらないので、読み込んだものを次の更新まで使い回す（画面を開くたびに読み直さない） */
+async function renderAssetRankingInto(targetEl) {
   const session = appSessionSeq;
   if (!targetEl) return;
-  targetEl.innerHTML = `<div class="loading">ランキングを読み込み中...</div>`;
+  if (!rankingCacheIsFresh()) targetEl.innerHTML = `<div class="loading">ランキングを読み込み中...</div>`;
 
   try {
-    const users = await loadRankingUsers();
-    /* ランキングに出るのは、これまでに累計 RANKING_MIN_TOTAL_BET コイン以上賭けたユーザーだけ
-       （初期コイン・ボーナスを持っているだけでは上位に入らないようにする） */
-    const all = users.filter((u) => typeof u.coins === "number" && u.totalBetAmount >= RANKING_MIN_TOTAL_BET);
+    const ranking = await loadAssetRanking();
+    if (session !== appSessionSeq) return;
+    const users = Array.isArray(ranking?.users) ? ranking.users : [];
+    const updatedNote = ranking?.date ? `<div class="ranking-updated">${escapeHTML(formatEconomyDate(ranking.date))} 13:00 更新（毎日13:00に更新）</div>` : "";
 
-    /* 自分がまだ参加条件を満たしていなければ、条件を案内する */
-    const myEntryData = users.find((u) => u.name === username);
-    const myTotalBet = myEntryData ? myEntryData.totalBetAmount : 0;
-    const joinNoteHtml = username && myTotalBet < RANKING_MIN_TOTAL_BET
-      ? `<div class="ranking-join-note">ゆうCoinを累計${RANKING_MIN_TOTAL_BET}コイン以上賭けるとランキングに参加できます（あと${RANKING_MIN_TOTAL_BET - myTotalBet}コイン）</div>`
-      : "";
-
-    if (all.length === 0) {
-      targetEl.innerHTML = `${joinNoteHtml}<div class="empty-state">まだランキング参加者がいません</div>`;
+    if (users.length === 0) {
+      targetEl.innerHTML = `<div class="empty-state">総資産ランキングは毎日13:00に集計されます（まだ集計前です）</div>`;
       return;
     }
 
-    /* 同じコイン数のユーザーは同じ順位にする（一般的な競技順位方式） */
-    let currentRank = 0;
-    let previousCoins = null;
-    const ranked = all.map((user, index) => {
-      if (user.coins !== previousCoins) {
-        currentRank = index + 1;
-        previousCoins = user.coins;
-      }
-      return { ...user, rank: currentRank };
-    });
-
-    targetEl.innerHTML = joinNoteHtml;
-
-    const top = ranked.slice(0, 20);
-    top.forEach((user) => {
+    targetEl.innerHTML = updatedNote;
+    const top = users.slice(0, 20);
+    const medal = (rank) => (rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : rank);
+    const row = (user, extraClass = "") => {
       const item = document.createElement("div");
-      item.className = "ranking-item";
-      if (user.rank <= 3) item.classList.add(`rank-${user.rank}`);
+      item.className = `ranking-item ${extraClass}`.trim();
+      if (user.rank <= 3 && !extraClass) item.classList.add(`rank-${user.rank}`);
       if (user.name === username) item.classList.add("me");
-
-      const medal = user.rank === 1 ? "🥇" : user.rank === 2 ? "🥈" : user.rank === 3 ? "🥉" : user.rank;
       item.innerHTML = `
-        <div class="ranking-number">${medal}</div>
+        <div class="ranking-number">${medal(user.rank)}</div>
         <div class="ranking-info">
           <div class="ranking-name">${escapeHTML(user.name)}${user.name === username ? "（あなた）" : ""}</div>
-          <div class="ranking-score">🪙 ${user.coins.toLocaleString()}</div>
+          <div class="ranking-score">💰 ${formatCoins(user.total)}</div>
         </div>`;
-      targetEl.appendChild(item);
-    });
+      return item;
+    };
+    top.forEach((user) => targetEl.appendChild(row(user)));
 
     /* 自分が上位20人に入っていない場合も、自分の順位が分かるようにする */
-    const myEntry = ranked.find((u) => u.name === username);
-    if (myEntry && myEntry.rank > top.length) {
-      const myRow = document.createElement("div");
-      myRow.className = "ranking-item me ranking-item-self";
-      myRow.innerHTML = `
-        <div class="ranking-number">${myEntry.rank}</div>
-        <div class="ranking-info">
-          <div class="ranking-name">${escapeHTML(username)}（あなた）</div>
-          <div class="ranking-score">🪙 ${myEntry.coins.toLocaleString()}</div>
-        </div>`;
-      targetEl.appendChild(myRow);
-    }
+    const mine = users.find((u) => u.name === username);
+    if (mine && !top.includes(mine)) targetEl.appendChild(row(mine, "me ranking-item-self"));
   } catch (error) {
     if (isInterruptedBySignOut(session)) return;
     console.error("ランキング取得エラー:", error);
@@ -3366,11 +3309,11 @@ async function renderCoinRankingInto(targetEl) {
 }
 
 async function loadCoinRanking() {
-  await renderCoinRankingInto(rankingEl);
+  await renderAssetRankingInto(rankingEl);
 }
 
 async function loadDerbyCoinRanking() {
-  await renderCoinRankingInto(document.getElementById("raceRankingPanel"));
+  await renderAssetRankingInto(document.getElementById("raceRankingPanel"));
 }
 
 /* =========================================================
@@ -3380,8 +3323,6 @@ async function loadDerbyCoinRanking() {
 const YUU_START_COINS = 1000;
 /* 初期コインとは別の「全ユーザーへの追加ボーナス」。1ユーザー1回だけ（users/{名前}.bonus500Granted で判定） */
 const YUU_BONUS_COINS = 500;
-/* ゆうCoinランキングに参加できる累計賭け金（users/{名前}.totalBetAmount） */
-const RANKING_MIN_TOTAL_BET = 100;
 const RACE_TAKEOUT_RATE = 0.8;
 const RACE_HOUR = 15;
 const RACE_MINUTE = 2;
@@ -3644,6 +3585,7 @@ let myLatestUserData = null;
 function listenMyCoins() {
   if (unsubscribeMyCoins) { unsubscribeMyCoins(); unsubscribeMyCoins = null; }
   myLatestUserData = null;
+  resetLoginBonusState();
   if (!username) return;
 
   unsubscribeMyCoins = onSnapshot(
@@ -3657,7 +3599,11 @@ function listenMyCoins() {
       }
       myLatestUserData = { ...data, docId: snap.id };
       updateCoinDisplays(data.coins);
+      /* ログインボーナス（1日1回）は、追加ボーナスを受け取ったあとに行う（同じドキュメントへのトランザクションが重なって
+         やり直しになり、読み書きが増えないように）。「💰 ゆう経済」の表示も、この購読で受け取った内容を使う（新しい読み取りは無い） */
       if (data.bonus500Granted !== true) grantBonusCoinsIfNeeded();
+      else grantLoginBonusIfNeeded(data);
+      if (isEconomyViewActive()) renderEconomyView();
     },
     (error) => console.error("コイン監視エラー:", error)
   );
@@ -3905,7 +3851,7 @@ betButton?.addEventListener("click", async () => {
     return alert("投票額は10ゆうcoin以上で入力してください。");
   }
   if (amount > myCoins) {
-    return alert("ゆうcoinが足りません。");
+    return alert(`ゆうcoinが足りません。${myCoins <= BANK_LOAN_MAX_COINS ? `\n「💰 ゆう経済」の緊急融資（${BANK_LOAN_AMOUNT}コイン）を利用できます。` : ""}`);
   }
 
   const horses = [...selectedBetHorses];
@@ -4695,7 +4641,7 @@ function ensureDerbyLiveStructure() {
     <div id="raceDetailedResult" class="race-detailed-result"></div>
     <div id="raceMyResult"></div>
     <div id="racePastResults"></div>
-    <div class="race-ranking-title">🏆 コインランキング</div>
+    <div class="race-ranking-title">🏆 総資産ランキング</div>
     <div id="raceRankingPanel" class="ranking"></div>
   `;
 }
@@ -7443,3 +7389,571 @@ async function passDaifugoTurn(roomId) {
     else if (error.message === "CANNOT_PASS") alert("最初のカードはパスできません。");
   }
 }
+
+/* =========================================================
+   💰 ゆう経済（ゆう銀行・ゆう株・総資産・ログインボーナス）
+
+   Firestore の使い方（無料枠を圧迫しないように）
+   ・自分の銀行・株・ログインボーナスは users/{名前} の bank / stocks / lastLoginBonusDate に持つ。
+     画面は、すでに常時購読している自分の users（listenMyCoins）から受け取る（新しい常時購読は作らない）
+   ・株価は market/current、総資産ランキングは rankings/assets の1件ずつ。毎日 13:00 に自動処理（derby-runner）だけが書く。
+     画面を開いたときに1回読み、次の 13:00 の更新までは読み直さない
+   ・売買・預け入れ・引き出し・借入・返済は、自分の users だけを書き換えるトランザクション1回
+   ・株価の更新・利息・返済期限切れの自動返済・ランキングの集計は、ブラウザでは行わない（derby-runner が1日1回）
+   会社・銀行の設定は derby-runner/economy.mjs と同じにすること
+========================================================= */
+
+const STOCK_COMPANIES = [
+  { code: "YGM", emoji: "🎮", name: "ユウゲームズ", sector: "ゲーム・エンタメ", initialPrice: 180 },
+  { code: "YMT", emoji: "🛒", name: "ユウマート", sector: "小売・通販", initialPrice: 240 },
+  { code: "YFD", emoji: "🍔", name: "ユウフーズ", sector: "食品・飲食", initialPrice: 150 },
+  { code: "YEN", emoji: "⚡", name: "ユウエナジー", sector: "エネルギー", initialPrice: 280 },
+  { code: "YPY", emoji: "💳", name: "ユウペイ", sector: "決済・金融", initialPrice: 210 }
+];
+const ECONOMY_UPDATE_HOUR = 13;
+const BANK_INTEREST_RATE = 0.01;
+const BANK_INTEREST_MAX = 100;
+const BANK_LOAN_AMOUNT = 500;
+const BANK_LOAN_MAX_COINS = 100;
+const BANK_LOAN_DAYS = 7;
+const LOGIN_BONUS_COINS = 50;
+const ECONOMY_RECHECK_MS = 10 * 60 * 1000; /* 13:00 を過ぎてもまだ更新されていないときに読み直す間隔 */
+const ECONOMY_MAX_TRADE_QTY = 100000;
+
+let marketCache = null;   /* { data, fetchedAt } */
+let rankingCache = null;  /* { data, fetchedAt } */
+let economyBusy = false;
+let economyBankAmount = "";
+const stockTradeQty = {};
+
+function formatCoins(value) {
+  return Math.round(Number(value) || 0).toLocaleString("ja-JP");
+}
+
+function formatEconomyDate(dateText) {
+  const [, m, d] = String(dateText || "").split("-");
+  return m && d ? `${Number(m)}/${Number(d)}` : "";
+}
+
+/* いま表示されているべき株価・ランキングの日付（13:00 より前なら前日の分） */
+function expectedEconomyDate(now = derbyNow()) {
+  const jst = toJstFields(now);
+  const beforeUpdate = jst.getUTCHours() < ECONOMY_UPDATE_HOUR;
+  return formatRaceId(beforeUpdate ? new Date(now.getTime() - 24 * 3600 * 1000) : now);
+}
+
+function economyCacheIsFresh(cache) {
+  if (!cache) return false;
+  if ((cache.data?.date || "") >= expectedEconomyDate()) return true;
+  return Date.now() - cache.fetchedAt < ECONOMY_RECHECK_MS;
+}
+
+function rankingCacheIsFresh() {
+  return economyCacheIsFresh(rankingCache);
+}
+
+function createInitialMarketData() {
+  const companies = {};
+  STOCK_COMPANIES.forEach((c) => {
+    companies[c.code] = { price: c.initialPrice, prevPrice: c.initialPrice, changePct: 0, history: [c.initialPrice] };
+  });
+  return { date: "", companies, todayNews: [], events: [] };
+}
+
+/* 株価（market/current）。まだ一度も更新されていなければ初期株価 */
+async function loadMarket() {
+  if (economyCacheIsFresh(marketCache)) return marketCache.data;
+  const snap = await getDoc(doc(db, "market", "current"));
+  const data = snap.exists() ? snap.data() : createInitialMarketData();
+  marketCache = { data, fetchedAt: Date.now() };
+  return data;
+}
+
+async function loadAssetRanking() {
+  if (rankingCacheIsFresh()) return rankingCache.data;
+  const snap = await getDoc(doc(db, "rankings", "assets"));
+  const data = snap.exists() ? snap.data() : null;
+  rankingCache = { data, fetchedAt: Date.now() };
+  return data;
+}
+
+function getStockPrice(market, code) {
+  const company = STOCK_COMPANIES.find((c) => c.code === code);
+  const price = Number(market?.companies?.[code]?.price);
+  return Number.isFinite(price) && price > 0 ? price : (company ? company.initialPrice : 0);
+}
+
+function normalizeBankData(bank) {
+  const b = bank && typeof bank === "object" ? bank : {};
+  return {
+    ...b,
+    deposit: Math.max(0, Math.floor(Number(b.deposit) || 0)),
+    interestBase: Math.max(0, Math.floor(Number(b.interestBase) || 0)),
+    loan: Math.max(0, Math.floor(Number(b.loan) || 0))
+  };
+}
+
+function normalizeStocksData(stocks) {
+  const result = {};
+  Object.entries(stocks && typeof stocks === "object" ? stocks : {}).forEach(([code, h]) => {
+    const qty = Math.max(0, Math.floor(Number(h?.qty) || 0));
+    if (qty > 0) result[code] = { qty, cost: Math.max(0, Math.round(Number(h?.cost) || 0)) };
+  });
+  return result;
+}
+
+/* 総資産 = 手持ちコイン + 銀行預金 + 保有株の評価額 − 借入残高 */
+function computeMyAssets(data, market) {
+  const bank = normalizeBankData(data?.bank);
+  const stocks = normalizeStocksData(data?.stocks);
+  const coins = Number(data?.coins) || 0;
+  const stockValue = Object.entries(stocks).reduce((sum, [code, h]) => sum + h.qty * getStockPrice(market, code), 0);
+  return { coins, deposit: bank.deposit, stockValue, loan: bank.loan, total: coins + bank.deposit + stockValue - bank.loan };
+}
+
+function isLoanOverdue(bank, now = derbyNow()) {
+  const due = toDateValue(bank.loanDueAt);
+  return bank.loan > 0 && (bank.overdue === true || (due && due <= now));
+}
+
+/* ----- ログインボーナス（1日50コイン・日本時間・1日1回） -----
+   その日はじめて自分の users を受け取ったときに、トランザクションの中で lastLoginBonusDate を確かめてから加算する。
+   複数のタブ・再読み込み・複数の端末から同時に開いても1回だけ */
+let loginBonusInFlight = false;
+let loginBonusCheckedDate = null;
+
+function resetLoginBonusState() {
+  loginBonusInFlight = false;
+  loginBonusCheckedDate = null;
+}
+
+async function grantLoginBonusIfNeeded(data) {
+  const today = getTodayRaceId();
+  if (!username || !currentUser || loginBonusInFlight || loginBonusCheckedDate === today) return;
+  if (!data || typeof data.coins !== "number" || data.lastLoginBonusDate === today) return;
+  loginBonusInFlight = true;
+  const requestedFor = username;
+  try {
+    let granted = false;
+    await runTransaction(db, async (transaction) => {
+      const userRef = doc(db, "users", requestedFor);
+      const snap = await transaction.get(userRef);
+      granted = false;
+      if (!snap.exists()) return;
+      const fresh = snap.data();
+      if (typeof fresh.coins !== "number" || fresh.lastLoginBonusDate === today) return;
+      transaction.update(userRef, { coins: fresh.coins + LOGIN_BONUS_COINS, lastLoginBonusDate: today });
+      granted = true;
+    });
+    if (requestedFor === username) loginBonusCheckedDate = today;
+    if (granted && requestedFor === username) showAppToast("🎁 ログインボーナス", `今日のログインボーナス +${LOGIN_BONUS_COINS}コイン`);
+  } catch (error) {
+    console.warn("ログインボーナスの付与に失敗:", error);
+  } finally {
+    loginBonusInFlight = false;
+  }
+}
+
+/* ----- 自分の users を書き換えるトランザクション（売買・銀行の操作） ----- */
+function economyError(code) {
+  return Object.assign(new Error(code), { economyCode: code });
+}
+
+async function runMyEconomyTransaction(work, { withMarket = false } = {}) {
+  if (!currentUser || !username) throw economyError("NOT_LOGGED_IN");
+  const userRef = doc(db, "users", username);
+  const marketRef = doc(db, "market", "current");
+  let marketData = null;
+  const outcome = await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(userRef);
+    const marketSnap = withMarket ? await transaction.get(marketRef) : null;
+    if (!snap.exists()) throw economyError("NO_USER");
+    marketData = marketSnap ? (marketSnap.exists() ? marketSnap.data() : createInitialMarketData()) : null;
+    const result = work(snap.data(), marketData);
+    transaction.update(userRef, result.fields);
+    return result;
+  });
+  /* 売買のときに読んだ株価は、そのまま画面の表示にも使う（読み直さない） */
+  if (marketData && (!marketCache || (marketData.date || "") >= (marketCache.data?.date || ""))) marketCache = { data: marketData, fetchedAt: Date.now() };
+  return outcome;
+}
+
+function parseEconomyAmount(value) {
+  const n = Number(String(value ?? "").replace(/[,，\s]/g, ""));
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+async function bankDeposit(amount) {
+  return runMyEconomyTransaction((data) => {
+    const bank = normalizeBankData(data.bank);
+    const coins = Number(data.coins) || 0;
+    if (bank.loan > 0) throw economyError("LOAN_ACTIVE");
+    if (coins < amount) throw economyError("NOT_ENOUGH_COINS");
+    return { fields: { coins: coins - amount, bank: { ...bank, deposit: bank.deposit + amount } } };
+  });
+}
+
+async function bankWithdraw(amount) {
+  return runMyEconomyTransaction((data) => {
+    const bank = normalizeBankData(data.bank);
+    const coins = Number(data.coins) || 0;
+    if (bank.deposit < amount) throw economyError("NOT_ENOUGH_DEPOSIT");
+    const deposit = bank.deposit - amount;
+    return { fields: { coins: coins + amount, bank: { ...bank, deposit, interestBase: Math.min(bank.interestBase, deposit) } } };
+  });
+}
+
+async function bankBorrow() {
+  return runMyEconomyTransaction((data) => {
+    const bank = normalizeBankData(data.bank);
+    const coins = Number(data.coins) || 0;
+    if (bank.loan > 0) throw economyError("LOAN_ACTIVE");
+    if (coins > BANK_LOAN_MAX_COINS) throw economyError("TOO_MANY_COINS");
+    const now = derbyNow();
+    return {
+      fields: {
+        coins: coins + BANK_LOAN_AMOUNT,
+        bank: {
+          ...bank,
+          loan: BANK_LOAN_AMOUNT,
+          loanTakenAt: Timestamp.fromDate(now),
+          loanDueAt: Timestamp.fromDate(new Date(now.getTime() + BANK_LOAN_DAYS * 24 * 3600 * 1000)),
+          overdue: false,
+          overdueDate: null,
+          lastAutoRepay: null
+        }
+      }
+    };
+  });
+}
+
+/* 返済は一括だけ（期限切れの自動返済で一部が返されていれば、残りの全額） */
+async function bankRepay() {
+  return runMyEconomyTransaction((data) => {
+    const bank = normalizeBankData(data.bank);
+    const coins = Number(data.coins) || 0;
+    if (bank.loan <= 0) throw economyError("NO_LOAN");
+    if (coins < bank.loan) throw economyError("NOT_ENOUGH_COINS");
+    return {
+      fields: {
+        coins: coins - bank.loan,
+        bank: { ...bank, loan: 0, loanTakenAt: null, loanDueAt: null, overdue: false, overdueDate: null, lastAutoRepay: null }
+      },
+      repaid: bank.loan
+    };
+  });
+}
+
+async function tradeStock(code, side, qty) {
+  const company = STOCK_COMPANIES.find((c) => c.code === code);
+  if (!company) throw economyError("NO_COMPANY");
+  return runMyEconomyTransaction((data, market) => {
+    const price = getStockPrice(market, code);
+    const coins = Number(data.coins) || 0;
+    const holding = normalizeStocksData(data.stocks)[code] || { qty: 0, cost: 0 };
+    const amount = price * qty;
+    let next;
+    let nextCoins;
+    if (side === "buy") {
+      if (coins < amount) throw economyError("NOT_ENOUGH_COINS");
+      next = { qty: holding.qty + qty, cost: holding.cost + amount };
+      nextCoins = coins - amount;
+    } else {
+      if (holding.qty < qty) throw economyError("NOT_ENOUGH_STOCK");
+      const costPart = Math.round(holding.cost * (qty / holding.qty));
+      next = { qty: holding.qty - qty, cost: holding.cost - costPart };
+      nextCoins = coins + amount;
+    }
+    return {
+      fields: { coins: nextCoins, [`stocks.${code}`]: next.qty > 0 ? next : deleteField() },
+      price, amount
+    };
+  }, { withMarket: true });
+}
+
+const ECONOMY_ERROR_MESSAGES = {
+  NOT_ENOUGH_COINS: "手持ちのゆうcoinが足りません。",
+  NOT_ENOUGH_DEPOSIT: "預金が足りません。",
+  NOT_ENOUGH_STOCK: "保有している株数が足りません。",
+  LOAN_ACTIVE: "借入中は、預け入れ・新しい借入はできません。先に返済してください。",
+  TOO_MANY_COINS: `緊急融資は、手持ちのゆうcoinが${BANK_LOAN_MAX_COINS}コイン以下のときだけ利用できます。`,
+  NO_LOAN: "借入はありません。",
+  NOT_LOGGED_IN: "ログインしてください。"
+};
+
+async function runEconomyAction(action, successMessage) {
+  if (economyBusy) return;
+  economyBusy = true;
+  renderEconomyView();
+  try {
+    const result = await action();
+    if (successMessage) showAppToast("💰 ゆう経済", typeof successMessage === "function" ? successMessage(result) : successMessage);
+  } catch (error) {
+    const message = ECONOMY_ERROR_MESSAGES[error?.economyCode];
+    if (!message) console.error("ゆう経済の操作エラー:", error);
+    alert(message || "処理できませんでした。時間をおいてもう一度お試しください。");
+  } finally {
+    economyBusy = false;
+    renderEconomyView();
+  }
+}
+
+/* ----- 画面 ----- */
+
+async function openEconomyView() {
+  renderEconomyView();
+  const session = appSessionSeq;
+  try {
+    await Promise.all([loadMarket(), loadAssetRanking()]);
+  } catch (error) {
+    if (isInterruptedBySignOut(session)) return;
+    console.error("ゆう経済の読み込みエラー:", error);
+  }
+  if (session === appSessionSeq) renderEconomyView();
+}
+
+function isEconomyViewActive() {
+  return Boolean(economyView?.classList.contains("active"));
+}
+
+function renderSparkline(history, up) {
+  const values = (Array.isArray(history) ? history : []).map(Number).filter((v) => Number.isFinite(v));
+  if (values.length < 2) return `<div class="stock-spark stock-spark-empty">13:00 から値動きを表示します</div>`;
+  const min = Math.min(...values), max = Math.max(...values);
+  const span = max - min || 1;
+  const points = values.map((v, i) => `${(i / (values.length - 1)) * 100},${(30 - ((v - min) / span) * 26 - 2).toFixed(1)}`).join(" ");
+  return `<svg class="stock-spark ${up ? "up" : "down"}" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true"><polyline points="${points}" fill="none" vector-effect="non-scaling-stroke" /></svg>`;
+}
+
+function changeBadge(pct) {
+  const value = Number(pct) || 0;
+  const cls = value > 0 ? "up" : value < 0 ? "down" : "flat";
+  const mark = value > 0 ? "▲" : value < 0 ? "▼" : "±";
+  return `<span class="econ-change ${cls}">${mark}${Math.abs(value).toFixed(1)}%</span>`;
+}
+
+function renderEconomyView() {
+  if (!economyContent) return;
+  if (!currentUser || !username) { economyContent.innerHTML = ""; return; }
+
+  const data = myLatestUserData && myLatestUserData.docId === username ? myLatestUserData : { coins: myCoins };
+  const market = marketCache?.data || createInitialMarketData();
+  const bank = normalizeBankData(data.bank);
+  const stocks = normalizeStocksData(data.stocks);
+  const assets = computeMyAssets(data, market);
+  const now = derbyNow();
+  const disabled = economyBusy ? "disabled" : "";
+  const ranking = rankingCache?.data;
+  const myRank = ranking?.users?.find?.((u) => u.name === username);
+
+  /* 総資産 */
+  const summaryHtml = `
+    <section class="econ-card econ-summary" aria-label="総資産">
+      <div class="econ-summary-main">
+        <span class="econ-label">総資産</span>
+        <strong class="econ-total ${assets.total < 0 ? "negative" : ""}">💰 ${formatCoins(assets.total)}</strong>
+        <span class="econ-sub">${myRank ? `総資産ランキング ${myRank.rank}位 / ${ranking.users.length}人（${escapeHTML(formatEconomyDate(ranking.date))} 13:00 時点）` : "総資産ランキングは毎日13:00に更新されます"}</span>
+      </div>
+      <dl class="econ-breakdown">
+        <div><dt>手持ち</dt><dd>🪙 ${formatCoins(assets.coins)}</dd></div>
+        <div><dt>預金</dt><dd>🏦 ${formatCoins(assets.deposit)}</dd></div>
+        <div><dt>株の評価額</dt><dd>📈 ${formatCoins(assets.stockValue)}</dd></div>
+        <div><dt>借入</dt><dd class="${assets.loan > 0 ? "negative" : ""}">${assets.loan > 0 ? "−" : ""}${formatCoins(assets.loan)}</dd></div>
+      </dl>
+    </section>`;
+
+  /* ゆう銀行 */
+  const expectedInterest = Math.min(Math.floor(Math.min(bank.deposit, bank.interestBase) * BANK_INTEREST_RATE), BANK_INTEREST_MAX);
+  const overdue = isLoanOverdue(bank, now);
+  const due = toDateValue(bank.loanDueAt);
+  const daysLeft = due ? Math.ceil((due.getTime() - now.getTime()) / (24 * 3600 * 1000)) : null;
+  const auto = bank.lastAutoRepay;
+  let loanHtml;
+  if (bank.loan > 0) {
+    loanHtml = `
+      ${overdue ? `
+        <div class="econ-alert" role="alert">
+          <strong>⚠️ 返済期限を過ぎています</strong>
+          ${auto ? `<div>自動返済額：<b>${formatCoins(auto.amount)}</b>コイン（預金 ${formatCoins(auto.fromDeposit)}・手持ち ${formatCoins(auto.fromCoins)}／${escapeHTML(formatEconomyDate(auto.date))} 13:00）</div>` : `<div>次の13:00に、預金 → 手持ちの順に自動で返済されます。</div>`}
+          <div>残り借入：<b>${formatCoins(bank.loan)}</b>コイン</div>
+          <small>残りの借入がある間は、毎日13:00に返せる分だけ自動で返済されます。新しい借入はできません。</small>
+        </div>` : ""}
+      <div class="econ-row"><span>借入残高</span><b class="negative">${formatCoins(bank.loan)}コイン</b></div>
+      <div class="econ-row"><span>返済期限</span><b>${due ? `${escapeHTML(formatJstDateTime(due))}${overdue ? "（期限切れ）" : daysLeft !== null ? `（あと${Math.max(daysLeft, 0)}日）` : ""}` : "-"}</b></div>
+      <button type="button" class="econ-button primary" data-econ="repay" ${disabled} ${assets.coins < bank.loan ? "disabled" : ""}>${formatCoins(bank.loan)}コインを返済する</button>
+      ${assets.coins < bank.loan ? `<p class="econ-note">返済には手持ちのゆうcoinが${formatCoins(bank.loan)}コイン必要です。</p>` : ""}`;
+  } else {
+    const canBorrow = assets.coins <= BANK_LOAN_MAX_COINS;
+    loanHtml = `
+      <p class="econ-note">手持ちが${BANK_LOAN_MAX_COINS}コイン以下のときに、${BANK_LOAN_AMOUNT}コインを借りられます（手数料なし・返済額${BANK_LOAN_AMOUNT}・期限${BANK_LOAN_DAYS}日）。</p>
+      <button type="button" class="econ-button" data-econ="borrow" ${disabled} ${canBorrow ? "" : "disabled"}>🆘 緊急融資で${BANK_LOAN_AMOUNT}コイン借りる</button>
+      ${canBorrow ? "" : `<p class="econ-note">いまの手持ちは${formatCoins(assets.coins)}コインなので、まだ利用できません。</p>`}`;
+  }
+
+  const bankHtml = `
+    <section class="econ-card econ-bank" aria-label="ゆう銀行">
+      <h3>🏦 ゆう銀行</h3>
+      <div class="econ-balance">
+        <span class="econ-label">普通預金</span>
+        <strong>${formatCoins(bank.deposit)}<small>コイン</small></strong>
+        <span class="econ-sub">利息 1日1%（上限${BANK_INTEREST_MAX}コイン）・毎日13:00${bank.deposit > 0 ? `／次回 +${formatCoins(expectedInterest)}コイン（見込み）` : ""}</span>
+        ${bank.deposit > bank.interestBase ? `<span class="econ-sub">新しく預けた分は、次の13:00の処理のあとから利息の対象になります。</span>` : ""}
+        ${bank.lastInterest > 0 && bank.interestDate ? `<span class="econ-sub">${escapeHTML(formatEconomyDate(bank.interestDate))} の利息 +${formatCoins(bank.lastInterest)}コイン</span>` : ""}
+      </div>
+      <label class="econ-field">
+        <span>金額</span>
+        <input id="econBankAmount" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="例：100" value="${escapeHTML(economyBankAmount)}">
+      </label>
+      <div class="econ-chips">
+        <button type="button" data-econ-amount="100">100</button>
+        <button type="button" data-econ-amount="500">500</button>
+        <button type="button" data-econ-amount="coins">手持ち全部</button>
+        <button type="button" data-econ-amount="deposit">預金全部</button>
+      </div>
+      <div class="econ-actions">
+        <button type="button" class="econ-button primary" data-econ="deposit" ${disabled} ${bank.loan > 0 ? "disabled" : ""}>預ける</button>
+        <button type="button" class="econ-button" data-econ="withdraw" ${disabled} ${bank.deposit > 0 ? "" : "disabled"}>引き出す</button>
+      </div>
+      ${bank.loan > 0 ? `<p class="econ-note">借入中は預け入れできません（引き出しはできます）。</p>` : ""}
+      <h4>借入</h4>
+      ${loanHtml}
+    </section>`;
+
+  /* ゆう株 */
+  const news = Array.isArray(market.todayNews) ? market.todayNews : [];
+  const events = Array.isArray(market.events) ? market.events : [];
+  const companyOf = (code) => STOCK_COMPANIES.find((c) => c.code === code) || { emoji: "", name: code };
+  const newsHtml = market.date
+    ? `<div class="econ-news">
+        <div class="econ-news-title">📰 ${escapeHTML(formatEconomyDate(market.date))} 13:00 のニュース</div>
+        ${news.length ? news.map((n) => `<div class="econ-news-item ${n.kind === "good" ? "good" : "bad"}"><span>${companyOf(n.code).emoji} ${escapeHTML(companyOf(n.code).name)}</span>${escapeHTML(n.text)}</div>`).join("") : `<div class="econ-news-item">ニュースはありません</div>`}
+        ${events.map((e) => `<div class="econ-news-item ${e.kind === "surge" ? "good" : "bad"}"><span>${companyOf(e.code).emoji} ${escapeHTML(companyOf(e.code).name)}</span>${e.kind === "surge" ? "🚀 株価が急騰しました" : "💥 株価が暴落しました"}</div>`).join("")}
+      </div>`
+    : `<div class="econ-news"><div class="econ-news-title">📰 株価は毎日13:00に更新されます（初回の更新まで初期株価です）</div></div>`;
+
+  const cardsHtml = STOCK_COMPANIES.map((c) => {
+    const info = market.companies?.[c.code] || {};
+    const price = getStockPrice(market, c.code);
+    const holding = stocks[c.code];
+    const qty = stockTradeQty[c.code] || 1;
+    const value = holding ? holding.qty * price : 0;
+    const profit = holding ? value - holding.cost : 0;
+    const canBuy = assets.coins >= price * qty;
+    const canSell = holding && holding.qty >= qty;
+    return `
+      <article class="stock-card" data-code="${c.code}">
+        <div class="stock-head">
+          <span class="stock-emoji" aria-hidden="true">${c.emoji}</span>
+          <div class="stock-title"><b>${escapeHTML(c.name)}</b><small>${escapeHTML(c.sector)}</small></div>
+          <div class="stock-price"><strong>${formatCoins(price)}</strong>${changeBadge(info.changePct)}</div>
+        </div>
+        ${renderSparkline(info.history, (Number(info.changePct) || 0) >= 0)}
+        <div class="stock-holding">${holding
+          ? `保有 <b>${formatCoins(holding.qty)}</b>株 ・ 評価額 <b>${formatCoins(value)}</b> ・ 損益 <b class="${profit > 0 ? "up" : profit < 0 ? "down" : ""}">${profit > 0 ? "+" : ""}${formatCoins(profit)}</b>`
+          : "保有していません"}</div>
+        <div class="stock-trade">
+          <div class="stock-qty" role="group" aria-label="${escapeHTML(c.name)}の株数">
+            <button type="button" data-qty-step="-1" aria-label="1株減らす">−</button>
+            <input type="text" inputmode="numeric" pattern="[0-9]*" data-qty-input value="${qty}" aria-label="株数">
+            <button type="button" data-qty-step="1" aria-label="1株増やす">＋</button>
+          </div>
+          <div class="stock-total">合計 <b>${formatCoins(price * qty)}</b></div>
+          <button type="button" class="econ-button buy" data-trade="buy" ${disabled} ${canBuy ? "" : "disabled"}>買う</button>
+          <button type="button" class="econ-button sell" data-trade="sell" ${disabled} ${canSell ? "" : "disabled"}>売る</button>
+        </div>
+      </article>`;
+  }).join("");
+
+  const holdingCodes = Object.keys(stocks);
+  const holdingsHtml = holdingCodes.length
+    ? `<div class="econ-holdings">${holdingCodes.map((code) => {
+        const c = companyOf(code); const h = stocks[code]; const v = h.qty * getStockPrice(market, code);
+        return `<div class="econ-row"><span>${c.emoji} ${escapeHTML(c.name)} ${formatCoins(h.qty)}株</span><b>${formatCoins(v)}</b></div>`;
+      }).join("")}<div class="econ-row total"><span>評価額の合計</span><b>${formatCoins(assets.stockValue)}</b></div></div>`
+    : `<p class="econ-note">まだ株を持っていません。</p>`;
+
+  const stocksHtml = `
+    <section class="econ-card econ-stocks" aria-label="ゆう株">
+      <h3>📈 ゆう株</h3>
+      <p class="econ-note">24時間いつでも売買できます（手数料なし）。株価は毎日13:00に更新されます。</p>
+      ${newsHtml}
+      <div class="stock-grid">${cardsHtml}</div>
+      <h4>保有株</h4>
+      ${holdingsHtml}
+    </section>`;
+
+  /* 入力中の値・フォーカスを、描き直しても保つ */
+  const active = document.activeElement;
+  const activeKey = active && economyContent.contains(active)
+    ? (active.id || (active.closest(".stock-card")?.dataset.code || "") + (active.matches("[data-qty-input]") ? ":qty" : ""))
+    : null;
+  economyContent.innerHTML = `${summaryHtml}<div class="econ-columns">${bankHtml}${stocksHtml}</div>`;
+  if (activeKey) {
+    const target = activeKey === "econBankAmount" ? document.getElementById("econBankAmount")
+      : activeKey.endsWith(":qty") ? economyContent.querySelector(`.stock-card[data-code="${activeKey.split(":")[0]}"] [data-qty-input]`) : null;
+    if (target) { target.focus(); const v = target.value; target.value = ""; target.value = v; }
+  }
+}
+
+economyContent?.addEventListener("input", (event) => {
+  const input = event.target;
+  if (input.id === "econBankAmount") { economyBankAmount = input.value.replace(/[^0-9]/g, ""); return; }
+  if (input.matches("[data-qty-input]")) {
+    const code = input.closest(".stock-card")?.dataset.code;
+    const qty = parseEconomyAmount(input.value);
+    if (code && qty) { stockTradeQty[code] = Math.min(qty, ECONOMY_MAX_TRADE_QTY); }
+  }
+});
+
+economyContent?.addEventListener("change", (event) => {
+  if (event.target.matches("[data-qty-input]")) renderEconomyView();
+});
+
+economyContent?.addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button || button.disabled) return;
+  const data = myLatestUserData && myLatestUserData.docId === username ? myLatestUserData : { coins: myCoins };
+
+  if (button.dataset.econAmount) {
+    const key = button.dataset.econAmount;
+    const value = key === "coins" ? Math.max(0, Math.floor(Number(data.coins) || 0))
+      : key === "deposit" ? normalizeBankData(data.bank).deposit : Number(key);
+    economyBankAmount = value > 0 ? String(value) : "";
+    renderEconomyView();
+    return;
+  }
+
+  if (button.dataset.qtyStep) {
+    const code = button.closest(".stock-card")?.dataset.code;
+    if (!code) return;
+    stockTradeQty[code] = Math.min(ECONOMY_MAX_TRADE_QTY, Math.max(1, (stockTradeQty[code] || 1) + Number(button.dataset.qtyStep)));
+    renderEconomyView();
+    return;
+  }
+
+  if (button.dataset.trade) {
+    const code = button.closest(".stock-card")?.dataset.code;
+    const company = STOCK_COMPANIES.find((c) => c.code === code);
+    const qty = stockTradeQty[code] || 1;
+    if (!company) return;
+    const side = button.dataset.trade;
+    runEconomyAction(() => tradeStock(code, side, qty),
+      (r) => `${company.name}を${formatCoins(qty)}株${side === "buy" ? "買いました" : "売りました"}（1株 ${formatCoins(r.price)}・合計 ${formatCoins(r.amount)}コイン）`);
+    return;
+  }
+
+  const action = button.dataset.econ;
+  if (!action) return;
+  if (action === "deposit" || action === "withdraw") {
+    const amount = parseEconomyAmount(economyBankAmount);
+    if (!amount) return alert("金額を1以上の整数で入力してください。");
+    runEconomyAction(() => (action === "deposit" ? bankDeposit(amount) : bankWithdraw(amount)),
+      `${formatCoins(amount)}コインを${action === "deposit" ? "預けました" : "引き出しました"}`);
+    economyBankAmount = "";
+  } else if (action === "borrow") {
+    if (!confirm(`${BANK_LOAN_AMOUNT}コインを借ります。\n返済額は${BANK_LOAN_AMOUNT}コイン（手数料なし）、返済期限は${BANK_LOAN_DAYS}日後です。\n期限を過ぎると、毎日13:00に預金・手持ちから自動で返済されます。`)) return;
+    runEconomyAction(() => bankBorrow(), `${BANK_LOAN_AMOUNT}コインを借りました（${BANK_LOAN_DAYS}日以内に返済してください）`);
+  } else if (action === "repay") {
+    runEconomyAction(() => bankRepay(), (r) => `${formatCoins(r.repaid)}コインを返済しました`);
+  }
+});
