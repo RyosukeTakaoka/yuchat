@@ -93,7 +93,6 @@ let unsubscribeGameRooms = null;
 let unsubscribeCurrentGame = null;
 let selectedDaifugoCards = [];
 let selectedShogiPiece = null;
-let currentShogiPlayer = "sente";
 let unsubscribeGameInvites = null;
 let pendingGameInvites = [];
 let gameInvitesInitialized = false;
@@ -5818,7 +5817,7 @@ function createInitialGameState(type) {
     return { board: createInitialOthelloBoard(), currentPlayer: "black", started: false, winner: null };
   }
   if (type === "shogi") {
-    return ensureShogiState({ board: createInitialShogiBoard(), currentPlayer: "sente", winner: null });
+    return { board: createInitialShogiBoard(), captured: { sente: [], gote: [] }, currentPlayer: "sente", winner: null, moveCount: 0 };
   }
   if (type === "daifugo") {
     return applyDaifugoRules({
@@ -6418,29 +6417,281 @@ async function playOthelloMove(room, row, col) {
 
 /* =========================================================
    将棋
+   ・駒は「持ち主＋駒」で保存する（"s:歩" は先手の歩、"g:歩" は後手の歩）。
+     以前は持ち主を保存しておらず、盤の上下の位置で判定していたため、駒が中央を越えると持ち主を取り違えていた。
+     持ち主の無い古い盤（"歩" だけ）は、読み込むときに位置から持ち主を補う（対局開始時の配置なら正しく変換される）
+   ・盤のデータ（Firestore）は回転させない。画面だけ、後手の人には180度回して表示する（自分の駒がいつも下）
+   ・合法手の判定（駒の動き・成り・持ち駒・二歩・行き所のない駒・打ち歩詰め・王手放置／自殺手の禁止・詰み）は
+     下の「将棋のルール」で行い、表示（動けるマス）と指したときの確認（トランザクションの中）の両方で同じものを使う
 ========================================================= */
 
-function createInitialShogiBoard() {
-  return [
-    ["香","桂","銀","金","王","金","銀","桂","香"],
-    [null,"飛",null,null,null,null,null,"角",null],
-    ["歩","歩","歩","歩","歩","歩","歩","歩","歩"],
-    [null,null,null,null,null,null,null,null,null],
-    [null,null,null,null,null,null,null,null,null],
-    [null,null,null,null,null,null,null,null,null],
-    ["歩","歩","歩","歩","歩","歩","歩","歩","歩"],
-    [null,"角",null,null,null,null,null,"飛",null],
-    ["香","桂","銀","金","玉","金","銀","桂","香"]
-  ];
+/* ===== 将棋のルール（SHOGI-ENGINE-START：画面に依存しない純粋な関数。テストでもこの部分をそのまま使う） ===== */
+const SHOGI_PROMOTED = { "歩": "と", "香": "成香", "桂": "成桂", "銀": "成銀", "角": "馬", "飛": "龍" };
+const SHOGI_UNPROMOTED = { "と": "歩", "成香": "香", "成桂": "桂", "成銀": "銀", "馬": "角", "龍": "飛" };
+const SHOGI_HAND_ORDER = ["飛", "角", "金", "銀", "桂", "香", "歩"];
+const SHOGI_GOLD_LIKE = ["金", "と", "成香", "成桂", "成銀"];
+
+function shogiOpponent(owner) { return owner === "sente" ? "gote" : "sente"; }
+function getUnpromotedShogiPiece(piece) { return SHOGI_UNPROMOTED[piece] || piece; }
+function isPromotedShogiPiece(piece) { return Boolean(SHOGI_UNPROMOTED[piece]); }
+
+/* 1マス分のデータ → { p: 駒, o: 持ち主 }。持ち主の無い古いデータは位置（上半分＝後手）から補う */
+function decodeShogiCell(cell, row) {
+  if (!cell) return null;
+  if (typeof cell === "object" && cell.p) return { p: cell.p, o: cell.o === "gote" ? "gote" : "sente" };
+  const text = String(cell);
+  if (text.startsWith("s:")) return { p: text.slice(2), o: "sente" };
+  if (text.startsWith("g:")) return { p: text.slice(2), o: "gote" };
+  return { p: text, o: row < 4 ? "gote" : "sente" };
 }
 
+function encodeShogiCell(piece) {
+  return piece ? `${piece.o === "gote" ? "g" : "s"}:${piece.p}` : null;
+}
+
+function decodeShogiBoard(board) {
+  return Array.from({ length: 9 }, (_, row) => Array.from({ length: 9 }, (_, col) => decodeShogiCell(board?.[row]?.[col] ?? null, row)));
+}
+
+function encodeShogiBoard(board) {
+  return board.map((line) => line.map(encodeShogiCell));
+}
+
+function createInitialShogiBoard() {
+  const back = ["香", "桂", "銀", "金", null, "金", "銀", "桂", "香"];
+  const rows = [
+    back.map((p, col) => (col === 4 ? "王" : p)).map((p) => `g:${p}`),
+    [null, "g:飛", null, null, null, null, null, "g:角", null],
+    Array(9).fill("g:歩"),
+    Array(9).fill(null), Array(9).fill(null), Array(9).fill(null),
+    Array(9).fill("s:歩"),
+    [null, "s:角", null, null, null, null, null, "s:飛", null],
+    back.map((p, col) => (col === 4 ? "玉" : p)).map((p) => `s:${p}`)
+  ];
+  return rows;
+}
+
+function shogiForward(owner) { return owner === "sente" ? -1 : 1; }
+function isShogiInside(row, col) { return row >= 0 && row < 9 && col >= 0 && col < 9; }
+
+/* 1マスずつ動く方向と、どこまでも進める方向 */
+function getShogiVectors(piece, owner) {
+  const f = shogiForward(owner);
+  const orth = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const diag = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
+  if (piece === "歩") return { steps: [[f, 0]], slides: [] };
+  if (piece === "香") return { steps: [], slides: [[f, 0]] };
+  if (piece === "桂") return { steps: [[2 * f, -1], [2 * f, 1]], slides: [] };
+  if (piece === "銀") return { steps: [[f, 0], [f, -1], [f, 1], [-f, -1], [-f, 1]], slides: [] };
+  if (SHOGI_GOLD_LIKE.includes(piece)) return { steps: [[f, 0], [f, -1], [f, 1], [0, -1], [0, 1], [-f, 0]], slides: [] };
+  if (piece === "王" || piece === "玉") return { steps: [...orth, ...diag], slides: [] };
+  if (piece === "角") return { steps: [], slides: diag };
+  if (piece === "飛") return { steps: [], slides: orth };
+  if (piece === "馬") return { steps: orth, slides: diag };
+  if (piece === "龍") return { steps: diag, slides: orth };
+  return { steps: [], slides: [] };
+}
+
+/* 駒の動きだけで行けるマス（王手の確認は含まない）。自分の駒のマスは除き、相手の駒は取れる */
+function getShogiPseudoMoves(board, row, col) {
+  const piece = board[row]?.[col];
+  if (!piece) return [];
+  const { steps, slides } = getShogiVectors(piece.p, piece.o);
+  const result = [];
+  steps.forEach(([dr, dc]) => {
+    const r = row + dr, c = col + dc;
+    if (!isShogiInside(r, c)) return;
+    const target = board[r][c];
+    if (target && target.o === piece.o) return;
+    result.push({ row: r, col: c, capture: Boolean(target) });
+  });
+  slides.forEach(([dr, dc]) => {
+    let r = row + dr, c = col + dc;
+    while (isShogiInside(r, c)) {
+      const target = board[r][c];
+      if (target) {
+        if (target.o !== piece.o) result.push({ row: r, col: c, capture: true });
+        break;
+      }
+      result.push({ row: r, col: c, capture: false });
+      r += dr; c += dc;
+    }
+  });
+  return result;
+}
+
+function findShogiKing(board, owner) {
+  for (let row = 0; row < 9; row++) {
+    for (let col = 0; col < 9; col++) {
+      const piece = board[row][col];
+      if (piece && piece.o === owner && (piece.p === "王" || piece.p === "玉")) return { row, col };
+    }
+  }
+  return null;
+}
+
+function isShogiSquareAttacked(board, row, col, byOwner) {
+  for (let r = 0; r < 9; r++) {
+    for (let c = 0; c < 9; c++) {
+      const piece = board[r][c];
+      if (!piece || piece.o !== byOwner) continue;
+      if (getShogiPseudoMoves(board, r, c).some((m) => m.row === row && m.col === col)) return true;
+    }
+  }
+  return false;
+}
+
+function isShogiInCheck(board, owner) {
+  const king = findShogiKing(board, owner);
+  if (!king) return false;
+  return isShogiSquareAttacked(board, king.row, king.col, shogiOpponent(owner));
+}
+
+function isInShogiPromotionZone(row, owner) {
+  return owner === "sente" ? row <= 2 : row >= 6;
+}
+
+/* 成れるか（成れる駒が、相手陣に入る・相手陣の中で動く・相手陣から出るとき） */
+function canPromoteShogiMove(piece, fromRow, toRow, owner) {
+  if (!SHOGI_PROMOTED[piece]) return false;
+  return isInShogiPromotionZone(fromRow, owner) || isInShogiPromotionZone(toRow, owner);
+}
+
+/* 行き所のない駒になる段（歩・香は最奥段、桂は奥2段）。成らずに進む・打つことはできない */
+function isShogiDeadEndRow(piece, row, owner) {
+  const last = owner === "sente" ? 0 : 8;
+  if (piece === "歩" || piece === "香") return row === last;
+  if (piece === "桂") return owner === "sente" ? row <= 1 : row >= 7;
+  return false;
+}
+
+function cloneShogiBoard(board) {
+  return board.map((line) => line.map((cell) => (cell ? { ...cell } : null)));
+}
+
+/* 盤に手を反映した新しい盤（確認はしない） */
+function applyShogiMoveToBoard(board, move, owner) {
+  const next = cloneShogiBoard(board);
+  let captured = null;
+  if (move.type === "drop") {
+    next[move.to.row][move.to.col] = { p: move.piece, o: owner };
+  } else {
+    const moving = next[move.from.row][move.from.col];
+    captured = next[move.to.row][move.to.col];
+    next[move.to.row][move.to.col] = { p: move.promote ? SHOGI_PROMOTED[moving.p] : moving.p, o: owner };
+    next[move.from.row][move.from.col] = null;
+  }
+  return { board: next, captured };
+}
+
+/* 盤上の駒の合法手（自分の玉が王手のままになる手・王手になる手は除く）。成れるか・成らなければならないかも返す */
+function getShogiLegalMovesFrom(board, row, col) {
+  const piece = board[row]?.[col];
+  if (!piece) return [];
+  return getShogiPseudoMoves(board, row, col).filter((m) => {
+    const { board: next } = applyShogiMoveToBoard(board, { type: "move", from: { row, col }, to: m }, piece.o);
+    return !isShogiInCheck(next, piece.o);
+  }).map((m) => ({
+    ...m,
+    canPromote: canPromoteShogiMove(piece.p, row, m.row, piece.o),
+    mustPromote: isShogiDeadEndRow(piece.p, m.row, piece.o)
+  }));
+}
+
+/* 持ち駒を打てるマス（空きマス・行き所のない駒にならない・二歩でない・自玉が王手にならない・打ち歩詰めでない） */
+function getShogiLegalDrops(board, hand, piece, owner, checkUchifuzume = true) {
+  if (!Array.isArray(hand) || !hand.includes(piece)) return [];
+  const result = [];
+  for (let row = 0; row < 9; row++) {
+    for (let col = 0; col < 9; col++) {
+      if (board[row][col]) continue;
+      if (isShogiDeadEndRow(piece, row, owner)) continue;
+      if (piece === "歩" && board.some((line) => line[col] && line[col].o === owner && line[col].p === "歩")) continue; /* 二歩 */
+      const { board: next } = applyShogiMoveToBoard(board, { type: "drop", piece, to: { row, col } }, owner);
+      if (isShogiInCheck(next, owner)) continue;
+      if (piece === "歩" && checkUchifuzume) {
+        const enemy = shogiOpponent(owner);
+        /* 打ち歩詰め：歩を打って王手にし、相手に逃げる手が無いときは打てない */
+        if (isShogiInCheck(next, enemy) && !hasShogiLegalMove(next, null, enemy, false)) continue;
+      }
+      result.push({ row, col, capture: false, canPromote: false, mustPromote: false });
+    }
+  }
+  return result;
+}
+
+/* その持ち主に、指せる手が1つでもあるか（詰みの判定に使う）。hands は { sente: [...], gote: [...] } */
+function hasShogiLegalMove(board, hands, owner, checkUchifuzume = true) {
+  for (let row = 0; row < 9; row++) {
+    for (let col = 0; col < 9; col++) {
+      if (board[row][col]?.o === owner && getShogiLegalMovesFrom(board, row, col).length) return true;
+    }
+  }
+  const hand = hands?.[owner] || [];
+  return [...new Set(hand)].some((piece) => getShogiLegalDrops(board, hand, piece, owner, checkUchifuzume).length > 0);
+}
+
+/* 手を指したあとの対局の状態。合法でなければ Error を投げる（指したときに、トランザクションの中で必ず確かめる）
+   move: { type: "move", from: {row, col}, to: {row, col}, promote: true/false } または { type: "drop", piece: "歩", to: {row, col} } */
+function applyShogiMove(state, move, owner) {
+  if (state.winner) throw new Error("対局は終了しています");
+  if (state.currentPlayer !== owner) throw new Error("現在の手番ではありません");
+  const board = state.board;
+  const hands = { sente: [...(state.captured?.sente || [])], gote: [...(state.captured?.gote || [])] };
+  let promote = false;
+
+  if (move.type === "drop") {
+    const legal = getShogiLegalDrops(board, hands[owner], move.piece, owner);
+    if (!legal.some((m) => m.row === move.to.row && m.col === move.to.col)) throw new Error("そこには打てません");
+    hands[owner].splice(hands[owner].indexOf(move.piece), 1);
+  } else {
+    const piece = board[move.from.row]?.[move.from.col];
+    if (!piece || piece.o !== owner) throw new Error("動かせる駒がありません");
+    const target = getShogiLegalMovesFrom(board, move.from.row, move.from.col).find((m) => m.row === move.to.row && m.col === move.to.col);
+    if (!target) throw new Error("その駒はそこへ動けません");
+    promote = target.mustPromote || (Boolean(move.promote) && target.canPromote);
+  }
+
+  const { board: next, captured } = applyShogiMoveToBoard(board, { ...move, promote }, owner);
+  if (captured) hands[owner].push(getUnpromotedShogiPiece(captured.p)); /* 成った駒を取ったら、元の駒に戻して持ち駒にする */
+
+  const enemy = shogiOpponent(owner);
+  const check = isShogiInCheck(next, enemy);
+  const winner = hasShogiLegalMove(next, hands, enemy) ? null : owner; /* 相手に指せる手が無い＝詰み */
+  return {
+    ...state,
+    board: next,
+    captured: hands,
+    currentPlayer: enemy,
+    winner,
+    winReason: winner ? (check ? "checkmate" : "noMoves") : null,
+    check,
+    moveCount: Number(state.moveCount || 0) + 1,
+    lastMove: move.type === "drop"
+      ? { type: "drop", piece: move.piece, to: move.to, by: owner }
+      : { type: "move", from: move.from, to: move.to, promote, by: owner }
+  };
+}
+/* ===== SHOGI-ENGINE-END ===== */
+
+/* 保存されている状態 → 画面・ルールで使う形（盤は持ち主付き） */
 function ensureShogiState(state) {
   if (!state) return state;
-  if (!Array.isArray(state.board)) state.board = createInitialShogiBoard();
-  if (!state.captured) state.captured = { sente: [], gote: [] };
-  if (!state.currentPlayer) state.currentPlayer = "sente";
-  if (typeof state.winner === "undefined") state.winner = null;
-  return state;
+  const board = Array.isArray(state.board) ? state.board : createInitialShogiBoard();
+  const captured = state.captured || {};
+  return {
+    ...state,
+    board: decodeShogiBoard(board),
+    captured: { sente: Array.isArray(captured.sente) ? captured.sente.map(getUnpromotedShogiPiece) : [], gote: Array.isArray(captured.gote) ? captured.gote.map(getUnpromotedShogiPiece) : [] },
+    currentPlayer: state.currentPlayer === "gote" ? "gote" : "sente",
+    winner: state.winner || null,
+    moveCount: Number(state.moveCount || 0)
+  };
+}
+
+/* 保存用（盤は "s:歩" などの文字列） */
+function shogiStateForSave(state) {
+  return { ...state, board: encodeShogiBoard(state.board) };
 }
 
 function getShogiPlayer(room) {
@@ -6452,286 +6703,237 @@ function getShogiPlayer(room) {
   return null;
 }
 
-function isPieceOwnedByPlayer(piece, row, player) {
-  if (!piece) return false;
-  const upper = row < 4, lower = row > 4;
-  if (player === "sente") return !upper;
-  if (player === "gote") return !lower;
-  return false;
+/* ----- 画面 ----- */
+let shogiSelectionMoveCount = null;
+let shogiPromotionPending = false;
+
+function getShogiTargets(state, viewer) {
+  if (!selectedShogiPiece || !viewer || state.winner || state.currentPlayer !== viewer) return [];
+  if (selectedShogiPiece.type === "hand") return getShogiLegalDrops(state.board, state.captured[viewer], selectedShogiPiece.piece, viewer);
+  const piece = state.board[selectedShogiPiece.row]?.[selectedShogiPiece.col];
+  if (!piece || piece.o !== viewer) return [];
+  return getShogiLegalMovesFrom(state.board, selectedShogiPiece.row, selectedShogiPiece.col);
 }
 
-function isClearShogiPath(board, fromRow, fromCol, toRow, toCol) {
-  const rowStep = Math.sign(toRow - fromRow);
-  const colStep = Math.sign(toCol - fromCol);
-  let row = fromRow + rowStep, col = fromCol + colStep;
+function renderShogiHand(state, owner, viewer, room) {
+  const hand = state.captured[owner] || [];
+  const box = document.createElement("div");
+  box.className = `shogi-hand ${owner === viewer ? "mine" : "theirs"}`;
+  box.dataset.owner = owner;
+  const label = document.createElement("span");
+  label.className = "shogi-hand-label";
+  const members = Array.isArray(room.members) ? room.members : [];
+  const name = owner === "sente" ? members[0] : members[1];
+  label.textContent = `${owner === "sente" ? "☗先手" : "☖後手"}${name ? `（${name}）` : ""} 持ち駒`;
+  box.appendChild(label);
 
-  while (row !== toRow || col !== toCol) {
-    if (board[row]?.[col]) return false;
-    row += rowStep; col += colStep;
+  const counts = SHOGI_HAND_ORDER.map((piece) => [piece, hand.filter((p) => p === piece).length]).filter(([, n]) => n > 0);
+  if (!counts.length) {
+    const none = document.createElement("span");
+    none.className = "shogi-hand-empty";
+    none.textContent = "なし";
+    box.appendChild(none);
   }
-  return true;
-}
-
-function isValidShogiMove(board, fromRow, fromCol, toRow, toCol, piece, player) {
-  if (fromRow === toRow && fromCol === toCol) return false;
-  if (toRow < 0 || toRow >= 9 || toCol < 0 || toCol >= 9) return false;
-
-  const destination = board[toRow]?.[toCol] || null;
-  if (destination && isPieceOwnedByPlayer(destination, toRow, player)) return false;
-
-  const direction = player === "sente" ? -1 : 1;
-  const dr = toRow - fromRow, dc = toCol - fromCol;
-  const base = getUnpromotedShogiPiece(piece);
-
-  switch (base) {
-    case "歩": return dc === 0 && dr === direction;
-    case "香":
-      if (dc !== 0 || Math.sign(dr) !== direction) return false;
-      return isClearShogiPath(board, fromRow, fromCol, toRow, toCol);
-    case "桂": return Math.abs(dc) === 1 && dr === direction * 2;
-    case "銀":
-      return (dc === 0 && dr === direction) || (Math.abs(dc) === 1 && Math.abs(dr) === 1);
-    case "金":
-      return (dc === 0 && dr === direction) || (Math.abs(dc) === 1 && dr === 0) || (Math.abs(dc) === 1 && dr === -direction);
-    case "王": case "玉":
-      return Math.abs(dr) <= 1 && Math.abs(dc) <= 1;
-    case "飛":
-      if (dr !== 0 && dc !== 0) return false;
-      return isClearShogiPath(board, fromRow, fromCol, toRow, toCol);
-    case "角":
-      if (Math.abs(dr) !== Math.abs(dc)) return false;
-      return isClearShogiPath(board, fromRow, fromCol, toRow, toCol);
-    default: return false;
-  }
-}
-
-const SHOGI_PROMOTED = { "歩":"と","香":"成香","桂":"成桂","銀":"成銀","角":"馬","飛":"龍" };
-const SHOGI_UNPROMOTED = { "と":"歩","成香":"香","成桂":"桂","成銀":"銀","馬":"角","龍":"飛" };
-
-function getUnpromotedShogiPiece(piece) { return SHOGI_UNPROMOTED[piece] || piece; }
-function canPromoteShogiPiece(piece) { return Boolean(SHOGI_PROMOTED[piece]); }
-function isInShogiPromotionZone(row, player) {
-  if (player === "sente") return row <= 2;
-  if (player === "gote") return row >= 6;
-  return false;
-}
-function canPromoteOnShogiMove(piece, fromRow, toRow, player) {
-  if (!canPromoteShogiPiece(piece)) return false;
-  return isInShogiPromotionZone(fromRow, player) || isInShogiPromotionZone(toRow, player);
-}
-function mustPromoteShogiPiece(piece, toRow, player) {
-  if ((piece === "歩" || piece === "香")) {
-    if (player === "sente" && toRow === 0) return true;
-    if (player === "gote" && toRow === 8) return true;
-  }
-  if (piece === "桂") {
-    if (player === "sente" && toRow <= 1) return true;
-    if (player === "gote" && toRow >= 7) return true;
-  }
-  return false;
-}
-
-function findShogiKing(board, player) {
-  for (let row = 0; row < 9; row++) {
-    for (let col = 0; col < 9; col++) {
-      const piece = board[row]?.[col];
-      if ((piece === "王" || piece === "玉") && isPieceOwnedByPlayer(piece, row, player)) {
-        return { row, col };
-      }
-    }
-  }
-  return null;
-}
-
-function isShogiInCheck(board, player) {
-  const king = findShogiKing(board, player);
-  if (!king) return true;
-  const opponent = player === "sente" ? "gote" : "sente";
-
-  for (let row = 0; row < 9; row++) {
-    for (let col = 0; col < 9; col++) {
-      const piece = board[row]?.[col];
-      if (!piece || !isPieceOwnedByPlayer(piece, row, opponent)) continue;
-      if (isValidShogiMove(board, row, col, king.row, king.col, piece, opponent)) return true;
-    }
-  }
-  return false;
-}
-
-function simulateShogiMove(board, fromRow, fromCol, toRow, toCol) {
-  const newBoard = board.map((row) => [...row]);
-  newBoard[toRow][toCol] = newBoard[fromRow][fromCol];
-  newBoard[fromRow][fromCol] = null;
-  return newBoard;
+  const canUse = owner === viewer && state.currentPlayer === viewer && !state.winner;
+  counts.forEach(([piece, n]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "shogi-hand-piece";
+    button.dataset.piece = piece;
+    button.innerHTML = `<span class="shogi-piece${owner === viewer ? "" : " theirs"}">${escapeHTML(piece)}</span>${n > 1 ? `<small>×${n}</small>` : ""}`;
+    if (selectedShogiPiece?.type === "hand" && selectedShogiPiece.piece === piece && owner === viewer) button.classList.add("selected");
+    button.disabled = !canUse;
+    if (canUse) button.addEventListener("click", () => handleShogiHandClick(room, piece));
+    box.appendChild(button);
+  });
+  return box;
 }
 
 function renderShogiBoard(container, room) {
   if (!container) return;
 
   const state = ensureShogiState(room.gameState || createInitialGameState("shogi"));
-  const board = state.board;
+  const viewer = getShogiPlayer(room);
+  const view = viewer || "sente"; /* 観戦者は先手側から見る */
+  const flip = view === "gote";
+
+  /* 盤面が進んだら（自分・相手が指したら）選択を解除する */
+  if (shogiSelectionMoveCount !== state.moveCount) { selectedShogiPiece = null; shogiSelectionMoveCount = state.moveCount; }
+  const targets = getShogiTargets(state, viewer);
 
   container.innerHTML = "";
   const wrapper = document.createElement("div");
   wrapper.className = "shogi-wrapper";
+  wrapper.dataset.view = view;
 
+  const members = Array.isArray(room.members) ? room.members : [];
   const info = document.createElement("div");
-  info.className = "game-info";
+  info.className = "game-info shogi-info";
+  const turnText = state.currentPlayer === "sente" ? "☗ 先手の番" : "☖ 後手の番";
+  let status;
   if (state.winner) {
-    info.textContent = state.winner === "sente" ? "☗ 先手の勝ち" : "☖ 後手の勝ち";
+    status = `${state.winner === "sente" ? "☗ 先手" : "☖ 後手"}の勝ち${state.winReason === "checkmate" ? "（詰み）" : ""}`;
+    if (viewer) status += viewer === state.winner ? "　🎉 あなたの勝ちです" : "　あなたの負けです";
+  } else if (members.length < 2) {
+    status = "対戦相手の参加を待っています";
   } else {
-    info.textContent = (state.currentPlayer || "sente") === "sente" ? "☗ 先手の番" : "☖ 後手の番";
-    if (isShogiInCheck(board, state.currentPlayer)) info.textContent += "　⚠️ 王手";
+    status = viewer ? (state.currentPlayer === viewer ? `${turnText}（あなたの番です）` : `${turnText}（相手の番です）`) : turnText;
+    if (isShogiInCheck(state.board, state.currentPlayer)) status += "　⚠️ 王手";
   }
+  info.innerHTML = `<div class="shogi-status">${escapeHTML(status)}</div>${viewer ? `<div class="shogi-you">あなたは ${viewer === "sente" ? "☗先手" : "☖後手"}（自分の駒が下）</div>` : `<div class="shogi-you">観戦中（先手側から表示）</div>`}`;
   wrapper.appendChild(info);
+
+  wrapper.appendChild(renderShogiHand(state, shogiOpponent(view), viewer, room));
 
   const boardElement = document.createElement("div");
   boardElement.className = "shogi-board";
+  const kingInCheck = !state.winner && isShogiInCheck(state.board, state.currentPlayer) ? findShogiKing(state.board, state.currentPlayer) : null;
+  const last = state.lastMove;
 
-  for (let row = 0; row < 9; row++) {
-    for (let col = 0; col < 9; col++) {
+  for (let displayRow = 0; displayRow < 9; displayRow++) {
+    for (let displayCol = 0; displayCol < 9; displayCol++) {
+      const row = flip ? 8 - displayRow : displayRow;
+      const col = flip ? 8 - displayCol : displayCol;
       const cell = document.createElement("button");
       cell.type = "button";
       cell.className = "shogi-cell";
+      cell.dataset.row = row;
+      cell.dataset.col = col;
 
-      const piece = board[row]?.[col] || null;
+      const piece = state.board[row][col];
       if (piece) {
         const pieceElement = document.createElement("span");
         pieceElement.className = "shogi-piece";
-        pieceElement.textContent = piece;
-
-        const player = getShogiPlayer(room);
-        if (player && !isPieceOwnedByPlayer(piece, row, player)) {
-          pieceElement.classList.add("opponent");
-        }
+        if (piece.o !== view) pieceElement.classList.add("theirs"); /* 相手の駒は逆向き（自分から見て読めない向き） */
+        if (isPromotedShogiPiece(piece.p)) pieceElement.classList.add("promoted");
+        if (piece.p.length > 1) pieceElement.classList.add("two");
+        pieceElement.dataset.owner = piece.o;
+        pieceElement.textContent = piece.p;
         cell.appendChild(pieceElement);
       }
 
-      if (selectedShogiPiece && selectedShogiPiece.row === row && selectedShogiPiece.col === col) {
-        cell.classList.add("selected");
-      }
+      if (selectedShogiPiece?.type === "board" && selectedShogiPiece.row === row && selectedShogiPiece.col === col) cell.classList.add("selected");
+      const target = targets.find((t) => t.row === row && t.col === col);
+      if (target) cell.classList.add(target.capture ? "capture-target" : "move-target");
+      if (last && ((last.to?.row === row && last.to?.col === col) || (last.from?.row === row && last.from?.col === col))) cell.classList.add("last-move");
+      if (kingInCheck && kingInCheck.row === row && kingInCheck.col === col) cell.classList.add("in-check");
 
       cell.addEventListener("click", () => handleShogiCellClick(room, row, col));
       boardElement.appendChild(cell);
     }
   }
   wrapper.appendChild(boardElement);
-
-  /* 持ち駒 */
-  ["gote", "sente"].forEach((player) => {
-    const pieces = state.captured?.[player] || [];
-    const box = document.createElement("div");
-    box.className = "shogi-captured";
-    box.innerHTML = `<div>${player === "sente" ? "☗" : "☖"} 持ち駒：${pieces.length ? pieces.map(escapeHTML).join(" ") : "なし"}</div>`;
-    wrapper.appendChild(box);
-  });
+  wrapper.appendChild(renderShogiHand(state, view, viewer, room));
 
   container.appendChild(wrapper);
 }
 
+function canOperateShogi(room, state, viewer) {
+  if (!viewer || state.winner || shogiPromotionPending) return false;
+  const members = Array.isArray(room.members) ? room.members : [];
+  if (members.length < 2) return false;
+  return state.currentPlayer === viewer;
+}
+
+function handleShogiHandClick(room, piece) {
+  const state = ensureShogiState(room.gameState);
+  const viewer = getShogiPlayer(room);
+  if (!state || !canOperateShogi(room, state, viewer)) return;
+  if (!state.captured[viewer].includes(piece)) return;
+  selectedShogiPiece = selectedShogiPiece?.type === "hand" && selectedShogiPiece.piece === piece ? null : { type: "hand", piece };
+  renderCurrentGame(room);
+}
+
 async function handleShogiCellClick(room, row, col) {
-  if (!room?.gameState || room.gameState.winner) return;
+  const state = ensureShogiState(room.gameState);
+  const viewer = getShogiPlayer(room);
+  if (!state || !canOperateShogi(room, state, viewer)) return;
 
-  const player = getShogiPlayer(room);
-  if (!player) return alert("このゲームの参加者ではありません。");
-  currentShogiPlayer = player;
+  const piece = state.board[row][col];
+  const targets = getShogiTargets(state, viewer);
+  const target = targets.find((t) => t.row === row && t.col === col);
 
-  const board = room.gameState.board;
-  const piece = board[row]?.[col] || null;
-  if (room.gameState.currentPlayer !== player) return;
-
-  if (!selectedShogiPiece) {
-    if (!piece || !isPieceOwnedByPlayer(piece, row, player)) return;
-    selectedShogiPiece = { row, col };
-    renderCurrentGame(room);
+  if (selectedShogiPiece && target) {
+    let move;
+    if (selectedShogiPiece.type === "hand") {
+      move = { type: "drop", piece: selectedShogiPiece.piece, to: { row, col } };
+    } else {
+      const from = { row: selectedShogiPiece.row, col: selectedShogiPiece.col };
+      let promote = target.mustPromote;
+      if (!promote && target.canPromote) {
+        const answer = await askShogiPromotion(state.board[from.row][from.col].p);
+        if (answer === null) return; /* やめた */
+        promote = answer;
+      }
+      move = { type: "move", from, to: { row, col }, promote };
+    }
+    await executeShogiMove(room, move, viewer);
     return;
   }
 
-  if (selectedShogiPiece.row === row && selectedShogiPiece.col === col) {
+  if (piece && piece.o === viewer) {
+    const same = selectedShogiPiece?.type === "board" && selectedShogiPiece.row === row && selectedShogiPiece.col === col;
+    selectedShogiPiece = same ? null : { type: "board", row, col };
+  } else {
     selectedShogiPiece = null;
-    renderCurrentGame(room);
-    return;
   }
-
-  if (piece && isPieceOwnedByPlayer(piece, row, player)) {
-    selectedShogiPiece = { row, col };
-    renderCurrentGame(room);
-    return;
-  }
-
-  const from = selectedShogiPiece;
-  const movingPiece = board[from.row]?.[from.col];
-  if (!movingPiece) { selectedShogiPiece = null; renderCurrentGame(room); return; }
-
-  if (!isValidShogiMove(board, from.row, from.col, row, col, movingPiece, player)) return;
-
-  if (isShogiMoveLeavingKingInCheck(board, from.row, from.col, row, col, player)) {
-    alert("その手は自分の玉が王手になるため指せません。");
-    return;
-  }
-
-  let shouldPromote = mustPromoteShogiPiece(getUnpromotedShogiPiece(movingPiece), row, player);
-  if (!shouldPromote && canPromoteOnShogiMove(getUnpromotedShogiPiece(movingPiece), from.row, row, player)) {
-    shouldPromote = confirm("この駒を成りますか？");
-  }
-
-  await executeShogiMove(room, from, { row, col }, movingPiece, player, shouldPromote);
+  renderCurrentGame(room);
 }
 
-function isShogiMoveLeavingKingInCheck(board, fromRow, fromCol, toRow, toCol, player) {
-  const simulated = simulateShogiMove(board, fromRow, fromCol, toRow, toCol);
-  return isShogiInCheck(simulated, player);
+/* 成る・成らないを選ぶ（画面の上に出す。選ぶまで他の操作はできない）。true＝成る、false＝成らない、null＝やめる */
+function askShogiPromotion(piece) {
+  shogiPromotionPending = true;
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "shogi-promote-overlay";
+    overlay.innerHTML = `
+      <div class="shogi-promote-dialog" role="dialog" aria-label="成りますか？">
+        <div class="shogi-promote-title">成りますか？</div>
+        <div class="shogi-promote-options">
+          <button type="button" data-answer="yes"><span class="shogi-piece promoted">${escapeHTML(SHOGI_PROMOTED[piece])}</span>成る</button>
+          <button type="button" data-answer="no"><span class="shogi-piece">${escapeHTML(piece)}</span>成らない</button>
+        </div>
+        <button type="button" class="shogi-promote-cancel" data-answer="cancel">やめる</button>
+      </div>`;
+    const finish = (answer) => {
+      shogiPromotionPending = false;
+      overlay.remove();
+      resolve(answer);
+    };
+    overlay.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-answer]");
+      if (!button) return;
+      finish(button.dataset.answer === "yes" ? true : button.dataset.answer === "no" ? false : null);
+    });
+    document.body.appendChild(overlay);
+  });
 }
 
-async function executeShogiMove(room, from, to, piece, player, shouldPromote) {
+/* 手を指す：最新の対局データをトランザクションで読み、同じルールで合法かを確かめてから保存する
+   （相手と同時に操作しても、手番・盤面が食い違った手は保存されない。保存後は購読中のスナップショットで画面が更新される） */
+async function executeShogiMove(room, move, viewer) {
   const roomRef = doc(db, "gameRooms", room.id);
-
   try {
     await runTransaction(db, async (transaction) => {
       const snapshot = await transaction.get(roomRef);
       if (!snapshot.exists()) throw new Error("ルームが存在しません");
-
       const latest = snapshot.data();
+      const members = Array.isArray(latest.members) ? latest.members : [];
+      if (members.length < 2) throw new Error("対戦相手がいません");
+      const owner = members.indexOf(username) === 0 ? "sente" : members.indexOf(username) === 1 ? "gote" : null;
+      if (!owner || owner !== viewer) throw new Error("このゲームの参加者ではありません");
       const state = ensureShogiState(gameStateFromFirestore("shogi", latest.gameState));
-      if (state.currentPlayer !== player) throw new Error("現在の手番ではありません");
-
-      const board = state.board.map((line) => [...line]);
-      const latestPiece = board[from.row]?.[from.col];
-      if (!latestPiece) throw new Error("駒がありません");
-
-      const destination = board[to.row]?.[to.col] || null;
-      if (destination && isPieceOwnedByPlayer(destination, to.row, player)) {
-        throw new Error("自分の駒があるマスです");
-      }
-      if (!isValidShogiMove(board, from.row, from.col, to.row, to.col, latestPiece, player)) {
-        throw new Error("不正な手です");
-      }
-
-      const captured = state.captured || { sente: [], gote: [] };
-      if (destination) {
-        const base = getUnpromotedShogiPiece(destination);
-        captured[player] = [...(captured[player] || []), base];
-      }
-
-      let placedPiece = latestPiece;
-      if (shouldPromote) placedPiece = SHOGI_PROMOTED[getUnpromotedShogiPiece(latestPiece)] || latestPiece;
-
-      board[to.row][to.col] = placedPiece;
-      board[from.row][from.col] = null;
-
-      const nextPlayer = player === "sente" ? "gote" : "sente";
-      let winner = null;
-      if (destination === "王" || destination === "玉") winner = player;
-
+      const next = applyShogiMove(state, move, owner);
       transaction.update(roomRef, {
-        gameState: gameStateToFirestore("shogi", { ...state, board, captured, currentPlayer: nextPlayer, winner }),
+        gameState: gameStateToFirestore("shogi", shogiStateForSave(next)),
         updatedAt: serverTimestamp()
       });
     });
-
     selectedShogiPiece = null;
   } catch (error) {
-    console.error("将棋の手エラー:", error);
+    /* ルール上指せない手（手番違い・同時操作で先に別の手が保存された等）は警告だけ。通信などの失敗はエラーとして記録 */
+    if (error?.code) console.error("将棋の手エラー:", error); else console.warn("将棋：指せない手", error.message);
+    selectedShogiPiece = null;
     if (error.message !== "ルームが存在しません") alert(error.message || "駒を動かせませんでした。");
   }
 }
