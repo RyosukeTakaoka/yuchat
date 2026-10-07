@@ -1,0 +1,37 @@
+# ゲームルームの整理（一時的。作業ブランチでだけ動く。main には入れない）
+# ops/game-room-cleanup/request.json を変えて push したときに実行する
+#   {"mode":"inventory"}           … 読み取りだけ（削除対象の件数を表示）
+#   {"mode":"delete", ...}         … 確認済みの cutoff・件数に一致するときだけ削除
+# 鍵は既存の FIREBASE_SERVICE_ACCOUNT（Secrets）を使う。新しい鍵は作らない。
+
+name: ゲームルームの整理
+
+on:
+  push:
+    branches: [claude/yuchat-feature-planning-uxx03k]
+    paths:
+      - "ops/game-room-cleanup/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: game-room-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 依存パッケージのインストール
+        working-directory: derby-runner
+        run: npm ci --no-audit --no-fund
+      - name: ゲームルームの整理
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node ops/game-room-cleanup/cleanup.mjs
