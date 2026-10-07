@@ -38,10 +38,11 @@ service cloud.firestore {
       return collection in ['events', 'eventParticipants'];
     }
 
-    // 下のコレクションは、このあとの専用のルールで書き込みを判定する
+    // 下のコレクションは、このあとの専用のルールで書き込みを判定する（今までの「ログイン済みなら書ける」をもとに、一部だけ絞る）
     //   users：自分のデータだけ（管理者による名前の強制変更を除く）／adminNameChanges：管理者の名前変更の記録
+    //   raceBets：固定オッズ方式のレースの精算の条件
     function hasDedicatedWriteRules(collection) {
-      return collection in ['users', 'adminNameChanges'];
+      return collection in ['users', 'adminNameChanges', 'raceBets'];
     }
 
     // 下のコレクションは管理者だけが読める
@@ -77,6 +78,30 @@ service cloud.firestore {
           && resource.data.get('status', 'scheduled') == 'scheduled'
           && request.time >= resource.data.openAt
           && request.time < resource.data.closeAt;
+      }
+    }
+
+    // ===== ゆうダービーの馬券（raceBets/{betId}） =====
+    // 今まで通り：ログイン済みなら読み取り・購入（作成）・削除・精算以外の更新ができる
+    // 精算（settled を true にする更新）だけ条件を付ける：
+    //   ・自分の馬券だけ（他人の馬券は精算できない。自動精算の derby-runner はサービスアカウントなので対象外）
+    //   ・固定オッズ方式のレース（レースIDの日付が derby-odds.js の FIXED_ODDS_FROM 以降）は、
+    //     固定オッズで計算した精算（payoutRule == 'fixed-v1'）だけ。古い版のアプリの山分け方式の精算は拒否する
+    match /raceBets/{betId} {
+      allow read, create, delete: if signedIn();
+      allow update: if signedIn() && (!isSettlingBet() || isAllowedBetSettlement());
+
+      function isSettlingBet() {
+        return request.resource.data.get('settled', false) == true && resource.data.get('settled', false) != true;
+      }
+
+      function isFixedOddsRaceId(raceId) {
+        return raceId is string && raceId >= '2026-10-09';
+      }
+
+      function isAllowedBetSettlement() {
+        return resource.data.get('uid', '') == request.auth.uid
+          && (!isFixedOddsRaceId(resource.data.get('raceId', '')) || request.resource.data.get('payoutRule', '') == 'fixed-v1');
       }
     }
 

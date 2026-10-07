@@ -27,6 +27,8 @@ import fs from "fs";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { runDailyJobs, getDailyJobTime } from "./economy.mjs";
+/* 固定オッズ（script.js と同じファイルを使う） */
+import { isFixedOddsRace, buildRaceOddsRecord, generateFixedOddsRaceOrder, computeFixedBetSettlement, FIXED_PAYOUT_RULE } from "../derby-odds.js";
 
 /* ----- script.js と同じ設定 ----- */
 const RACE_HOUR = 15;
@@ -247,7 +249,9 @@ async function ensureRaceResult(db, raceId, raceTime) {
     created = false;
     if (snap.exists) return;
 
-    const resultOrder = generateWeightedRaceOrder();
+    /* 固定オッズ方式のレースは「能力 × 当日の調子」の比で着順を決め、オッズの記録も残す（乱数は今ここで引く） */
+    const fixed = isFixedOddsRace(raceId);
+    const resultOrder = fixed ? generateFixedOddsRaceOrder(raceId) : generateWeightedRaceOrder();
     transaction.set(raceRef, {
       raceId,
       resultOrder,
@@ -255,7 +259,8 @@ async function ensureRaceResult(db, raceId, raceTime) {
       finishStats: buildFinishStats(resultOrder),
       status: "finished",
       generatedAt: FieldValue.serverTimestamp(),
-      generatedBy: "github-actions"
+      generatedBy: "github-actions",
+      ...(fixed ? buildRaceOddsRecord(raceId) : {})
     });
     transaction.set(db.collection("raceLogs").doc(raceId), {
       raceId,
@@ -274,18 +279,30 @@ async function ensureRaceResult(db, raceId, raceTime) {
 
 async function settleRaceBets(db, raceId, resultOrder) {
   /* 未精算の馬券が無いレースは、そのレースの馬券を読まない（読み取り1回で終わる）。
-     払い戻しの計算にはそのレースの全馬券（賭け金の合計）が要るので、未精算があるときだけ全部読む */
-  const unsettledSnap = await db.collection("raceBets").where("raceId", "==", raceId).where("settled", "==", false).limit(1).get();
+     山分け方式のレースは、払い戻しの計算にそのレースの全馬券（賭け金の合計）が要るので、未精算があるときだけ全部読む。
+     固定オッズ方式のレースは floor(賭け金 × オッズ) なので、未精算の馬券だけを読む（馬券の数は集計クエリで数える） */
+  const fixed = isFixedOddsRace(raceId);
+  const unsettledSnap = await db.collection("raceBets").where("raceId", "==", raceId).where("settled", "==", false).limit(fixed ? 1000 : 1).get();
   if (unsettledSnap.empty) return { betsTotal: null, settledNow: 0, payoutTotal: 0, errors: [], unsettledRemaining: 0 };
 
-  const betsSnap = await db.collection("raceBets").where("raceId", "==", raceId).get();
-  const allBets = betsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  const payouts = computePayouts(allBets, resultOrder);
+  let betsToSettle, payouts, betsTotal;
+  if (fixed) {
+    betsToSettle = unsettledSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    payouts = {};
+    for (const bet of betsToSettle) payouts[bet.id] = computeFixedBetSettlement(bet, raceId, evaluateBetWin(bet, resultOrder));
+    betsTotal = (await db.collection("raceBets").where("raceId", "==", raceId).count().get()).data().count;
+  } else {
+    const betsSnap = await db.collection("raceBets").where("raceId", "==", raceId).get();
+    const allBets = betsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    payouts = computePayouts(allBets, resultOrder);
+    betsToSettle = allBets.filter((b) => !b.settled);
+    betsTotal = allBets.length;
+  }
 
-  const result = { betsTotal: allBets.length, settledNow: 0, payoutTotal: 0, errors: [] };
+  const result = { betsTotal, settledNow: 0, payoutTotal: 0, errors: [] };
 
-  for (const bet of allBets.filter((b) => !b.settled)) {
-    const { isWin, payout } = payouts[bet.id];
+  for (const bet of betsToSettle) {
+    const { isWin, payout, oddsTenths } = payouts[bet.id];
     try {
       let settledNow = false;
       await db.runTransaction(async (transaction) => {
@@ -300,7 +317,9 @@ async function settleRaceBets(db, raceId, resultOrder) {
         if (!fresh.exists || fresh.data().settled) return;
         if (payout > 0 && (!userQuery || userQuery.empty)) throw new Error(`USER_NOT_FOUND uid=${bet.uid}`);
 
-        transaction.update(betRef, { settled: true, win: isWin, payout, settledBy: "github-actions" });
+        transaction.update(betRef, fixed
+          ? { settled: true, win: isWin, payout, settledBy: "github-actions", payoutRule: FIXED_PAYOUT_RULE, settledOddsTenths: oddsTenths }
+          : { settled: true, win: isWin, payout, settledBy: "github-actions" });
         if (payout > 0) transaction.update(userQuery.docs[0].ref, { coins: FieldValue.increment(payout) });
         settledNow = true;
       });
