@@ -4818,3 +4818,258 @@ button.secondary.danger {
         font-size: 14px;
     }
 }
+
+
+/* ==================================================
+   将棋（盤面の向き・選択中の駒・動けるマス・成り・持ち駒）
+   ・自分の駒は自分から読める向き、相手の駒は逆向き（.theirs を180度回転）
+   ・選択中の駒は黄色の背景と枠、動けるマスは小さな●、取れる駒は赤い枠
+   既存のルールは変更せず、ここから下は追加のみ
+================================================== */
+
+.shogi-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+}
+
+.shogi-info {
+    text-align: center;
+}
+
+.shogi-status {
+    font-weight: 700;
+}
+
+.shogi-you {
+    margin-top: 2px;
+    color: #666;
+    font-size: 12px;
+}
+
+.shogi-board {
+    width: 100%;
+    max-width: 480px;
+    aspect-ratio: 9 / 9.6;
+    grid-template-rows: repeat(9, 1fr);
+    background: #e7bf73;
+    border: 3px solid #6f4823;
+    border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+
+.shogi-cell {
+    position: relative;
+    padding: 0;
+    min-width: 0;
+    min-height: 0;
+    border: 1px solid #9a6a36;
+    border-radius: 0;
+    background: transparent;
+    color: #1a1a1a;
+    font-size: clamp(14px, 4.4vw, 24px);
+    line-height: 1;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.shogi-piece {
+    display: inline-block;
+    font-weight: 700;
+    font-family: "Noto Serif JP", "Hiragino Mincho ProN", "Yu Mincho", serif;
+    user-select: none;
+}
+
+/* 相手の駒は逆向き */
+.shogi-piece.theirs {
+    transform: rotate(180deg);
+}
+
+.shogi-piece.promoted {
+    color: #c62828;
+}
+
+/* 成香・成桂・成銀（2文字）は小さく縦に並べる */
+.shogi-piece.two {
+    font-size: 0.78em;
+    line-height: 0.95;
+    writing-mode: vertical-rl;
+    letter-spacing: -0.08em;
+}
+
+.shogi-cell.last-move {
+    background: rgba(255, 196, 0, 0.22);
+}
+
+.shogi-cell.in-check {
+    background: rgba(220, 38, 38, 0.35);
+}
+
+/* 選択中の駒 */
+.shogi-cell.selected {
+    background: #ffe066;
+    box-shadow: inset 0 0 0 3px #d39b00;
+    z-index: 1;
+}
+
+/* 動けるマス（空きマス）：小さな● */
+.shogi-cell.move-target::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 30%;
+    height: 30%;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: rgba(30, 90, 200, 0.55);
+    pointer-events: none;
+}
+
+/* 取れる相手の駒：赤い枠 */
+.shogi-cell.capture-target {
+    box-shadow: inset 0 0 0 3px rgba(214, 40, 40, 0.9);
+    background: rgba(214, 40, 40, 0.12);
+}
+
+.shogi-hand {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    max-width: 480px;
+    min-height: 44px;
+    padding: 6px 8px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fbf6ec;
+}
+
+.shogi-hand-label {
+    margin-right: 4px;
+    color: #555;
+    font-size: 12px;
+}
+
+.shogi-hand-empty {
+    color: #999;
+    font-size: 12px;
+}
+
+.shogi-hand-piece {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 44px;
+    min-height: 40px;
+    padding: 0 8px;
+    border: 1px solid #d6c39a;
+    border-radius: 10px;
+    background: #f3dcae;
+    color: #1a1a1a;
+    font-size: 18px;
+    touch-action: manipulation;
+}
+
+.shogi-hand-piece small {
+    font-size: 11px;
+    color: #555;
+}
+
+.shogi-hand-piece:disabled {
+    opacity: 1;
+    cursor: default;
+}
+
+.shogi-hand.theirs .shogi-hand-piece {
+    background: #efe5d0;
+}
+
+.shogi-hand-piece.selected {
+    background: #ffe066;
+    border-color: #d39b00;
+    box-shadow: inset 0 0 0 2px #d39b00;
+}
+
+.shogi-promote-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.35);
+}
+
+.shogi-promote-dialog {
+    width: min(320px, 100%);
+    padding: 18px;
+    border-radius: 16px;
+    background: #fff;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+    text-align: center;
+}
+
+.shogi-promote-title {
+    margin-bottom: 12px;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.shogi-promote-options {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.shogi-promote-options button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-height: 88px;
+    border: 1px solid #d6d9de;
+    border-radius: 12px;
+    background: #fbf6ec;
+    font-size: 14px;
+    font-weight: 700;
+    color: #111;
+}
+
+.shogi-promote-options .shogi-piece {
+    font-size: 30px;
+}
+
+.shogi-promote-options .shogi-piece {
+    white-space: nowrap;
+}
+
+.shogi-promote-cancel {
+    margin-top: 10px;
+    min-height: 40px;
+    padding: 0 16px;
+    border: none;
+    background: transparent;
+    color: #777;
+    font-size: 13px;
+}
+
+/* スマホでは将棋盤を少しでも大きく（将棋のときだけ、周りの余白を詰める。他のゲームの表示は変えない） */
+@media (max-width: 700px) {
+    .game-board:has(.shogi-wrapper) {
+        padding: 8px 0;
+        background: transparent;
+    }
+
+    .game-area .panel:has(.shogi-wrapper) {
+        width: 100%;
+        margin-left: 0;
+        margin-right: 0;
+        padding-left: 6px;
+        padding-right: 6px;
+    }
+}
