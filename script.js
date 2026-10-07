@@ -3279,7 +3279,8 @@ async function renderAssetRankingInto(targetEl) {
         <div class="ranking-info">
           <div class="ranking-name">${escapeHTML(user.name)}${user.name === username ? "（あなた）" : ""}</div>
           <div class="ranking-score">💰 ${formatCoins(user.total)}</div>
-        </div>`;
+        </div>
+        ${isAdminUser() ? `<button type="button" class="ranking-admin-rename secondary" data-admin-rename="${escapeHTML(user.name)}">名前を変更</button>` : ""}`;
       return item;
     };
     top.forEach((user) => targetEl.appendChild(row(user)));
@@ -3577,7 +3578,11 @@ function listenMyCoins() {
   unsubscribeMyCoins = onSnapshot(
     doc(db, "users", username),
     async (snap) => {
-      if (!snap.exists()) return;
+      if (!snap.exists()) {
+        /* 使っていた名前のデータが消えた：管理者に名前を変えられた可能性があるので、uid で自分のデータを探し直す */
+        if (myLatestUserData) checkRenamedByAdmin();
+        return;
+      }
       const data = snap.data();
       if (typeof data.coins !== "number") {
         await grantStartingCoinsIfNeeded();
@@ -4989,6 +4994,160 @@ function updateAdminVisibility() {
   const admin = isAdminUser();
   document.getElementById("derbyAdminPanel")?.classList.toggle("hidden", !admin);
   if (admin) renderManualRaceAdminList();
+}
+
+/* =========================================================
+   管理者によるユーザー名の強制変更（ランキングの「名前を変更」から）
+   ・ユーザーのデータは users/{名前}（名前がドキュメントID）なので、通常の名前変更と同じく
+     「新しい名前のドキュメントを作り、古い名前のドキュメントを消す」。中身（コイン・銀行・株など）はそのまま引き継ぐ
+   ・users の移動・総資産ランキング（rankings/assets）の名前・変更記録（adminNameChanges/{古い名前}）は1つのトランザクションで行う
+     （firestore.rules で「管理者だけ」「名前と記録用の項目以外は変えていない」ことを確かめる）
+   ・そのあと、友達・グループ・メッセージのうち、その人の名前が入っているものだけを探して書き換える
+     （通常の名前変更のように、コレクション全体は読まない）
+   ・変更されたユーザーがアプリを開いていた場合は、そのユーザーの画面が新しい名前で読み込み直す（checkRenamedByAdmin）
+========================================================= */
+
+let adminRenameInFlight = false;
+
+async function adminRenameUser(oldName, newName) {
+  if (!isAdminUser()) throw new Error("NOT_ADMIN");
+  const oldRef = doc(db, "users", oldName);
+  const newRef = doc(db, "users", newName);
+  const rankingRef = doc(db, "rankings", "assets");
+  const logRef = doc(db, "adminNameChanges", oldName);
+
+  let targetUid = "";
+  await runTransaction(db, async (transaction) => {
+    const oldSnap = await transaction.get(oldRef);
+    const newSnap = await transaction.get(newRef);
+    const rankingSnap = await transaction.get(rankingRef);
+    if (!oldSnap.exists()) throw new Error("USER_NOT_FOUND");
+    if (newSnap.exists()) throw new Error("NAME_TAKEN");
+    const oldData = oldSnap.data();
+    targetUid = oldData.uid || "";
+
+    transaction.set(newRef, {
+      ...oldData,
+      name: newName,
+      nameChangedByAdmin: true,
+      nameChangedAt: serverTimestamp(),
+      nameChangedByUid: currentUser.uid,
+      nameChangedFrom: oldName
+    });
+    transaction.delete(oldRef);
+    transaction.set(logRef, {
+      from: oldName, to: newName, uid: targetUid,
+      changedByUid: currentUser.uid, changedAt: serverTimestamp()
+    });
+
+    const ranking = rankingSnap.exists() ? rankingSnap.data() : null;
+    if (Array.isArray(ranking?.users) && ranking.users.some((u) => u?.name === oldName)) {
+      transaction.update(rankingRef, { users: ranking.users.map((u) => (u?.name === oldName ? { ...u, name: newName } : u)) });
+    }
+  });
+
+  rankingCache = null;
+  const migrated = await migrateRenamedUserData(oldName, newName);
+  return { targetUid, migrated };
+}
+
+/* 友達・グループ・メッセージのうち、古い名前が入っているものだけを書き換える（通常の名前変更と同じ項目） */
+async function migrateRenamedUserData(oldName, newName) {
+  const updates = new Map();
+  const add = (ref, data) => updates.set(ref.path, { ref, data: { ...(updates.get(ref.path)?.data || {}), ...data } });
+
+  const [asUser1, asUser2, groupsSnap, sent, received] = await Promise.all([
+    getDocs(query(collection(db, "friends"), where("user1", "==", oldName))),
+    getDocs(query(collection(db, "friends"), where("user2", "==", oldName))),
+    getDocs(query(collection(db, "groups"), where("members", "array-contains", oldName))),
+    getDocs(query(collection(db, "messages"), where("sender", "==", oldName))),
+    getDocs(query(collection(db, "messages"), where("receiver", "==", oldName)))
+  ]);
+
+  [...asUser1.docs, ...asUser2.docs].forEach((d) => {
+    const data = d.data();
+    const change = {};
+    if (data.user1 === oldName) change.user1 = newName;
+    if (data.user2 === oldName) change.user2 = newName;
+    if (data.requestedBy === oldName) change.requestedBy = newName;
+    if (data.acceptedBy === oldName) change.acceptedBy = newName;
+    if (Object.keys(change).length) add(d.ref, { ...change, updatedAt: serverTimestamp() });
+  });
+  groupsSnap.docs.forEach((d) => {
+    const data = d.data();
+    const change = { members: (Array.isArray(data.members) ? data.members : []).map((m) => (m === oldName ? newName : m)) };
+    if (data.owner === oldName) change.owner = newName;
+    add(d.ref, { ...change, updatedAt: serverTimestamp() });
+  });
+  sent.docs.forEach((d) => add(d.ref, { sender: newName }));
+  received.docs.forEach((d) => add(d.ref, { receiver: newName }));
+
+  /* 1回の書き込みは500件まで */
+  const list = [...updates.values()];
+  for (let i = 0; i < list.length; i += 400) {
+    const batch = writeBatch(db);
+    list.slice(i, i + 400).forEach(({ ref, data }) => batch.update(ref, data));
+    await batch.commit();
+  }
+  return { friends: asUser1.size + asUser2.size, groups: groupsSnap.size, messages: sent.size + received.size };
+}
+
+async function promptAdminRename(oldName) {
+  if (!isAdminUser() || adminRenameInFlight) return;
+  const input = prompt(`「${oldName}」の新しい名前を入力してください。`, oldName);
+  if (input === null) return;
+  const newName = input.trim();
+  if (newName === oldName) return;
+  const invalidReason = validateUsername(newName);
+  if (invalidReason) return alert(invalidReason);
+  if (!confirm(`このユーザーの名前を『${newName}』に変更しますか？\n（変更前：${oldName}）`)) return;
+
+  adminRenameInFlight = true;
+  try {
+    const { targetUid, migrated } = await adminRenameUser(oldName, newName);
+    alert(`名前を「${newName}」に変更しました。\n（友達 ${migrated.friends}件・グループ ${migrated.groups}件・メッセージ ${migrated.messages}件を更新）`);
+    /* 自分自身の名前を変えたときは、新しい名前で読み込み直す */
+    if (targetUid && targetUid === currentUser?.uid) { location.reload(); return; }
+    loadCoinRanking();
+    if (isDerbyViewActive()) loadDerbyCoinRanking();
+  } catch (error) {
+    const messages = { USER_NOT_FOUND: "そのユーザーは見つかりませんでした（すでに名前が変わった可能性があります）。", NAME_TAKEN: "その名前はすでに使われています。", NOT_ADMIN: "管理者だけが変更できます。" };
+    if (!messages[error.message]) console.error("管理者の名前変更エラー:", error);
+    alert(messages[error.message] || "名前の変更に失敗しました。");
+    rankingCache = null;
+    loadCoinRanking();
+  } finally {
+    adminRenameInFlight = false;
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target?.closest?.("[data-admin-rename]");
+  if (!button || !isAdminUser()) return;
+  event.preventDefault();
+  promptAdminRename(button.dataset.adminRename);
+});
+
+/* 自分のユーザーデータが消えたとき：uid で探し直し、別の名前になっていれば（管理者が変更した）その名前で読み込み直す */
+let renameCheckInFlight = false;
+async function checkRenamedByAdmin() {
+  /* 管理者が自分自身の名前を変えている途中は、変更の処理（友達・グループ・メッセージの書き換え）が終わってから読み込み直す */
+  if (!currentUser || !username || renameCheckInFlight || adminRenameInFlight) return;
+  renameCheckInFlight = true;
+  const session = appSessionSeq;
+  try {
+    const result = await getDocs(query(collection(db, "users"), where("uid", "==", currentUser.uid), limit(1)));
+    if (session !== appSessionSeq || result.empty) return;
+    const newName = result.docs[0].id;
+    if (newName === username) return;   /* 自分で名前を変えた途中（新しい名前はすでに使っている） */
+    localStorage.setItem("yuuchat_username", newName);
+    alert(`管理者によって名前が「${newName}」に変更されました。画面を読み込み直します。`);
+    location.reload();
+  } catch (error) {
+    console.warn("名前の確認に失敗:", error);
+  } finally {
+    renameCheckInFlight = false;
+  }
 }
 
 /* Firestore の Timestamp / Date / 文字列 → Date */
