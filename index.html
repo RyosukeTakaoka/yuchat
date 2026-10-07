@@ -28,7 +28,7 @@
 
     <link
         rel="stylesheet"
-        href="./style.css?v=20261010-shogi"
+        href="./style.css?v=20261011-noevents"
     >
 </head>
 
@@ -532,17 +532,6 @@
             🏇
             <span>
                 ダービー
-            </span>
-        </button>
-
-
-        <button
-            data-view="events"
-            type="button"
-        >
-            🎪
-            <span>
-                イベント
             </span>
         </button>
 
@@ -1068,10 +1057,6 @@
 
 
 
-            <!-- ==================================================
-                 イベント
-            ================================================== -->
-
             <!-- 💰 ゆう経済（ゆう銀行・ゆう株・総資産）。中身は script.js の renderEconomyView が描く -->
 
             <section
@@ -1095,108 +1080,7 @@
             </section>
 
 
-            <section
-                id="eventsView"
-                class="view hidden"
-            >
 
-                <div class="panel">
-
-                    <div class="panel-head">
-                        <div>
-                            <h2>
-                                🎪 イベント
-                            </h2>
-                            <p>
-                                参加したいイベントに申し込めます
-                            </p>
-                        </div>
-                    </div>
-
-                    <!-- 管理者だけに表示（イベント管理） -->
-                    <div
-                        id="eventAdminPanel"
-                        class="admin-panel hidden"
-                    >
-                        <h3>
-                            🎪 イベント管理
-                        </h3>
-
-                        <form
-                            id="eventForm"
-                            class="admin-form"
-                            autocomplete="off"
-                        >
-                            <label>
-                                タイトル
-                                <input id="eventTitleInput" type="text" maxlength="40" required>
-                            </label>
-                            <label>
-                                説明
-                                <textarea id="eventDescriptionInput" maxlength="300" rows="3"></textarea>
-                            </label>
-                            <label>
-                                場所
-                                <input id="eventLocationInput" type="text" maxlength="40">
-                            </label>
-                            <div class="admin-form-row">
-                                <label>
-                                    開催日
-                                    <input id="eventDateInput" type="date" required>
-                                </label>
-                                <label>
-                                    開始時刻
-                                    <input id="eventTimeInput" type="time" required>
-                                </label>
-                            </div>
-                            <div class="admin-form-row">
-                                <label>
-                                    受付開始日
-                                    <input id="eventEntryOpenDateInput" type="date" required>
-                                </label>
-                                <label>
-                                    受付開始時刻
-                                    <input id="eventEntryOpenTimeInput" type="time" required>
-                                </label>
-                            </div>
-                            <div class="admin-form-row">
-                                <label>
-                                    受付終了日
-                                    <input id="eventEntryCloseDateInput" type="date" required>
-                                </label>
-                                <label>
-                                    受付終了時刻
-                                    <input id="eventEntryCloseTimeInput" type="time" required>
-                                </label>
-                            </div>
-                            <label>
-                                定員（0 または空欄で制限なし）
-                                <input id="eventCapacityInput" type="number" min="0" max="999" step="1">
-                            </label>
-                            <p id="eventFormError" class="admin-form-error"></p>
-                            <div class="admin-form-buttons">
-                                <button id="eventSubmitButton" type="submit">イベントを作成する</button>
-                                <button id="eventEditCancelButton" class="hidden secondary" type="button">編集をやめる</button>
-                            </div>
-                        </form>
-
-                        <h4>
-                            作成したイベント
-                        </h4>
-                        <div
-                            id="eventAdminList"
-                            class="admin-list"
-                        ></div>
-                    </div>
-
-                    <div
-                        id="eventsList"
-                        class="events-list"
-                    ></div>
-
-                </div>
-
-            </section>
 
 
 
@@ -1463,7 +1347,7 @@
      OFF のとき（とテスト環境）は、data-app-src のアプリ本体を読み込む -->
 <script
     src="./maintenance.js?v=20261007-maint"
-    data-app-src="./script.js?v=20261010-shogi"
+    data-app-src="./script.js?v=20261011-noevents"
 ></script>
 
 

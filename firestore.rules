@@ -4,7 +4,7 @@ rules_version = '2';
 //
 // もとのルール（Firebase Console に公開中のもの）：
 //   match /{document=**} { allow read, write: if request.auth != null; }
-// を土台にして、管理者用のデータ（手動レース・イベント・イベント参加者）だけを守るように変えている。
+// を土台にして、管理者用のデータ（手動レース）だけを守るように変えている。
 // それ以外のコレクション（users / friends / groups / messages / gameRooms / gameInvites /
 // races / raceBets / raceLogs / fcmTokens など）は、もとのルールと同じ「ログイン済みなら読み書き可」のまま。
 //
@@ -12,6 +12,9 @@ rules_version = '2';
 //
 // 株価（market）と総資産ランキング（rankings）は、毎日 13:00 に derby-runner だけが書く。
 // ブラウザからは読み取りだけ（書き換えて株価やランキングを操作できないように）。
+//
+// イベント機能（events / eventParticipants）は廃止した。Firestore に残っている過去のデータは消さずに残すが、
+// ブラウザからは読み取りも書き込みもできない（管理者も含む）。
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -27,7 +30,12 @@ service cloud.firestore {
 
     // 下のコレクションは、このあとの専用のルールだけで書き込みを判定する
     function isAdminManagedCollection(collection) {
-      return collection in ['derbyManualRaces', 'events', 'eventParticipants'];
+      return collection in ['derbyManualRaces'];
+    }
+
+    // 廃止した機能のコレクション。ブラウザからは読み取りも書き込みもできない
+    function isRetiredCollection(collection) {
+      return collection in ['events', 'eventParticipants'];
     }
 
     // 下のコレクションは自動処理（サービスアカウント）だけが書く。ブラウザからは書き込めない
@@ -35,10 +43,10 @@ service cloud.firestore {
       return collection in ['market', 'rankings'];
     }
 
-    // ===== もとのルール（管理者用・自動処理用のコレクション以外は今まで通り） =====
+    // ===== もとのルール（管理者用・自動処理用・廃止したコレクション以外は今まで通り） =====
     match /{collection}/{document=**} {
-      allow read: if signedIn();
-      allow write: if signedIn() && !isAdminManagedCollection(collection) && !isServerOnlyCollection(collection);
+      allow read: if signedIn() && !isRetiredCollection(collection);
+      allow write: if signedIn() && !isAdminManagedCollection(collection) && !isServerOnlyCollection(collection) && !isRetiredCollection(collection);
     }
 
     // ===== 手動ゆうダービー（derbyManualRaces/{raceId}） =====
@@ -58,89 +66,6 @@ service cloud.firestore {
           && resource.data.get('status', 'scheduled') == 'scheduled'
           && request.time >= resource.data.openAt
           && request.time < resource.data.closeAt;
-      }
-    }
-
-    // ===== イベント（events/{eventId}） =====
-    // 読み取り：ログイン済みなら誰でも
-    // 作成・編集・キャンセル・削除：管理者だけ
-    // 一般ユーザー：参加・参加取り消しと同じトランザクションで participantCount を 1 増減することだけ
-    //   （参加者の記録 eventParticipants/{eventId}_{自分のUID} の作成・削除と必ずセット）
-    match /events/{eventId} {
-      allow read: if signedIn();
-      allow create, delete: if isAdmin();
-      allow update: if isAdmin() || isJoinCountUpdate(eventId) || isLeaveCountUpdate(eventId);
-
-      function myEntryPath(eventId) {
-        return /databases/$(database)/documents/eventParticipants/$(eventId + '_' + request.auth.uid);
-      }
-
-      function onlyCountChanges() {
-        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['participantCount']);
-      }
-
-      function isEntryOpen() {
-        return resource.data.get('status', 'scheduled') != 'cancelled'
-          && request.time >= resource.data.entryOpenAt
-          && request.time < resource.data.entryCloseAt
-          && request.time < resource.data.startAt;
-      }
-
-      function isJoinCountUpdate(eventId) {
-        return signedIn()
-          && onlyCountChanges()
-          && isEntryOpen()
-          && request.resource.data.participantCount == resource.data.get('participantCount', 0) + 1
-          && (resource.data.get('capacity', 0) == 0
-              || request.resource.data.participantCount <= resource.data.get('capacity', 0))
-          && !exists(myEntryPath(eventId))
-          && existsAfter(myEntryPath(eventId));
-      }
-
-      function isLeaveCountUpdate(eventId) {
-        return signedIn()
-          && onlyCountChanges()
-          && isEntryOpen()
-          && request.resource.data.participantCount == resource.data.get('participantCount', 0) - 1
-          && exists(myEntryPath(eventId))
-          && !existsAfter(myEntryPath(eventId));
-      }
-    }
-
-    // ===== イベント参加者（eventParticipants/{eventId}_{uid}） =====
-    // 読み取り：ログイン済みなら誰でも（自分の参加状況・管理者の参加者確認）
-    // 一般ユーザー：自分の参加記録の作成・削除だけ。
-    //   イベントの participantCount の増減と同じトランザクションでなければ拒否する（人数と記録がずれないように）
-    // 管理者：すべて可
-    match /eventParticipants/{entryId} {
-      allow read: if signedIn();
-      allow create: if isAdmin() || isOwnJoin();
-      allow delete: if isAdmin() || isOwnLeave();
-      allow update: if isAdmin();
-
-      function eventPath(eventId) {
-        return /databases/$(database)/documents/events/$(eventId);
-      }
-
-      function isOwnJoin() {
-        let data = request.resource.data;
-        return signedIn()
-          && data.keys().hasOnly(['eventId', 'uid', 'username', 'joinedAt'])
-          && data.uid == request.auth.uid
-          && data.eventId is string
-          && entryId == data.eventId + '_' + request.auth.uid
-          && exists(eventPath(data.eventId))
-          && getAfter(eventPath(data.eventId)).data.get('participantCount', 0)
-             == get(eventPath(data.eventId)).data.get('participantCount', 0) + 1;
-      }
-
-      function isOwnLeave() {
-        return signedIn()
-          && resource.data.uid == request.auth.uid
-          && entryId == resource.data.eventId + '_' + request.auth.uid
-          && exists(eventPath(resource.data.eventId))
-          && getAfter(eventPath(resource.data.eventId)).data.get('participantCount', 0)
-             == get(eventPath(resource.data.eventId)).data.get('participantCount', 0) - 1;
       }
     }
   }

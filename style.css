@@ -3593,7 +3593,7 @@ button:disabled {
 
 
 /* ==================================================
-   タブ5項目（チャット・ダービー・イベント・ゲーム・マイページ）
+   上部タブ（チャット・ダービー・ゲーム・ゆう経済・マイページ）
    ・幅の狭いスマホでも1行に収まるように
 ================================================== */
 
@@ -3620,7 +3620,7 @@ button:disabled {
 
 
 /* ==================================================
-   管理者パネル（ゆうダービー管理・イベント管理）
+   管理者パネル（ゆうダービー管理）
 ================================================== */
 
 .admin-panel {
@@ -3662,8 +3662,7 @@ button:disabled {
     color: #444;
 }
 
-.admin-form input,
-.admin-form textarea {
+.admin-form input {
     width: 100%;
     min-width: 0;
 
@@ -3699,8 +3698,7 @@ button:disabled {
 }
 
 .admin-form-buttons button,
-.admin-item button,
-.event-actions button {
+.admin-item button {
     padding: 8px 14px;
 
     border: none;
@@ -3726,11 +3724,6 @@ button.secondary {
     background: #fff;
     color: #111;
     border: 1.5px solid #111;
-}
-
-button.secondary.danger {
-    color: #c62828;
-    border-color: #c62828;
 }
 
 .admin-list {
@@ -3799,13 +3792,6 @@ button.secondary.danger {
     font-weight: 700;
 }
 
-.admin-participants {
-    margin-top: 4px;
-    font-size: 12px;
-    color: #333;
-    word-break: break-all;
-}
-
 @media (max-width: 500px) {
     .admin-form-row {
         flex-direction: column;
@@ -3819,83 +3805,6 @@ button.secondary.danger {
     .admin-item-buttons {
         justify-content: flex-start;
     }
-}
-
-
-/* ==================================================
-   イベント一覧
-================================================== */
-
-.events-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-
-    margin-top: 10px;
-}
-
-.event-card {
-    padding: 12px;
-
-    border: 1px solid #e1e4e8;
-    border-radius: 14px;
-
-    background: #fff;
-
-    font-size: 13px;
-}
-
-.event-card.cancelled {
-    background: #f7f7f7;
-}
-
-.event-cancelled-banner {
-    margin-bottom: 6px;
-    padding: 6px 10px;
-
-    border-radius: 8px;
-
-    background: #c62828;
-    color: #fff;
-
-    font-weight: 800;
-    font-size: 12px;
-}
-
-.event-card-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 4px;
-
-    font-size: 15px;
-}
-
-.event-joined {
-    font-size: 11px;
-    font-weight: 800;
-    color: #2e7d32;
-}
-
-.event-meta {
-    margin-top: 4px;
-    color: #555;
-    font-size: 12px;
-}
-
-.event-desc {
-    margin-top: 6px;
-    white-space: pre-wrap;
-    word-break: break-word;
-}
-
-.event-actions {
-    margin-top: 8px;
-}
-
-.event-note {
-    font-size: 12px;
-    color: #555;
 }
 
 
