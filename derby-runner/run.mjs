@@ -9,6 +9,7 @@
      4. ゆうcoin の整備（runCoinMaintenance）：
         ・追加ボーナス500コインを、まだ受け取っていないユーザーに1回だけ配る（users/{名前}.bonus500Granted）
         ・累計賭け金 users/{名前}.totalBetAmount を、raceBets の記録から計算し直す（ランキングの参加条件に使う）
+        ・ランキング用のまとめ rankings/coins（名前・コイン・累計賭け金）を書く（画面は users 全件ではなくこれを読む）
    を行う。サイトを開いている利用者の端末も同じ処理を行うが、
    どちらもトランザクションで「まだ無ければ作る」「未精算なら精算する」ので二重にはならない。
 
@@ -398,6 +399,7 @@ function totalBetAmountNeedsUpdate(current, expected) {
 
 export async function runCoinMaintenance({ db, log = console.log }) {
   const result = { users: 0, bonusGranted: 0, totalsUpdated: 0, errors: [] };
+  const finalValues = new Map(); /* 整備したユーザーの最新の値（ランキング用） */
 
   const [usersSnap, betsSnap] = await Promise.all([db.collection("users").get(), db.collection("raceBets").get()]);
   const betTotals = new Map();
@@ -433,15 +435,40 @@ export async function runCoinMaintenance({ db, log = console.log }) {
         if (totalBetAmountNeedsUpdate(freshData.totalBetAmount, total)) {
           update.totalBetAmount = total;
         }
-        if (Object.keys(update).length === 0) return {};
+        const final = {
+          coins: "coins" in update ? update.coins : freshData.coins,
+          totalBetAmount: "totalBetAmount" in update ? update.totalBetAmount : freshData.totalBetAmount
+        };
+        if (Object.keys(update).length === 0) return { final };
         transaction.update(userDoc.ref, update);
-        return { bonus: "bonus500Granted" in update, total: "totalBetAmount" in update };
+        return { bonus: "bonus500Granted" in update, total: "totalBetAmount" in update, final };
       });
       if (outcome.bonus) result.bonusGranted++;
       if (outcome.total) result.totalsUpdated++;
+      if (outcome.final) finalValues.set(userDoc.id, outcome.final);
     } catch (error) {
       result.errors.push(`user ${userDoc.id}: ${error.message || error}`);
     }
+  }
+
+  /* ランキング用のまとめ（rankings/coins）。画面は users を全件読む代わりに、これを1件読む。
+     中身は users と同じ値（名前・コイン・累計賭け金）で、順位の決め方・参加条件は画面側でこれまでどおり計算する */
+  try {
+    const entries = usersSnap.docs
+      .map((userDoc) => {
+        const data = { ...userDoc.data(), ...(finalValues.get(userDoc.id) || {}) };
+        return { name: userDoc.id, coins: data.coins, totalBetAmount: Number(data.totalBetAmount || 0) };
+      })
+      .filter((entry) => typeof entry.coins === "number");
+    await db.collection("rankings").doc("coins").set({
+      users: entries,
+      userCount: entries.length,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedBy: "github-actions"
+    });
+    result.rankingUsers = entries.length;
+  } catch (error) {
+    result.errors.push(`ranking: ${error.message || error}`);
   }
 
   log(JSON.stringify({ coinMaintenance: result }));

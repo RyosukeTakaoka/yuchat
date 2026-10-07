@@ -941,13 +941,13 @@ async function startApp() {
   if (session !== appSessionSeq || !currentUser || currentUser.uid !== startedUid || !username) return;
 
   try {
+    resetNewMessageWatch();
     listenFriends();
     listenGroups();
     restoreNotificationsIfGranted();
     updateNotifyAnnouncement();
     listenMyCoins();
     listenMyBetHistory();
-    listenIncomingMessageNotifications();
     listenGameInvites();
     listenManualRaces();
     listenEvents();
@@ -1282,6 +1282,10 @@ function toFriendEntry(item, meIsUser1) {
     photo: data[`${other}Photo`] || "",
     lastMessageAt: data.lastMessageAt || null,
     lastMessageSenderUid: data.lastMessageSenderUid || "",
+    lastMessageId: data.lastMessageId || "",
+    lastMessageSender: data.lastMessageSender || "",
+    lastMessagePreview: data.lastMessagePreview || "",
+    lastMessageHasImage: data.lastMessageHasImage === true,
     myLastReadAt: data[`${me}LastReadAt`] || null,
     friendLastReadAt: data[`${other}LastReadAt`] || null,
     myReadField: `${me}LastReadAt`
@@ -1300,6 +1304,7 @@ function listenFriends() {
     friendDocsAsUser1.forEach((item) => byId.set(item.id, toFriendEntry(item, true)));
     friendDocsAsUser2.forEach((item) => { if (!byId.has(item.id)) byId.set(item.id, toFriendEntry(item, false)); });
     friendsData = [...byId.values()].sort((a, b) => (a.friendshipId < b.friendshipId ? -1 : 1));
+    notifyNewChatMessages("friend", friendsData);
     renderFriends();
     refreshSelectedChatReadMarks();
     applyPendingNotificationTarget("friends");
@@ -1444,6 +1449,7 @@ function listenGroups() {
         showAppToast("👥 グループ", "このグループから退出しました（または削除されました）");
       }
 
+      notifyNewChatMessages("group", groupsData);
       renderGroups();
       refreshSelectedChatReadMarks();
       refreshOpenGroupManageModal();
@@ -2351,7 +2357,14 @@ async function sendMessage() {
     batch.set(messageRef, messageData);
     const chatRef = getSelectedChatRef();
     if (chatRef) {
-      const chatUpdate = { lastMessageAt: serverTimestamp(), lastMessageSenderUid: currentUser.uid, lastMessageId: messageRef.id };
+      const chatUpdate = {
+        lastMessageAt: serverTimestamp(),
+        lastMessageSenderUid: currentUser.uid,
+        lastMessageId: messageRef.id,
+        lastMessageSender: username,
+        lastMessagePreview: text.slice(0, LAST_MESSAGE_PREVIEW_MAX),
+        lastMessageHasImage: Boolean(image)
+      };
       if (selectedChatType === "group") chatUpdate.lastReadAt = { [currentUser.uid]: serverTimestamp() };
       else chatUpdate[chatRef.readField] = serverTimestamp();
       batch.set(chatRef.ref, chatUpdate, { merge: true });
@@ -3054,68 +3067,54 @@ async function showBrowserNotification(title, body, options = {}) {
 
 /* ----- メッセージ受信通知 ----- */
 
-let unsubscribeGlobalMessageWatch = null;
-let messageWatchInitialized = false;
-let lastNotifiedMessageId = null;
+/* 新しいメッセージのアプリ内通知。
+   以前は messages 全体の最新1件を全員が購読していた（誰かが送るたびにログイン中の全員に読み取りが発生）。
+   今は、すでに購読している友達・グループの「最後のメッセージ」（送信と同じ書き込みで更新される）が
+   変わったときに通知する。新しい読み取りは発生しない。
+   ・ログイン直後に読み込んだ分・新しく一覧に加わったチャットの既存のメッセージは通知しない
+   ・自分が送ったもの、今まさに開いて見ているチャットのものは通知しない
+   ・重複防止のキー（message:{ID}）は、プッシュ通知（FCM）のアプリ内表示と同じ */
+const LAST_MESSAGE_PREVIEW_MAX = 100;
+const seenLastMessageIds = { friend: null, group: null };
 
-function listenIncomingMessageNotifications() {
-  if (unsubscribeGlobalMessageWatch) { unsubscribeGlobalMessageWatch(); unsubscribeGlobalMessageWatch = null; }
-  if (!username) return;
+function resetNewMessageWatch() {
+  seenLastMessageIds.friend = null;
+  seenLastMessageIds.group = null;
+}
 
-  messageWatchInitialized = false;
-  lastNotifiedMessageId = null;
+function notifyNewChatMessages(type, chats) {
+  const previous = seenLastMessageIds[type];
+  const next = new Map(chats.map((chat) => [type === "group" ? chat.id : chat.friendshipId, chat.lastMessageId || ""]));
+  seenLastMessageIds[type] = next;
+  if (!previous || !currentUser || !username) return; /* 最初の読み込みは通知しない */
 
-  unsubscribeGlobalMessageWatch = onSnapshot(
-    query(collection(db, "messages"), orderBy("createdAt", "desc"), limit(1)),
-    (snapshot) => {
-      const docSnap = snapshot.docs[0];
-      if (!docSnap) { messageWatchInitialized = true; return; }
+  chats.forEach((chat) => {
+    const chatId = type === "group" ? chat.id : chat.friendshipId;
+    const messageId = chat.lastMessageId || "";
+    if (!messageId || !previous.has(chatId) || previous.get(chatId) === messageId) return;
+    if (chat.lastMessageSenderUid === currentUser.uid) return;
 
-      const message = { id: docSnap.id, ...docSnap.data() };
+    const isCurrentlyOpenChat = type === "group"
+      ? (selectedChatType === "group" && selectedChat === chat.id)
+      : (selectedChatType === "friend" && selectedFriendshipId === chat.friendshipId);
+    /* 今まさにその相手とのチャットを開いて見ている場合は、うるさいので通知しない */
+    if (isCurrentlyOpenChat && document.visibilityState === "visible" && document.hasFocus()) return;
 
-      /* ログイン直後、最初のスナップショットは「既にある最新メッセージ」なので通知しない */
-      if (!messageWatchInitialized) {
-        messageWatchInitialized = true;
-        lastNotifiedMessageId = message.id;
-        return;
-      }
+    const sender = chat.lastMessageSender || (type === "friend" ? chat.friend : "") || "メンバー";
+    const title = type === "group" ? `${sender}（グループ）` : sender;
+    const body = chat.lastMessageHasImage ? "画像を送信しました" : (chat.lastMessagePreview || "メッセージが届きました");
+    const link = type === "group"
+      ? `./?open=chat&group=${encodeURIComponent(chat.id || "")}`
+      : `./?open=chat&friendship=${encodeURIComponent(chat.friendshipId || "")}`;
 
-      if (message.id === lastNotifiedMessageId) return;
-      lastNotifiedMessageId = message.id;
-
-      if (message.deleted) return;
-      if (message.sender === username) return;
-
-      const isForMe =
-        (message.type === "friend" && message.receiver === username) ||
-        (message.type === "group" && groupsData.some((g) => g.id === message.groupId));
-
-      if (!isForMe) return;
-
-      const isCurrentlyOpenChat =
-        (selectedChatType === "friend" && message.type === "friend" && selectedChat === message.sender) ||
-        (selectedChatType === "group" && message.type === "group" && selectedChat === message.groupId);
-
-      /* 今まさにその相手とのチャットを開いて見ている場合は、うるさいので通知しない */
-      if (isCurrentlyOpenChat && document.visibilityState === "visible" && document.hasFocus()) return;
-
-      const title = message.type === "group" ? `${message.sender}（グループ）` : message.sender;
-      const body = message.image ? "画像を送信しました" : (message.text || "メッセージが届きました");
-      const groupName = groupsData.find((g) => g.id === message.groupId)?.name || "グループ";
-      const link = message.type === "group"
-        ? `./?open=chat&group=${encodeURIComponent(message.groupId || "")}`
-        : `./?open=chat&friendship=${encodeURIComponent(message.friendshipId || "")}`;
-
-      notifyOnce(`message:${message.id}`, title, body, {
-        browser: true,
-        browserTitle: "ゆうChat",
-        browserBody: message.type === "group" ? `${groupName}グループに新しいメッセージがあります` : `${message.sender}さんからメッセージが届きました`,
-        tag: `message-${message.id}`,
-        link
-      });
-    },
-    (error) => console.error("メッセージ通知監視エラー:", error)
-  );
+    notifyOnce(`message:${messageId}`, title, body, {
+      browser: true,
+      browserTitle: "ゆうChat",
+      browserBody: type === "group" ? `${chat.name || "グループ"}グループに新しいメッセージがあります` : `${sender}さんからメッセージが届きました`,
+      tag: `message-${messageId}`,
+      link
+    });
+  });
 }
 
 /* =========================================================
@@ -3146,7 +3145,8 @@ function switchView(view) {
 
   if (view === "chat") { markSelectedChatAsRead(); renderFriends(); renderGroups(); }
   if (view === "mypage") loadMyPage();
-  if (view === "derby") { renderRaceInfo(); renderRaceInfoHeavyParts(); }
+  if (view === "derby") { refreshDerbySubscriptionsIfNeeded(); renderRaceInfo(); }
+  else stopDerbySubscriptions();
   if (view === "games") loadGameRooms();
   if (view === "events") { renderEventsList(); renderEventAdminList(); }
 }
@@ -3181,10 +3181,9 @@ logoutButton?.addEventListener("click", async () => {
     pendingGameInvites = [];
     gameInvitesInitialized = false;
     if (unsubscribeMyCoins) { unsubscribeMyCoins(); unsubscribeMyCoins = null; }
-    if (unsubscribeLiveRace) { unsubscribeLiveRace(); unsubscribeLiveRace = null; }
-    if (unsubscribeWinBets) { unsubscribeWinBets(); unsubscribeWinBets = null; }
+    stopDerbySubscriptions();
     if (unsubscribeMyBetHistory) { unsubscribeMyBetHistory(); unsubscribeMyBetHistory = null; }
-    if (unsubscribeGlobalMessageWatch) { unsubscribeGlobalMessageWatch(); unsubscribeGlobalMessageWatch = null; }
+    resetNewMessageWatch();
     if (raceCountdownTimer) { clearInterval(raceCountdownTimer); raceCountdownTimer = null; }
     derbyReplay = null;
     lastActiveBettingRaceId = null;
@@ -3194,11 +3193,10 @@ logoutButton?.addEventListener("click", async () => {
     currentWinPool = {};
     myCoins = 0;
     myAllBets = [];
+    myLatestUserData = null;
     cachedPopularityForRaceId = null;
     cachedPopularity = null;
     lastRaceInfoRenderAt = -999;
-    messageWatchInitialized = false;
-    lastNotifiedMessageId = null;
 
     resetNotifyAnnouncement();
     await unregisterFcmTokenForThisDevice();
@@ -3257,22 +3255,57 @@ async function loadMyPageStats() {
 
 /* 「🏆 ユーコインランキング」の見出しに合わせ、実際のゆうcoin残高ランキングを表示
    （マイページ／ゆうダービー画面の両方から呼べる共通版。コインの仕組み自体は既存のまま） */
+/* ランキングに使うユーザーの一覧（名前・コイン・累計賭け金。コインの多い順、同じなら以前と同じ名前の並び）。
+   ・自動開催が書くまとめ rankings/coins を1件読む（以前は users を全件読んでいた）
+   ・自分の行は、手元の最新の値（listenMyCoins）に置き換える
+   ・まとめがまだ無いときは、これまでどおり users を全件読む */
+async function loadRankingUsers() {
+  const summary = await getDoc(doc(db, "rankings", "coins"));
+  let users;
+  if (summary.exists() && Array.isArray(summary.data().users)) {
+    users = summary.data().users
+      .filter((u) => u && typeof u.name === "string")
+      .map((u) => ({ name: u.name, coins: u.coins, totalBetAmount: Number(u.totalBetAmount || 0) }));
+  } else {
+    const snapshot = await getDocs(query(collection(db, "users"), orderBy("coins", "desc")));
+    users = snapshot.docs.map((item) => ({ name: item.id, coins: item.data().coins, totalBetAmount: Number(item.data().totalBetAmount || 0) }));
+  }
+
+  if (username && myLatestUserData && myLatestUserData.docId === username && typeof myLatestUserData.coins === "number") {
+    users = users.filter((u) => u.name !== username);
+    users.push({ name: username, coins: myLatestUserData.coins, totalBetAmount: Number(myLatestUserData.totalBetAmount || 0) });
+  }
+
+  return users
+    .filter((u) => typeof u.coins === "number")
+    .sort((a, b) => (b.coins - a.coins) || compareNamesLikeFirestore(b.name, a.name));
+}
+
+/* 同じコイン数のときの並びは、以前の users のクエリ（coins の降順・同点は名前＝ドキュメントIDの降順）と同じにする。
+   Firestore はドキュメントIDを UTF-8 のバイト順で比べるので、コードポイント順で比べる（同じ結果になる） */
+function compareNamesLikeFirestore(a, b) {
+  const x = Array.from(String(a), (c) => c.codePointAt(0));
+  const y = Array.from(String(b), (c) => c.codePointAt(0));
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    if (x[i] !== y[i]) return x[i] - y[i];
+  }
+  return x.length - y.length;
+}
+
 async function renderCoinRankingInto(targetEl) {
   const session = appSessionSeq;
   if (!targetEl) return;
   targetEl.innerHTML = `<div class="loading">ランキングを読み込み中...</div>`;
 
   try {
-    const snapshot = await getDocs(query(collection(db, "users"), orderBy("coins", "desc")));
+    const users = await loadRankingUsers();
     /* ランキングに出るのは、これまでに累計 RANKING_MIN_TOTAL_BET コイン以上賭けたユーザーだけ
        （初期コイン・ボーナスを持っているだけでは上位に入らないようにする） */
-    const all = snapshot.docs
-      .map((item) => ({ name: item.id, coins: item.data().coins, totalBetAmount: Number(item.data().totalBetAmount || 0) }))
-      .filter((u) => typeof u.coins === "number" && u.totalBetAmount >= RANKING_MIN_TOTAL_BET);
+    const all = users.filter((u) => typeof u.coins === "number" && u.totalBetAmount >= RANKING_MIN_TOTAL_BET);
 
     /* 自分がまだ参加条件を満たしていなければ、条件を案内する */
-    const myDoc = snapshot.docs.find((item) => item.id === username);
-    const myTotalBet = myDoc ? Number(myDoc.data().totalBetAmount || 0) : 0;
+    const myEntryData = users.find((u) => u.name === username);
+    const myTotalBet = myEntryData ? myEntryData.totalBetAmount : 0;
     const joinNoteHtml = username && myTotalBet < RANKING_MIN_TOTAL_BET
       ? `<div class="ranking-join-note">ゆうCoinを累計${RANKING_MIN_TOTAL_BET}コイン以上賭けるとランキングに参加できます（あと${RANKING_MIN_TOTAL_BET - myTotalBet}コイン）</div>`
       : "";
@@ -3605,8 +3638,12 @@ async function grantBonusCoinsIfNeeded() {
   }
 }
 
+/* 自分の users ドキュメントの最新の内容（listenMyCoins で受け取る。ランキングの自分の行に使う） */
+let myLatestUserData = null;
+
 function listenMyCoins() {
   if (unsubscribeMyCoins) { unsubscribeMyCoins(); unsubscribeMyCoins = null; }
+  myLatestUserData = null;
   if (!username) return;
 
   unsubscribeMyCoins = onSnapshot(
@@ -3618,6 +3655,7 @@ function listenMyCoins() {
         await grantStartingCoinsIfNeeded();
         return;
       }
+      myLatestUserData = { ...data, docId: snap.id };
       updateCoinDisplays(data.coins);
       if (data.bonus500Granted !== true) grantBonusCoinsIfNeeded();
     },
@@ -4808,7 +4846,33 @@ async function loadRecentRaceResults(excludeRaceId) {
 
 /* ----- 毎ティック：カウントダウン・演出・順位・実況の更新 ----- */
 
+/* ダービーの読み取り（オッズ・直近のレース・過去の結果・ランキングなど）は、ダービー画面を開いている間だけ行う。
+   画面を離れたら購読を解除する（以前はアプリを開いている間ずっと購読し、起動時にも重い読み取りをしていた）。
+   開催・結果確定・精算は、自動開催（GitHub Actions）と、起動時の未精算の確認でこれまでどおり行われる */
+let liveRaceSnapshotReady = false;
+
+function isDerbyViewActive() {
+  return Boolean(currentUser && derbyView?.classList.contains("active") && !appElement?.classList.contains("hidden"));
+}
+
+function stopDerbySubscriptions() {
+  if (unsubscribeLiveRace) { unsubscribeLiveRace(); unsubscribeLiveRace = null; }
+  if (unsubscribeWinBets) { unsubscribeWinBets(); unsubscribeWinBets = null; }
+  lastActiveBettingRaceId = null;
+  lastLiveRaceId = null;
+  liveRaceResult = null;
+  liveRaceSnapshotReady = false;
+  revealedLiveRaceId = null;
+  lastGenerationAttemptAt = -999;
+  currentWinPool = {};
+}
+
 function refreshDerbySubscriptionsIfNeeded() {
+  if (!isDerbyViewActive()) {
+    if (unsubscribeLiveRace || unsubscribeWinBets) stopDerbySubscriptions();
+    return;
+  }
+
   const activeId = getActiveBettingRaceContext().raceId;
   const liveId = getLiveRaceContext().raceId;
 
@@ -4824,20 +4888,22 @@ function refreshDerbySubscriptionsIfNeeded() {
     lastElapsedWasNegative = null;
     revealedLiveRaceId = null;
     lastGenerationAttemptAt = -999;
-    cachedPopularityForRaceId = null;
-    cachedPopularity = null;
+    /* 人気順（cachedPopularity）はレースIDごとのキャッシュなので、ここでは消さない（画面に入り直しても読み直さない） */
 
+    /* 重い部分（詳細結果・過去の結果・ランキング）は、直近のレースの最初の読み込みのあとに1回だけ描く */
     listenLiveRace(liveId);
-    renderRaceInfoHeavyParts();
   }
 }
 
 function listenLiveRace(raceId) {
   if (unsubscribeLiveRace) { unsubscribeLiveRace(); unsubscribeLiveRace = null; }
+  liveRaceSnapshotReady = false;
 
   unsubscribeLiveRace = onSnapshot(
     doc(db, "races", raceId),
     (snap) => {
+      const firstSnapshot = !liveRaceSnapshotReady;
+      liveRaceSnapshotReady = true;
       const wasFinished = Boolean(liveRaceResult);
 
       if (snap.exists() && snap.data().status === "finished") {
@@ -4849,8 +4915,8 @@ function listenLiveRace(raceId) {
 
       renderRaceInfo();
 
-      /* 「未生成→生成された」の瞬間だけ、重い部分（詳細結果・ランキング等）を更新する */
-      if (!wasFinished && liveRaceResult) {
+      /* ダービー画面を開いて最初の読み込み、または「未生成→生成された」の瞬間だけ、重い部分（詳細結果・ランキング等）を更新する */
+      if (firstSnapshot || (!wasFinished && liveRaceResult)) {
         renderRaceInfoHeavyParts();
       }
     },
@@ -4871,7 +4937,8 @@ function tickDerbyCountdown() {
      次の回までの時間が表示されていた。開催時刻（11:30:00・15:02:00 JST）を基準にする */
   if (derbyCountdown) derbyCountdown.textContent = getDerbyCountdownText(now);
 
-  if (now >= liveContext.raceTime && !liveRaceResult && elapsed - lastGenerationAttemptAt > 5) {
+  /* 結果がまだ無ければ作る（ダービー画面を開いていて、直近のレースを読み込み終えたときだけ） */
+  if (isDerbyViewActive() && liveRaceSnapshotReady && now >= liveContext.raceTime && !liveRaceResult && elapsed - lastGenerationAttemptAt > 5) {
     /* 一度失敗しても(通信エラー等)5秒おきに再試行する。
        tryGenerateRaceResult自体はすでに結果がある場合は何もしないだけなので、
        何度呼んでも安全（二重生成はされない）。 */
