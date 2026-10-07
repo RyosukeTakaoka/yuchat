@@ -1,4 +1,5 @@
 // 管理者機能の Firestore Rules セキュリティテスト（Rules Emulator で実際に許可・拒否を確かめる）
+// イベント機能（events / eventParticipants）は廃止したので、残っている過去のデータをブラウザから読み書きできないことを確かめる
 const { initializeTestEnvironment, assertSucceeds, assertFails } = require("@firebase/rules-unit-testing");
 const fs = require("fs");
 const path = require("path");
@@ -31,15 +32,9 @@ const min = (m) => new Date(Date.now() + m * 60000);
     await setDoc(doc(d, "derbyManualRaces/2030-01-01-m1300"), race({ id: "2030-01-01-m1300", openAt: min(-30), closeAt: min(-5), raceAt: min(5) }));
     await setDoc(doc(d, "derbyManualRaces/2030-01-01-m1400"), race({ id: "2030-01-01-m1400", openAt: min(-10), closeAt: min(10), raceAt: min(20), status: "cancelled" }));
     await setDoc(doc(d, "derbyManualRaces/2030-01-01-m1500"), race({ id: "2030-01-01-m1500", openAt: min(30), closeAt: min(40), raceAt: min(50) }));
-    await setDoc(doc(d, "events/ev-open"), ev({ startAt: min(120), entryOpenAt: min(-10), entryCloseAt: min(60) }));
-    await setDoc(doc(d, "events/ev-before"), ev({ startAt: min(120), entryOpenAt: min(30), entryCloseAt: min(60) }));
-    await setDoc(doc(d, "events/ev-cancelled"), ev({ startAt: min(120), entryOpenAt: min(-10), entryCloseAt: min(60), status: "cancelled" }));
-    await setDoc(doc(d, "events/ev-full"), ev({ startAt: min(120), entryOpenAt: min(-10), entryCloseAt: min(60), capacity: 1, participantCount: 1 }));
-    await setDoc(doc(d, "eventParticipants/ev-full_userB"), { eventId: "ev-full", uid: "userB", username: "bob", joinedAt: new Date() });
-    await setDoc(doc(d, "events/ev-closed"), ev({ startAt: min(120), entryOpenAt: min(-60), entryCloseAt: min(-5), participantCount: 1 }));
-    await setDoc(doc(d, "eventParticipants/ev-closed_userA"), { eventId: "ev-closed", uid: "userA", username: "alice", joinedAt: new Date() });
-    await setDoc(doc(d, "events/ev-admin-edit"), ev({ startAt: min(120), entryOpenAt: min(30), entryCloseAt: min(60) }));
-    await setDoc(doc(d, "events/ev-admin-cancel"), ev({ startAt: min(120), entryOpenAt: min(-10), entryCloseAt: min(60) }));
+    // 廃止したイベント機能の過去のデータ（Firestore に残したまま）
+    await setDoc(doc(d, "events/ev-old"), ev({ startAt: min(120), entryOpenAt: min(-10), entryCloseAt: min(60), participantCount: 1 }));
+    await setDoc(doc(d, "eventParticipants/ev-old_userA"), { eventId: "ev-old", uid: "userA", username: "alice", joinedAt: new Date() });
   });
 
   // アプリと同じ形のトランザクション
@@ -60,6 +55,7 @@ const min = (m) => new Date(Date.now() + m * 60000);
     t.update(userRef, { coins: u.data().coins - 100, totalBetAmount: Number(u.data().totalBetAmount || 0) + 100 });
     t.set(doc(collection(db, "raceBets")), { raceId, uid, username, type: "win", horses: [1], amount: 100, settled: false, win: null, payout: null, createdAt: serverTimestamp() });
   });
+  // 廃止したイベント機能：以前のアプリと同じ形の書き込み（いまは拒否されることを確かめる）
   const createEvent = (db, id) => runTransaction(db, async (t) => {
     const ref = doc(db, "events", id); await t.get(ref);
     t.set(ref, ev({ title: "新イベント", startAt: min(300), entryOpenAt: min(100), entryCloseAt: min(200) }));
@@ -70,24 +66,12 @@ const min = (m) => new Date(Date.now() + m * 60000);
     t.set(entryRef, { eventId: id, uid, username: name, joinedAt: serverTimestamp() });
     t.update(ref, { participantCount: Number(s.data().participantCount || 0) + 1 });
   });
-  const leave = (db, uid, id) => runTransaction(db, async (t) => {
-    const ref = doc(db, "events", id), entryRef = doc(db, "eventParticipants", `${id}_${uid}`);
-    const s = await t.get(ref); await t.get(entryRef);
-    t.delete(entryRef);
-    t.update(ref, { participantCount: Math.max(0, Number(s.data().participantCount || 0) - 1) });
-  });
 
   log.push("--- ① 管理者 → 管理操作が成功する");
   await ok("管理者：手動レースの作成（アプリと同じトランザクション）", createManualRace(admin, "2030-02-01-m1000"));
   await ok("管理者：手動レースのキャンセル", cancelManualRace(admin, "2030-02-01-m1000"));
   await ok("管理者：キャンセル済みの手動レースを作り直す", createManualRace(admin, "2030-02-01-m1000"));
   await ok("管理者：手動レースの削除", deleteDoc(doc(admin, "derbyManualRaces/2030-02-01-m1000")));
-  await ok("管理者：イベントの作成（アプリと同じトランザクション）", createEvent(admin, "ev-new"));
-  await ok("管理者：イベントの編集", runTransaction(admin, async (t) => { const r = doc(admin, "events/ev-admin-edit"); await t.get(r); t.update(r, { title: "変更後", description: "説明", capacity: 10, updatedAt: serverTimestamp() }); }));
-  await ok("管理者：イベントのキャンセル", runTransaction(admin, async (t) => { const r = doc(admin, "events/ev-admin-cancel"); await t.get(r); t.update(r, { status: "cancelled", cancelledAt: serverTimestamp(), cancelledByUid: ADMIN }); }));
-  await ok("管理者：参加者一覧の読み取り", getDocs(query(collection(admin, "eventParticipants"), where("eventId", "==", "ev-full"))));
-  await ok("管理者：参加者記録の削除（管理用）", deleteDoc(doc(admin, "eventParticipants/ev-closed_userA")));
-  await ok("管理者：イベントの削除", deleteDoc(doc(admin, "events/ev-new")));
 
   log.push("--- ② 一般ユーザー → 手動レースを直接 Firestore に書き込もうとしても拒否される");
   await ng("一般：手動レースの作成（アプリと同じトランザクション）", createManualRace(A, "2030-03-01-m1000"));
@@ -101,50 +85,42 @@ const min = (m) => new Date(Date.now() + m * 60000);
   await ng("一般：betCount を一気に増やす", updateDoc(doc(A, "derbyManualRaces/2030-01-01-m1200"), { betCount: 50 }));
   await ng("一般：betCount と status を同時に変更", updateDoc(doc(A, "derbyManualRaces/2030-01-01-m1200"), { betCount: 1, status: "cancelled" }));
   await ng("メールアドレス・名前が管理者風でも UID が違えば拒否（作成）", createManualRace(fake, "2030-03-02-m1000"));
-  await ng("メールアドレス・名前が管理者風でも UID が違えば拒否（イベント作成）", createEvent(fake, "ev-fake"));
   await ng("未ログイン：手動レースの読み取り", getDoc(doc(anon, "derbyManualRaces/2030-01-01-m1200")));
 
-  log.push("--- ③ 一般ユーザー → イベントを直接 Firestore に書き込もうとしても拒否される");
-  await ng("一般：イベントの作成（アプリと同じトランザクション）", createEvent(A, "ev-by-user"));
-  await ng("一般：イベントの作成（setDoc）", setDoc(doc(A, "events/ev-by-user2"), ev({ startAt: min(100), entryOpenAt: min(10), entryCloseAt: min(50) })));
+  log.push("--- ③ 廃止したイベント（events / eventParticipants）→ 管理者も一般ユーザーもブラウザからは読み書きできない");
+  await ok("一般：手動レースの読み取り（今まで通り）", getDocs(collection(A, "derbyManualRaces")));
+  await ng("管理者：イベントの読み取り", getDoc(doc(admin, "events/ev-old")));
+  await ng("管理者：イベント一覧の読み取り", getDocs(collection(admin, "events")));
+  await ng("管理者：イベントの作成（以前のアプリと同じトランザクション）", createEvent(admin, "ev-new"));
+  await ng("管理者：イベントの編集", updateDoc(doc(admin, "events/ev-old"), { title: "変更後" }));
+  await ng("管理者：イベントの削除", deleteDoc(doc(admin, "events/ev-old")));
+  await ng("管理者：参加者一覧の読み取り", getDocs(query(collection(admin, "eventParticipants"), where("eventId", "==", "ev-old"))));
+  await ng("管理者：参加記録の削除", deleteDoc(doc(admin, "eventParticipants/ev-old_userA")));
+  await ng("一般：イベントの読み取り", getDoc(doc(A, "events/ev-old")));
+  await ng("一般：イベント一覧の読み取り", getDocs(collection(A, "events")));
+  await ng("一般：イベントの作成（setDoc）", setDoc(doc(A, "events/ev-by-user"), ev({ startAt: min(100), entryOpenAt: min(10), entryCloseAt: min(50) })));
   await ng("一般：イベントの作成（addDoc）", addDoc(collection(A, "events"), { title: "x" }));
-  await ng("一般：イベントの編集（タイトル）", updateDoc(doc(A, "events/ev-before"), { title: "乗っ取り" }));
-  await ng("一般：イベントのキャンセル", updateDoc(doc(A, "events/ev-open"), { status: "cancelled" }));
-  await ng("一般：イベントの削除", deleteDoc(doc(A, "events/ev-open")));
-  await ng("一般：参加記録なしで人数だけ増やす", updateDoc(doc(A, "events/ev-open"), { participantCount: 1 }));
-  await ng("一般：人数を大きく書き換える", updateDoc(doc(A, "events/ev-open"), { participantCount: 999 }));
-  await ng("一般：人数と定員を同時に書き換える", updateDoc(doc(A, "events/ev-full"), { participantCount: 2, capacity: 0 }));
-  await ng("一般：イベントの下にデータを作る", setDoc(doc(A, "events/ev-open/x/y"), { a: 1 }));
-
-  log.push("--- ④ 一般ユーザー → 正常なイベント参加・取り消しは成功する");
-  await ok("一般：イベント一覧の読み取り", getDocs(collection(A, "events")));
-  await ok("一般：手動レースの読み取り", getDocs(collection(A, "derbyManualRaces")));
-  await ok("一般：自分の参加状況の読み取り", getDocs(query(collection(A, "eventParticipants"), where("uid", "==", "userA"))));
-  await ok("一般(A)：受付中のイベントに参加（アプリと同じトランザクション）", join(A, "userA", "alice", "ev-open"));
-  await ok("一般(B)：同じイベントに参加", join(B, "userB", "bob", "ev-open"));
-  await ng("一般(A)：同じイベントに二重参加（記録の上書き＋人数+1）", join(A, "userA", "alice", "ev-open"));
-  await ng("一般(A)：他人(B)の参加を勝手に取り消す", deleteDoc(doc(A, "eventParticipants/ev-open_userB")));
-  await ng("一般(A)：他人の名前で参加記録を作る", join(A, "userC", "carol", "ev-open"));
-  await ng("一般(A)：人数を増やさずに参加記録だけ作る", setDoc(doc(A, "eventParticipants/ev-before_userA"), { eventId: "ev-before", uid: "userA", username: "alice", joinedAt: serverTimestamp() }));
-  await ng("一般(A)：ID と eventId が合わない参加記録", runTransaction(A, async (t) => { const r = doc(A, "events/ev-open"); const s = await t.get(r); t.set(doc(A, "eventParticipants/ev-before_userA"), { eventId: "ev-open", uid: "userA", username: "alice", joinedAt: serverTimestamp() }); t.update(r, { participantCount: s.data().participantCount + 1 }); }));
-  await ng("一般(A)：受付開始前のイベントに参加", join(A, "userA", "alice", "ev-before"));
-  await ng("一般(A)：キャンセルされたイベントに参加", join(A, "userA", "alice", "ev-cancelled"));
-  await ng("一般(A)：定員いっぱいのイベントに参加", join(A, "userA", "alice", "ev-full"));
-  await ok("一般(A)：参加の取り消し（アプリと同じトランザクション）", leave(A, "userA", "ev-open"));
-  await ok("一般(A)：もう一度参加", join(A, "userA", "alice", "ev-open"));
+  await ng("一般：イベントの人数の書き換え", updateDoc(doc(A, "events/ev-old"), { participantCount: 999 }));
+  await ng("一般：イベントの削除", deleteDoc(doc(A, "events/ev-old")));
+  await ng("一般：イベントの下にデータを作る", setDoc(doc(A, "events/ev-old/x/y"), { a: 1 }));
+  await ng("一般：自分の参加記録の読み取り", getDocs(query(collection(A, "eventParticipants"), where("uid", "==", "userA"))));
+  await ng("一般：イベントに参加（以前のアプリと同じトランザクション）", join(A, "userA", "alice", "ev-old"));
+  await ng("一般：参加記録だけ作る", setDoc(doc(A, "eventParticipants/ev-old_userB"), { eventId: "ev-old", uid: "userB", username: "bob", joinedAt: serverTimestamp() }));
+  await ng("一般：自分の参加記録の削除", deleteDoc(doc(A, "eventParticipants/ev-old_userA")));
+  await ng("メールアドレス・名前が管理者風でも UID が違えば拒否（イベント作成）", createEvent(fake, "ev-fake"));
   {
-    let s; await env.withSecurityRulesDisabled(async (ctx) => { s = (await getDoc(doc(ctx.firestore(), "events/ev-open"))).data()?.participantCount; });
-    if (s === 2) { pass++; log.push("PASS 参加者数が実際の参加記録と一致（2人）"); } else { fail++; log.push(`FAIL 参加者数が ${s}`); }
+    let e, p; await env.withSecurityRulesDisabled(async (ctx) => { const d = ctx.firestore(); e = (await getDoc(doc(d, "events/ev-old"))).data(); p = (await getDoc(doc(d, "eventParticipants/ev-old_userA"))).exists(); });
+    if (e && e.title === "テスト" && e.participantCount === 1 && p) { pass++; log.push("PASS 過去のイベントのデータは消えずにそのまま残っている"); } else { fail++; log.push("FAIL 過去のイベントのデータが変わった"); }
   }
 
-  log.push("--- ⑤ 一般ユーザー → 手動レースへの正常な投票は成功・受付外は拒否");
+  log.push("--- ④ 一般ユーザー → 手動レースへの正常な投票は成功・受付外は拒否");
   await ok("一般：受付中の手動レースに投票（betCount+1・コイン・馬券を同じトランザクション）", bet(A, "userA", "alice", "2030-01-01-m1200"));
   await ok("一般(B)：同じ手動レースに投票", bet(B, "userB", "bob", "2030-01-01-m1200"));
   await ng("一般：締切後の手動レースに投票", bet(A, "userA", "alice", "2030-01-01-m1300"));
   await ng("一般：受付開始前の手動レースに投票", bet(A, "userA", "alice", "2030-01-01-m1500"));
   await ng("一般：キャンセルされた手動レースに投票", bet(A, "userA", "alice", "2030-01-01-m1400"));
 
-  log.push("--- ⑥ 既存のデータは今まで通り（ログイン済みなら読み書き可・未ログインは不可）");
+  log.push("--- ⑤ 既存のデータは今まで通り（ログイン済みなら読み書き可・未ログインは不可）");
   await ok("users：自分のデータ更新", updateDoc(doc(A, "users/alice"), { online: true, lastSeen: serverTimestamp() }));
   await ok("users：新規登録", setDoc(doc(A, "users/alice_new"), { uid: "userA", name: "alice_new", coins: 1000 }));
   await ok("friends：友達追加", setDoc(doc(A, "friends/alice_bob"), { user1: "alice", user2: "bob", createdAt: serverTimestamp() }));
@@ -164,7 +140,7 @@ const min = (m) => new Date(Date.now() + m * 60000);
   await ng("未ログイン：messages への書き込み（今まで通り拒否）", addDoc(collection(anon, "messages"), { text: "x" }));
   await ng("未ログイン：イベントの読み取り", getDocs(collection(anon, "events")));
 
-  log.push("--- ⑦ ゆう経済：株価（market）・総資産ランキング（rankings）は読み取りだけ（書くのは自動処理だけ）");
+  log.push("--- ⑥ ゆう経済：株価（market）・総資産ランキング（rankings）は読み取りだけ（書くのは自動処理だけ）");
   await env.withSecurityRulesDisabled(async (ctx) => {
     const d = ctx.firestore();
     await setDoc(doc(d, "market/current"), { date: "2030-01-01", companies: { YGM: { price: 180 } } });

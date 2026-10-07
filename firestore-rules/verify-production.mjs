@@ -4,15 +4,15 @@
    1. サービスアカウントで、確認用の一般ユーザー（UID: rules-verify-bot。管理者ではない）のログイン用トークンを作り、
       Firebase Authentication にログインする（アプリと同じ Web API キーを使う）
    2. そのユーザーとして Firestore の REST API に直接書き込みを試す
-      ・手動レースの作成・キャンセル・投票数の改ざん、イベントの作成・編集・キャンセル・参加人数の改ざん → 拒否されること
-      ・イベントへの参加・参加取り消し（アプリと同じ「参加記録 + 人数」の書き込み） → 成功すること
+      ・手動レースの作成・キャンセル・投票数の改ざん → 拒否されること
+      ・廃止したイベント機能（events / eventParticipants）の読み取り・書き込み → 拒否されること
+        （本番に残っている過去のイベントのデータには触れない。確認には存在しない ID を使う）
       ・管理用以外のデータ（今まで通りのルール）への書き込み・読み取り → 成功すること
       ・ログインしていない人の読み取り → 拒否されること
    3. 確認用のデータとユーザーは最後に必ず削除する
 
    確認用のデータ：
-   ・手動レースと拒否確認用のイベントは 2000年の日付で作る（アプリの一覧にも、自動開催の処理にも出てこない）
-   ・参加・取り消しの確認に使うイベントだけは受付中である必要があるため、確認のあいだ（数秒）だけイベント一覧に出る
+   ・手動レースは 2000年の日付で作る（アプリの一覧にも、自動開催の処理にも出てこない）
 
    環境変数：FIREBASE_SERVICE_ACCOUNT（Secrets）、GITHUB_STEP_SUMMARY
             FIRESTORE_REST_BASE / AUTH_REST_BASE はテスト用（Emulator に向けるとき）
@@ -69,19 +69,15 @@ async function main() {
   const ids = {
     closedRace: "2000-01-01-m0000",
     createRace: "2000-01-02-m0000",
-    hiddenEvent: `rules-verify-hidden-${stamp}`,
-    createEvent: `rules-verify-create-${stamp}`,
-    openEvent: `rules-verify-open-${stamp}`,
+    retiredEvent: `rules-verify-retired-${stamp}`,
     scratch: `rulesVerify/${TEST_UID}-${stamp}`
   };
   const cleanupRefs = [
     db.doc(`derbyManualRaces/${ids.closedRace}`),
     db.doc(`derbyManualRaces/${ids.createRace}`),
-    db.doc(`events/${ids.hiddenEvent}`),
-    db.doc(`events/${ids.createEvent}`),
-    db.doc(`events/${ids.openEvent}`),
-    db.doc(`eventParticipants/${ids.openEvent}_${TEST_UID}`),
-    db.doc(`eventParticipants/${ids.openEvent}_someoneElse`),
+    /* 拒否されるはずだが、万一書き込めてしまったときのために片付ける（存在しない ID なので過去のデータは消さない） */
+    db.doc(`events/${ids.retiredEvent}`),
+    db.doc(`eventParticipants/${ids.retiredEvent}_${TEST_UID}`),
     db.doc(ids.scratch)
   ];
 
@@ -96,8 +92,6 @@ async function main() {
       raceId: ids.closedRace, dayId: "2000-01-01", openAt: Timestamp.fromDate(old), closeAt: Timestamp.fromDate(new Date(old.getTime() + 600000)),
       raceAt: Timestamp.fromDate(new Date(old.getTime() + 1200000)), status: "scheduled", betCount: 0, createdByUid: ADMIN_UID, rulesVerify: true
     });
-    const eventBase = { description: "本番のルール確認用（自動テスト）。すぐに削除されます", location: "", capacity: 0, status: "scheduled", participantCount: 0, createdByUid: ADMIN_UID, createdByName: "自動テスト", rulesVerify: true };
-    await db.doc(`events/${ids.hiddenEvent}`).set({ ...eventBase, title: "（自動テスト）", startAt: Timestamp.fromDate(old), entryOpenAt: Timestamp.fromDate(old), entryCloseAt: Timestamp.fromDate(old) });
 
     /* 確認用の一般ユーザーでログイン */
     const customToken = await auth.createCustomToken(TEST_UID);
@@ -119,7 +113,6 @@ async function main() {
     const patch = (docPath, data) => call("PATCH", `${BASE}/${docPath}?${Object.keys(data).map((k) => `updateMask.fieldPaths=${k}`).join("&")}&currentDocument.exists=true`, { fields: fields(data) });
     const remove = (docPath) => call("DELETE", `${BASE}/${docPath}`);
     const get = (docPath, token) => call("GET", `${BASE}/${docPath}`, undefined, token);
-    const commit = (writes) => call("POST", `${BASE}:commit`, { writes });
     const check = async (label, expected, promise) => { const r = await promise; record(label, expected, r.status, r.text); };
 
     /* ① 手動レース：一般ユーザーは直接書き換えられない */
@@ -129,46 +122,17 @@ async function main() {
     await check("手動レースの時刻の書き換え", "DENY", patch(`derbyManualRaces/${ids.closedRace}`, { raceAt: minutes(1) }));
     await check("手動レースの削除", "DENY", remove(`derbyManualRaces/${ids.closedRace}`));
 
-    /* ② イベント：一般ユーザーは作成できない */
-    await check("イベントの作成", "DENY", create("events", ids.createEvent, { ...eventBase, title: "乗っ取り", startAt: old, entryOpenAt: old, entryCloseAt: old }));
+    /* ② 廃止したイベント機能：読み取りも書き込みもできない（存在しない ID で確かめる） */
+    await check("イベントの読み取り（廃止）", "DENY", get(`events/${ids.retiredEvent}`));
+    await check("イベントの作成（廃止）", "DENY", create("events", ids.retiredEvent, { title: "（自動テスト）", participantCount: 0 }));
+    await check("イベント参加記録の読み取り（廃止）", "DENY", get(`eventParticipants/${ids.retiredEvent}_${TEST_UID}`));
+    await check("イベント参加記録の作成（廃止）", "DENY", create("eventParticipants", `${ids.retiredEvent}_${TEST_UID}`, { eventId: ids.retiredEvent, uid: TEST_UID, username: "自動テスト", joinedAt: new Date() }));
 
-    /* ③ 受付中のイベント（確認のあいだだけ存在する）で、編集・キャンセル・人数の改ざんの拒否と、正常な参加・取り消しを確かめる */
-    await db.doc(`events/${ids.openEvent}`).set({ ...eventBase, title: "（自動テスト）すぐに削除されます", startAt: Timestamp.fromDate(minutes(30)), entryOpenAt: Timestamp.fromDate(minutes(-5)), entryCloseAt: Timestamp.fromDate(minutes(20)) });
-    const eventName = `${DOCS}/events/${ids.openEvent}`;
-    const entryName = `${DOCS}/eventParticipants/${ids.openEvent}_${TEST_UID}`;
-    await check("イベントの編集（タイトル）", "DENY", patch(`events/${ids.openEvent}`, { title: "乗っ取り" }));
-    await check("イベントのキャンセル", "DENY", patch(`events/${ids.openEvent}`, { status: "cancelled" }));
-    await check("イベント参加人数の改ざん（参加記録なしで +1）", "DENY", patch(`events/${ids.openEvent}`, { participantCount: 1 }));
-    await check("イベント参加人数の改ざん（999）", "DENY", patch(`events/${ids.openEvent}`, { participantCount: 999 }));
-    await check("イベントの削除", "DENY", remove(`events/${ids.openEvent}`));
-    await check("他人の名前で参加記録を作る", "DENY", commit([
-      { update: { name: `${DOCS}/eventParticipants/${ids.openEvent}_someoneElse`, fields: fields({ eventId: ids.openEvent, uid: "someoneElse", username: "x", joinedAt: new Date() }) }, currentDocument: { exists: false } },
-      { update: { name: eventName, fields: fields({ participantCount: 1 }) }, updateMask: { fieldPaths: ["participantCount"] }, currentDocument: { exists: true } }
-    ]));
-    await check("イベントに参加（参加記録 + 人数 +1・アプリと同じ書き込み）", "ALLOW", commit([
-      { update: { name: entryName, fields: fields({ eventId: ids.openEvent, uid: TEST_UID, username: "自動テスト", joinedAt: new Date() }) }, currentDocument: { exists: false } },
-      { update: { name: eventName, fields: fields({ participantCount: 1 }) }, updateMask: { fieldPaths: ["participantCount"] }, currentDocument: { exists: true } }
-    ]));
-    const afterJoin = (await db.doc(`events/${ids.openEvent}`).get()).data()?.participantCount;
-    record("参加後の人数が 1", "1", String(afterJoin));
-    await check("同じイベントに二重参加", "DENY", commit([
-      { update: { name: entryName, fields: fields({ eventId: ids.openEvent, uid: TEST_UID, username: "自動テスト", joinedAt: new Date() }) } },
-      { update: { name: eventName, fields: fields({ participantCount: 2 }) }, updateMask: { fieldPaths: ["participantCount"] }, currentDocument: { exists: true } }
-    ]));
-    await check("参加の取り消し（参加記録の削除 + 人数 -1）", "ALLOW", commit([
-      { delete: entryName, currentDocument: { exists: true } },
-      { update: { name: eventName, fields: fields({ participantCount: 0 }) }, updateMask: { fieldPaths: ["participantCount"] }, currentDocument: { exists: true } }
-    ]));
-    const afterLeave = (await db.doc(`events/${ids.openEvent}`).get()).data()?.participantCount;
-    record("取り消し後の人数が 0", "0", String(afterLeave));
-    await db.doc(`events/${ids.openEvent}`).delete();
-
-    /* ④ 読み取りと、管理用以外のデータ（今まで通りのルール） */
-    await check("イベントの読み取り", "ALLOW", get(`events/${ids.hiddenEvent}`));
+    /* ③ 読み取りと、管理用以外のデータ（今まで通りのルール） */
     await check("手動レースの読み取り", "ALLOW", get(`derbyManualRaces/${ids.closedRace}`));
     await check("管理用以外のデータへの書き込み（今まで通り可）", "ALLOW", create("rulesVerify", ids.scratch.split("/")[1], { uid: TEST_UID, at: new Date() }));
     await check("管理用以外のデータの削除（今まで通り可）", "ALLOW", remove(ids.scratch));
-    await check("ログインしていない人の読み取り（今まで通り拒否）", "DENY", get(`events/${ids.hiddenEvent}`, null));
+    await check("ログインしていない人の読み取り（今まで通り拒否）", "DENY", get(`derbyManualRaces/${ids.closedRace}`, null));
   } finally {
     /* 確認用のデータとユーザーを必ず削除する */
     for (const ref of cleanupRefs) {

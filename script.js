@@ -109,11 +109,6 @@ let liveRaceResult = null;
 /* 手動レース（derbyManualRaces）：raceId → 予定。管理者が作ったものを全員が読む */
 let manualRaces = new Map();
 let unsubscribeManualRaces = null;
-/* イベント（events）と、自分が参加しているイベント（eventParticipants） */
-let latestEvents = [];
-let myEventEntries = new Map();
-let unsubscribeEvents = null;
-let unsubscribeMyEventEntries = null;
 let lastGenerationAttemptAt = -999;
 let lastActiveBettingRaceId = null;
 let lastLiveRaceId = null;
@@ -189,7 +184,6 @@ const imageInput = document.getElementById("imageInput");
 
 const chatView = document.getElementById("chatView");
 const derbyView = document.getElementById("derbyView");
-const eventsView = document.getElementById("eventsView");
 const gamesView = document.getElementById("gamesView");
 const mypageView = document.getElementById("mypageView");
 const economyView = document.getElementById("economyView");
@@ -953,7 +947,6 @@ async function startApp() {
     listenMyBetHistory();
     listenGameInvites();
     listenManualRaces();
-    listenEvents();
     updateAdminVisibility();
     catchUpMissedRaces();
     try { initializeSafeRace(); } catch (e) { console.error("レース初期化エラー:", e); }
@@ -3134,7 +3127,7 @@ tabButtons.forEach((button) => {
 });
 
 function switchView(view) {
-  const views = { chat: chatView, derby: derbyView, economy: economyView, events: eventsView, games: gamesView, mypage: mypageView };
+  const views = { chat: chatView, derby: derbyView, economy: economyView, games: gamesView, mypage: mypageView };
 
   Object.entries(views).forEach(([name, element]) => {
     if (!element) return;
@@ -3151,7 +3144,6 @@ function switchView(view) {
   if (view === "derby") { refreshDerbySubscriptionsIfNeeded(); renderRaceInfo(); }
   else stopDerbySubscriptions();
   if (view === "games") loadGameRooms();
-  if (view === "events") { renderEventsList(); renderEventAdminList(); }
   if (view === "economy") openEconomyView();
 }
 
@@ -3174,14 +3166,9 @@ logoutButton?.addEventListener("click", async () => {
     if (unsubscribeCurrentGame) { unsubscribeCurrentGame(); unsubscribeCurrentGame = null; }
     if (unsubscribeGameInvites) { unsubscribeGameInvites(); unsubscribeGameInvites = null; }
     if (unsubscribeManualRaces) { unsubscribeManualRaces(); unsubscribeManualRaces = null; }
-    if (unsubscribeEvents) { unsubscribeEvents(); unsubscribeEvents = null; }
-    if (unsubscribeMyEventEntries) { unsubscribeMyEventEntries(); unsubscribeMyEventEntries = null; }
     manualRaces = new Map();
-    latestEvents = [];
-    myEventEntries = new Map();
     selectedBetRaceId = null;
     document.getElementById("derbyAdminPanel")?.classList.add("hidden");
-    document.getElementById("eventAdminPanel")?.classList.add("hidden");
     pendingGameInvites = [];
     gameInvitesInitialized = false;
     if (unsubscribeMyCoins) { unsubscribeMyCoins(); unsubscribeMyCoins = null; }
@@ -4970,11 +4957,11 @@ function initializeSafeRace() {
 }
 
 /* =========================================================
-   管理者（ゆうダービー管理・イベント管理）
+   管理者（ゆうダービー管理）
    ・管理者は Firebase Authentication の UID だけで判定する（メールアドレスや名前では判定しない）
    ・管理者以外には管理画面・管理ボタンを表示しない
    ・Firestore のルール（firestore.rules）でも同じ UID を確かめていて、
-     管理者以外が手動レース・イベントを直接書き換えようとしても拒否される
+     管理者以外が手動レースを直接書き換えようとしても拒否される
 ========================================================= */
 
 const ADMIN_UID = "g51wzTvJFsZiYEfre5aDuDckJXY2";
@@ -4983,8 +4970,8 @@ function isAdminUser() {
   return Boolean(currentUser && currentUser.uid === ADMIN_UID);
 }
 
-/* 手動レースの投票数（betCount）とイベントの参加人数（participantCount）は、
-   Firestore のルールで「読んだ値 + 1（または - 1）」になっているかを確かめている。
+/* 手動レースの投票数（betCount）は、
+   Firestore のルールで「読んだ値 + 1」になっているかを確かめている。
    同時に何人かが書き込むと、古い値で計算した側は（競合なのに自動でやり直されず）permission-denied で拒否されるので、
    そのときは少し待って最新の値で数回やり直す（拒否された書き込みは何も反映されていないので、二重にはならない） */
 async function runCountedTransaction(updateFunction, attempts = 8) {
@@ -5001,11 +4988,7 @@ async function runCountedTransaction(updateFunction, attempts = 8) {
 function updateAdminVisibility() {
   const admin = isAdminUser();
   document.getElementById("derbyAdminPanel")?.classList.toggle("hidden", !admin);
-  document.getElementById("eventAdminPanel")?.classList.toggle("hidden", !admin);
-  if (admin) {
-    renderManualRaceAdminList();
-    renderEventAdminList();
-  }
+  if (admin) renderManualRaceAdminList();
 }
 
 /* Firestore の Timestamp / Date / 文字列 → Date */
@@ -5036,14 +5019,10 @@ function formatJstDateTime(date) {
   return `${jst.getUTCMonth() + 1}/${jst.getUTCDate()} ${formatJstHourMinute(date)}`;
 }
 
-/* 日本時間の「YYYY-MM-DD」と「HH:MM」（入力欄に入れる値） */
-function toJstInputValues(date) {
-  return { date: formatRaceId(date), time: formatJstHourMinute(date) };
-}
-
 /* ----- ゆうダービー：手動レース（特別レース） ----- */
 
 function listenManualRaces() {
+  startAdminListsRefresh();
   if (unsubscribeManualRaces) { unsubscribeManualRaces(); unsubscribeManualRaces = null; }
   const since = new Date(derbyNow().getTime() - 2 * DAY_MS);
   unsubscribeManualRaces = onSnapshot(
@@ -5239,389 +5218,16 @@ function renderUpcomingRacesLine() {
   if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
 }
 
-/* =========================================================
-   イベント
-   ・events/{eventId}：イベントの内容（管理者が作成・編集・キャンセル）
-   ・eventParticipants/{eventId}_{uid}：参加（1人1件。参加と取り消しはトランザクションで人数と一緒に更新）
-   ・eventId は「開催日時＋タイトル」から決めるので、同じイベントを二重に作れない
-========================================================= */
-
-function hashText(text) {
-  let h = 2166136261;
-  for (const ch of String(text)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); }
-  return (h >>> 0).toString(36);
-}
-
-function makeEventId(startAt, title) {
-  const jst = toJstFields(startAt);
-  const stamp = `${jst.getUTCFullYear()}${String(jst.getUTCMonth() + 1).padStart(2, "0")}${String(jst.getUTCDate()).padStart(2, "0")}-${String(jst.getUTCHours()).padStart(2, "0")}${String(jst.getUTCMinutes()).padStart(2, "0")}`;
-  return `ev-${stamp}-${hashText(String(title).trim().toLowerCase())}`;
-}
-
-function normalizeEvent(id, data) {
-  return {
-    id,
-    title: data.title || "",
-    description: data.description || "",
-    location: data.location || "",
-    startAt: toDateValue(data.startAt),
-    entryOpenAt: toDateValue(data.entryOpenAt),
-    entryCloseAt: toDateValue(data.entryCloseAt),
-    capacity: Number(data.capacity || 0),
-    participantCount: Number(data.participantCount || 0),
-    status: data.status || "scheduled",
-    createdByUid: data.createdByUid || "",
-    createdByName: data.createdByName || ""
-  };
-}
-
-function getEventPhase(ev, now = derbyNow()) {
-  if (ev.status === "cancelled") return "cancelled";
-  if (!ev.startAt || now >= ev.startAt) return "held";
-  if (now < ev.entryOpenAt) return "before";
-  if (now < ev.entryCloseAt) return "open";
-  return "closed";
-}
-
-const EVENT_PHASE_LABELS = { before: "受付前", open: "受付中", closed: "受付終了", held: "開催済み", cancelled: "キャンセル" };
-
+/* 管理者の手動レース一覧は、受付開始・締切などの状態が時間で変わるので 15 秒ごとに描き直す（Firestore の読み取りはしない） */
 let adminListsRefreshTimer = null;
 
 function startAdminListsRefresh() {
   if (adminListsRefreshTimer) return;
   adminListsRefreshTimer = setInterval(() => {
     if (!currentUser) return;
-    if (eventsView?.classList.contains("active")) { renderEventsList(); renderEventAdminList(); }
     if (derbyView?.classList.contains("active")) renderManualRaceAdminList();
   }, 15000);
 }
-
-function listenEvents() {
-  startAdminListsRefresh();
-  if (unsubscribeEvents) { unsubscribeEvents(); unsubscribeEvents = null; }
-  if (unsubscribeMyEventEntries) { unsubscribeMyEventEntries(); unsubscribeMyEventEntries = null; }
-  if (!currentUser) return;
-  const since = new Date(derbyNow().getTime() - 14 * DAY_MS);
-  let firstLoad = true;
-  unsubscribeEvents = onSnapshot(
-    query(collection(db, "events"), where("startAt", ">=", since)),
-    (snap) => {
-      const previous = new Map(latestEvents.map((e) => [e.id, e]));
-      latestEvents = snap.docs.map((d) => normalizeEvent(d.id, d.data())).filter((e) => e.startAt).sort((a, b) => a.startAt - b.startAt);
-      /* 参加しているイベントがキャンセルされたら知らせる */
-      if (!firstLoad) {
-        latestEvents.forEach((ev) => {
-          if (ev.status === "cancelled" && previous.get(ev.id)?.status !== "cancelled" && myEventEntries.has(ev.id)) {
-            showAppToast("🎪 イベント", `「${ev.title}」はキャンセルされました`);
-          }
-        });
-      }
-      firstLoad = false;
-      renderEventsList();
-      renderEventAdminList();
-    },
-    (error) => console.error("イベントの読み込みエラー:", error)
-  );
-  unsubscribeMyEventEntries = onSnapshot(
-    query(collection(db, "eventParticipants"), where("uid", "==", currentUser.uid)),
-    (snap) => {
-      myEventEntries = new Map(snap.docs.map((d) => [d.data().eventId, d.id]));
-      renderEventsList();
-    },
-    (error) => console.error("イベント参加状況の読み込みエラー:", error)
-  );
-}
-
-function renderEventsList() {
-  const el = document.getElementById("eventsList");
-  if (!el) return;
-  const now = derbyNow();
-  const visible = latestEvents.filter((ev) => ev.startAt.getTime() > now.getTime() - 3 * DAY_MS);
-  if (visible.length === 0) {
-    el.innerHTML = `<div class="empty-state">いま予定されているイベントはありません</div>`;
-    return;
-  }
-  el.innerHTML = visible.map((ev) => {
-    const phase = getEventPhase(ev, now);
-    const joined = myEventEntries.has(ev.id);
-    const full = ev.capacity > 0 && ev.participantCount >= ev.capacity;
-    let action = "";
-    if (phase === "open" && joined) action = `<button type="button" class="secondary" data-event-leave="${escapeHTML(ev.id)}">参加をやめる</button>`;
-    else if (phase === "open" && full) action = `<span class="event-note">定員に達しました</span>`;
-    else if (phase === "open") action = `<button type="button" data-event-join="${escapeHTML(ev.id)}">参加する</button>`;
-    else if (phase === "before") action = `<span class="event-note">受付開始：${escapeHTML(formatJstDateTime(ev.entryOpenAt))}</span>`;
-    return `<div class="event-card ${phase === "cancelled" ? "cancelled" : ""}">
-      ${phase === "cancelled" ? `<div class="event-cancelled-banner">このイベントはキャンセルされました</div>` : ""}
-      <div class="event-card-head">
-        <b>${escapeHTML(ev.title)}</b>
-        <span class="admin-badge">${EVENT_PHASE_LABELS[phase]}</span>
-        ${joined ? `<span class="event-joined">✔ 参加中</span>` : ""}
-      </div>
-      <div class="event-meta">📅 ${escapeHTML(formatJstDateTime(ev.startAt))}${ev.location ? `　📍 ${escapeHTML(ev.location)}` : ""}</div>
-      ${ev.description ? `<div class="event-desc">${escapeHTML(ev.description)}</div>` : ""}
-      <div class="event-meta">受付 ${escapeHTML(formatJstDateTime(ev.entryOpenAt))}〜${escapeHTML(formatJstDateTime(ev.entryCloseAt))} ／ 参加 ${ev.participantCount}人${ev.capacity > 0 ? ` / 定員 ${ev.capacity}人` : ""}</div>
-      <div class="event-actions">${action}</div>
-    </div>`;
-  }).join("");
-}
-
-function renderEventAdminList() {
-  const el = document.getElementById("eventAdminList");
-  if (!el || !isAdminUser()) return;
-  const now = derbyNow();
-  const mine = latestEvents.filter((ev) => ev.createdByUid === currentUser.uid).sort((a, b) => b.startAt - a.startAt);
-  if (mine.length === 0) {
-    el.innerHTML = `<div class="empty-state">まだイベントはありません</div>`;
-    return;
-  }
-  el.innerHTML = mine.map((ev) => {
-    const phase = getEventPhase(ev, now);
-    const canEdit = phase === "before";
-    const canCancel = phase !== "cancelled" && phase !== "held";
-    return `<div class="admin-item ${phase === "cancelled" ? "cancelled" : ""}">
-      <div class="admin-item-main">
-        <b>${escapeHTML(ev.title)}</b>
-        <span class="admin-badge">${EVENT_PHASE_LABELS[phase]}</span>
-        <div class="admin-item-sub">📅 ${escapeHTML(formatJstDateTime(ev.startAt))} ／ 参加 ${ev.participantCount}人${ev.capacity > 0 ? ` / 定員 ${ev.capacity}人` : ""}</div>
-        <div class="admin-participants hidden" data-participants-for="${escapeHTML(ev.id)}"></div>
-      </div>
-      <div class="admin-item-buttons">
-        <button type="button" class="secondary" data-event-participants="${escapeHTML(ev.id)}">参加者</button>
-        ${canEdit ? `<button type="button" class="secondary" data-event-edit="${escapeHTML(ev.id)}">編集</button>` : ""}
-        ${canCancel ? `<button type="button" class="secondary danger" data-event-cancel="${escapeHTML(ev.id)}">キャンセル</button>` : ""}
-      </div>
-    </div>`;
-  }).join("");
-}
-
-let editingEventId = null;
-let eventSubmitting = false;
-
-function readEventForm() {
-  const value = (id) => (document.getElementById(id)?.value || "").trim();
-  const title = value("eventTitleInput");
-  const startAt = parseJstDateTimeInput(value("eventDateInput"), value("eventTimeInput"));
-  const entryOpenAt = parseJstDateTimeInput(value("eventEntryOpenDateInput"), value("eventEntryOpenTimeInput"));
-  const entryCloseAt = parseJstDateTimeInput(value("eventEntryCloseDateInput"), value("eventEntryCloseTimeInput"));
-  const capacityText = value("eventCapacityInput");
-  const capacity = capacityText === "" ? 0 : Number(capacityText);
-  const now = derbyNow();
-  if (!title) return { error: "タイトルを入力してください。" };
-  if (!startAt || !entryOpenAt || !entryCloseAt) return { error: "日付と時刻を正しく入力してください。" };
-  if (startAt <= now) return { error: "開催日時が過去です。" };
-  if (entryOpenAt >= entryCloseAt) return { error: "受付開始は、受付終了より前にしてください。" };
-  if (entryCloseAt > startAt) return { error: "受付終了は、開催日時より前（同じ時刻まで）にしてください。" };
-  if (!Number.isInteger(capacity) || capacity < 0 || capacity > 999) return { error: "定員は0〜999の整数で入力してください。" };
-  return {
-    title: title.slice(0, 40),
-    description: value("eventDescriptionInput").slice(0, 300),
-    location: value("eventLocationInput").slice(0, 40),
-    startAt, entryOpenAt, entryCloseAt, capacity
-  };
-}
-
-function resetEventForm() {
-  editingEventId = null;
-  document.getElementById("eventForm")?.reset();
-  const submit = document.getElementById("eventSubmitButton");
-  if (submit) submit.textContent = "イベントを作成する";
-  document.getElementById("eventEditCancelButton")?.classList.add("hidden");
-  const errorEl = document.getElementById("eventFormError");
-  if (errorEl) errorEl.textContent = "";
-}
-
-document.getElementById("eventForm")?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (!isAdminUser() || eventSubmitting) return;
-  const errorEl = document.getElementById("eventFormError");
-  const button = document.getElementById("eventSubmitButton");
-  const input = readEventForm();
-  if (input.error) { if (errorEl) errorEl.textContent = input.error; return; }
-
-  eventSubmitting = true;
-  if (button) button.disabled = true;
-  if (errorEl) errorEl.textContent = "";
-  try {
-    if (editingEventId) {
-      /* 編集：開催前かつ受付開始前で、キャンセルされていないイベントだけ（トランザクションの中で確かめる） */
-      const id = editingEventId;
-      await runTransaction(db, async (transaction) => {
-        const ref = doc(db, "events", id);
-        const snap = await transaction.get(ref);
-        if (!snap.exists()) throw new Error("NOT_FOUND");
-        const ev = normalizeEvent(id, snap.data());
-        if (getEventPhase(ev) !== "before") throw new Error("NOT_EDITABLE");
-        transaction.update(ref, { ...input, updatedAt: serverTimestamp() });
-      });
-      showAppToast("🎪 イベント管理", `「${input.title}」を更新しました`);
-    } else {
-      /* 作成：同じ開催日時＋タイトルのイベントが無いときだけ作る（連打・再読み込み・複数端末・再送でも1つだけ） */
-      const id = makeEventId(input.startAt, input.title);
-      await runTransaction(db, async (transaction) => {
-        const ref = doc(db, "events", id);
-        const snap = await transaction.get(ref);
-        if (snap.exists()) throw new Error("DUPLICATE");
-        transaction.set(ref, {
-          ...input,
-          status: "scheduled",
-          participantCount: 0,
-          createdByUid: currentUser.uid,
-          createdByName: username || "",
-          createdAt: serverTimestamp()
-        });
-      });
-      showAppToast("🎪 イベント管理", `「${input.title}」を作成しました`);
-    }
-    resetEventForm();
-  } catch (error) {
-    const messages = {
-      DUPLICATE: "同じ日時・同じタイトルのイベントはすでに作成されています。",
-      NOT_FOUND: "このイベントは見つかりませんでした。",
-      NOT_EDITABLE: "受付開始後・開催後・キャンセル済みのイベントは編集できません。"
-    };
-    if (!messages[error.message]) console.error("イベント保存エラー:", error);
-    if (errorEl) errorEl.textContent = messages[error.message] || "保存できませんでした。通信状態を確認して、もう一度お試しください。";
-  } finally {
-    eventSubmitting = false;
-    if (button) button.disabled = false;
-  }
-});
-
-document.getElementById("eventEditCancelButton")?.addEventListener("click", resetEventForm);
-
-function startEditingEvent(id) {
-  const ev = latestEvents.find((e) => e.id === id);
-  if (!ev || getEventPhase(ev) !== "before") return alert("受付開始後・開催後・キャンセル済みのイベントは編集できません。");
-  editingEventId = id;
-  const set = (inputId, value) => { const el = document.getElementById(inputId); if (el) el.value = value; };
-  set("eventTitleInput", ev.title);
-  set("eventDescriptionInput", ev.description);
-  set("eventLocationInput", ev.location);
-  const start = toJstInputValues(ev.startAt), open = toJstInputValues(ev.entryOpenAt), close = toJstInputValues(ev.entryCloseAt);
-  set("eventDateInput", start.date); set("eventTimeInput", start.time);
-  set("eventEntryOpenDateInput", open.date); set("eventEntryOpenTimeInput", open.time);
-  set("eventEntryCloseDateInput", close.date); set("eventEntryCloseTimeInput", close.time);
-  set("eventCapacityInput", ev.capacity ? String(ev.capacity) : "");
-  const submit = document.getElementById("eventSubmitButton");
-  if (submit) submit.textContent = "変更を保存する";
-  document.getElementById("eventEditCancelButton")?.classList.remove("hidden");
-  document.getElementById("eventForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-async function cancelEvent(id) {
-  const ev = latestEvents.find((e) => e.id === id);
-  if (!ev) return;
-  const who = ev.participantCount > 0 ? `\n参加者が${ev.participantCount}人います。参加者には「キャンセルされました」と表示されます。` : "";
-  if (!confirm(`「${ev.title}」をキャンセルしますか？${who}\n（キャンセルすると元に戻せません）`)) return;
-  try {
-    await runTransaction(db, async (transaction) => {
-      const ref = doc(db, "events", id);
-      const snap = await transaction.get(ref);
-      if (!snap.exists()) throw new Error("NOT_FOUND");
-      const phase = getEventPhase(normalizeEvent(id, snap.data()));
-      if (phase === "cancelled") throw new Error("ALREADY_CANCELLED");
-      if (phase === "held") throw new Error("ALREADY_HELD");
-      transaction.update(ref, { status: "cancelled", cancelledAt: serverTimestamp(), cancelledByUid: currentUser.uid });
-    });
-    if (editingEventId === id) resetEventForm();
-    showAppToast("🎪 イベント管理", `「${ev.title}」をキャンセルしました`);
-  } catch (error) {
-    const messages = { NOT_FOUND: "このイベントは見つかりませんでした。", ALREADY_CANCELLED: "このイベントはすでにキャンセルされています。", ALREADY_HELD: "開催時刻を過ぎたイベントはキャンセルできません。" };
-    if (!messages[error.message]) console.error("イベントのキャンセルエラー:", error);
-    alert(messages[error.message] || "キャンセルできませんでした。もう一度お試しください。");
-  }
-}
-
-async function toggleEventParticipants(id) {
-  const box = document.querySelector(`[data-participants-for="${CSS.escape(id)}"]`);
-  if (!box) return;
-  if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
-  box.classList.remove("hidden");
-  box.textContent = "読み込み中…";
-  try {
-    const snap = await getDocs(query(collection(db, "eventParticipants"), where("eventId", "==", id)));
-    const names = snap.docs.map((d) => d.data()).sort((a, b) => (toDateValue(a.joinedAt) || 0) - (toDateValue(b.joinedAt) || 0)).map((p) => p.username || "（名前なし）");
-    box.innerHTML = names.length ? `参加者（${names.length}人）：${names.map(escapeHTML).join("、")}` : "まだ参加者はいません";
-  } catch (error) {
-    console.error("参加者の読み込みエラー:", error);
-    box.textContent = "参加者を読み込めませんでした";
-  }
-}
-
-document.getElementById("eventAdminList")?.addEventListener("click", (event) => {
-  if (!isAdminUser()) return;
-  const target = event.target?.closest?.("button");
-  if (!target) return;
-  if (target.dataset.eventParticipants) toggleEventParticipants(target.dataset.eventParticipants);
-  if (target.dataset.eventEdit) startEditingEvent(target.dataset.eventEdit);
-  if (target.dataset.eventCancel) cancelEvent(target.dataset.eventCancel);
-});
-
-/* 参加・取り消し：受付中のイベントだけ。参加者の記録と人数を同じトランザクションで更新する
-   （参加者の記録は「イベントID_UID」なので、連打・複数端末でも1人1件） */
-/* 同じ端末での連打は、処理中のあいだ受け付けない（同時に送るとルールで拒否されてエラー表示になるため） */
-const eventActionsInFlight = new Set();
-
-async function joinEvent(id) {
-  if (eventActionsInFlight.has(id)) return;
-  eventActionsInFlight.add(id);
-  try {
-    await runCountedTransaction(async (transaction) => {
-      const ref = doc(db, "events", id);
-      const entryRef = doc(db, "eventParticipants", `${id}_${currentUser.uid}`);
-      const snap = await transaction.get(ref);
-      const entrySnap = await transaction.get(entryRef);
-      if (!snap.exists()) throw new Error("NOT_FOUND");
-      const ev = normalizeEvent(id, snap.data());
-      const phase = getEventPhase(ev);
-      if (phase === "cancelled") throw new Error("CANCELLED");
-      if (phase !== "open") throw new Error("NOT_OPEN");
-      if (entrySnap.exists()) return;
-      if (ev.capacity > 0 && ev.participantCount >= ev.capacity) throw new Error("FULL");
-      transaction.set(entryRef, { eventId: id, uid: currentUser.uid, username: username || "", joinedAt: serverTimestamp() });
-      transaction.update(ref, { participantCount: ev.participantCount + 1 });
-    });
-  } catch (error) {
-    const messages = { NOT_FOUND: "このイベントは見つかりませんでした。", CANCELLED: "このイベントはキャンセルされました。", NOT_OPEN: "いまは参加受付の時間外です。", FULL: "定員に達したため参加できません。" };
-    if (!messages[error.message]) console.error("イベント参加エラー:", error);
-    alert(messages[error.message] || "参加できませんでした。もう一度お試しください。");
-  } finally {
-    eventActionsInFlight.delete(id);
-  }
-}
-
-async function leaveEvent(id) {
-  if (eventActionsInFlight.has(id)) return;
-  if (!confirm("このイベントへの参加をやめますか？")) return;
-  eventActionsInFlight.add(id);
-  try {
-    await runCountedTransaction(async (transaction) => {
-      const ref = doc(db, "events", id);
-      const entryRef = doc(db, "eventParticipants", `${id}_${currentUser.uid}`);
-      const snap = await transaction.get(ref);
-      const entrySnap = await transaction.get(entryRef);
-      if (!snap.exists()) throw new Error("NOT_FOUND");
-      const ev = normalizeEvent(id, snap.data());
-      if (getEventPhase(ev) !== "open") throw new Error("NOT_OPEN");
-      if (!entrySnap.exists()) return;
-      transaction.delete(entryRef);
-      transaction.update(ref, { participantCount: Math.max(0, ev.participantCount - 1) });
-    });
-  } catch (error) {
-    const messages = { NOT_FOUND: "このイベントは見つかりませんでした。", NOT_OPEN: "受付期間を過ぎたため、参加の取り消しはできません。" };
-    if (!messages[error.message]) console.error("イベント参加取り消しエラー:", error);
-    alert(messages[error.message] || "取り消せませんでした。もう一度お試しください。");
-  } finally {
-    eventActionsInFlight.delete(id);
-  }
-}
-
-document.getElementById("eventsList")?.addEventListener("click", (event) => {
-  const target = event.target?.closest?.("button");
-  if (!target || !currentUser) return;
-  if (target.dataset.eventJoin) joinEvent(target.dataset.eventJoin);
-  if (target.dataset.eventLeave) leaveEvent(target.dataset.eventLeave);
-});
 
 /* =========================================================
    ゲーム部屋 共通
