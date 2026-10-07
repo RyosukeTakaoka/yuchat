@@ -132,7 +132,8 @@ const min = (m) => new Date(Date.now() + m * 60000);
   await ok("fcmTokens：トークン保存・削除", (async () => { await setDoc(doc(A, "fcmTokens/tok1"), { uid: "userA" }); await deleteDoc(doc(A, "fcmTokens/tok1")); })());
   await ok("races：自動レースの結果作成（クライアントの抽選）", setDoc(doc(A, "races/2030-01-02"), { raceId: "2030-01-02", resultOrder: [1, 2, 3], status: "finished", generatedBy: "client" }));
   await ok("raceLogs：開催ログ", setDoc(doc(A, "raceLogs/2030-01-02"), { raceId: "2030-01-02" }, { merge: true }));
-  await ok("raceBets：自動レースへの投票・精算", (async () => { const r = await addDoc(collection(A, "raceBets"), { raceId: "2030-01-02", uid: "userA", settled: false }); await updateDoc(r, { settled: true, win: false, payout: 0 }); })());
+  await ok("raceBets：自動レースへの投票・精算（切り替え日より前のレースは今まで通りの形式）", (async () => { const r = await addDoc(collection(A, "raceBets"), { raceId: "2026-10-01", uid: "userA", settled: false }); await updateDoc(r, { settled: true, win: false, payout: 0 }); })());
+  await ok("raceBets：自動レースへの投票・精算（固定オッズ方式のレースは固定オッズの形式）", (async () => { const r = await addDoc(collection(A, "raceBets"), { raceId: "2030-01-02", uid: "userA", settled: false }); await updateDoc(r, { settled: true, win: false, payout: 0, payoutRule: "fixed-v1" }); })());
   await ok("derbyNotifications など他のコレクションも今まで通り", setDoc(doc(A, "derbyNotifications/2030-01-02"), { a: 1 }));
   await ok("サブコレクション（既存データ）も今まで通り", setDoc(doc(A, "users/alice/sub/x"), { a: 1 }));
   await ok("一括書き込み（batch）も今まで通り", (() => { const b = writeBatch(A); b.update(doc(A, "users/alice"), { online: false }); b.set(doc(A, "friends/x_y"), { user1: "x" }); return b.commit(); })());
@@ -159,6 +160,43 @@ const min = (m) => new Date(Date.now() + m * 60000);
   await ok("users：自分の銀行・株・ログインボーナスの更新（今まで通り）", updateDoc(doc(A, "users/alice"), { coins: 900, bank: { deposit: 100, interestBase: 0, loan: 0 }, "stocks.YGM": { qty: 1, cost: 180 }, lastLoginBonusDate: "2030-01-01" }));
   await ok("users：株価を読んで売買するトランザクション（今まで通り）", runTransaction(A, async (t) => { await t.get(doc(A, "market/current")); const u = await t.get(doc(A, "users/alice")); t.update(doc(A, "users/alice"), { coins: u.data().coins - 180 }); }));
   await ng("未ログイン：株価の読み取り", getDoc(doc(anon, "market/current")));
+
+  log.push("--- ⑦ ゆうダービーの馬券（raceBets）：固定オッズ方式のレース（2026-10-09 以降）は固定オッズの精算だけ。購入・旧方式の精算は今まで通り");
+  const betDoc = (raceId, uid = "userA", extra = {}) => ({ raceId, uid, username: uid === "userA" ? "alice" : "bob", type: "win", horses: [3], amount: 100, settled: false, win: null, payout: null, createdAt: new Date(), ...extra });
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const d = ctx.firestore();
+    await setDoc(doc(d, "raceBets/legacyA"), betDoc("2026-10-08"));
+    await setDoc(doc(d, "raceBets/legacyManualA"), betDoc("2026-10-08-m1800"));
+    await setDoc(doc(d, "raceBets/fixedA"), betDoc("2026-10-09", "userA", { oddsVersion: 1, oddsTenths: 60 }));
+    await setDoc(doc(d, "raceBets/fixedA2"), betDoc("2026-10-09-1130"));
+    await setDoc(doc(d, "raceBets/fixedA3"), betDoc("2026-10-10-m1800"));
+    await setDoc(doc(d, "raceBets/fixedB"), betDoc("2026-10-09", "userB"));
+    await setDoc(doc(d, "raceBets/legacyB"), betDoc("2026-10-08", "userB"));
+  });
+  const settleOld = (db, id, payout = 80) => updateDoc(doc(db, "raceBets", id), { settled: true, win: true, payout });
+  const settleFixed = (db, id, payout = 600) => updateDoc(doc(db, "raceBets", id), { settled: true, win: true, payout, payoutRule: "fixed-v1", settledOddsTenths: 60 });
+  await ok("1. 旧方式（切り替え日より前）の自分の馬券を旧方式で精算", settleOld(A, "legacyA"));
+  await ok("1. 旧方式の手動レースの自分の馬券を旧方式で精算", settleOld(A, "legacyManualA"));
+  await ng("2. 新方式のレースの馬券を古い形式（山分け・目印なし）で精算", settleOld(A, "fixedA"));
+  await ng("2. 新方式の11:30の回を古い形式で精算", settleOld(A, "fixedA2"));
+  await ng("2. 新方式の手動レースを古い形式で精算", settleOld(A, "fixedA3"));
+  await ng("2. 新方式で目印の値が違う精算", updateDoc(doc(A, "raceBets/fixedA"), { settled: true, win: true, payout: 600, payoutRule: "pool" }));
+  await ok("3. 新方式の自分の馬券を固定オッズで精算", settleFixed(A, "fixedA"));
+  await ok("3. 新方式の11:30の回を固定オッズで精算（外れ）", updateDoc(doc(A, "raceBets/fixedA2"), { settled: true, win: false, payout: 0, payoutRule: "fixed-v1", settledOddsTenths: 99 }));
+  await ok("3. 新方式の手動レースを固定オッズで精算（トランザクション・コインと一緒に）", runTransaction(A, async (t) => { const b = doc(A, "raceBets/fixedA3"), u = doc(A, "users/alice"); await t.get(b); const us = await t.get(u); t.update(b, { settled: true, win: true, payout: 600, payoutRule: "fixed-v1", settledOddsTenths: 60 }); t.update(u, { coins: us.data().coins + 600 }); }));
+  await ok("4. 新方式のレースの馬券購入（アプリと同じトランザクション・オッズの記録付き）", runTransaction(A, async (t) => { const u = doc(A, "users/alice"); const us = await t.get(u); t.update(u, { coins: us.data().coins - 100, totalBetAmount: Number(us.data().totalBetAmount || 0) + 100 }); t.set(doc(collection(A, "raceBets")), { raceId: "2026-10-12", uid: "userA", username: "alice", type: "trifecta", horses: [5, 3, 10], amount: 100, settled: false, win: null, payout: null, createdAt: serverTimestamp(), oddsVersion: 1, oddsTenths: 1234 }); }));
+  await ok("4. 新方式のレースの馬券購入（古い版のアプリ・オッズの記録なし）", addDoc(collection(A, "raceBets"), { raceId: "2026-10-12", uid: "userA", username: "alice", type: "win", horses: [1], amount: 10, settled: false, win: null, payout: null, createdAt: serverTimestamp() }));
+  await ok("4. 旧方式のレースの馬券購入（今まで通り）", addDoc(collection(A, "raceBets"), { raceId: "2026-10-08", uid: "userA", type: "win", horses: [1], amount: 10, settled: false }));
+  await ng("5. 他ユーザーの新方式の馬券を不正に精算（目印付きでも）", settleFixed(A, "fixedB", 99999));
+  await ng("5. 他ユーザーの旧方式の馬券を不正に精算", settleOld(A, "legacyB", 99999));
+  await ng("未ログイン：馬券の精算", settleFixed(anon, "fixedB"));
+  await ng("未ログイン：馬券の購入", addDoc(collection(anon, "raceBets"), { raceId: "2026-10-12", uid: "x" }));
+  await ok("精算以外の更新（精算済みの馬券の表示用の項目など）は今まで通り", updateDoc(doc(A, "raceBets/legacyA"), { username: "alice2" }));
+  await ok("馬券の読み取り（自分の馬券・レースごと）は今まで通り", getDocs(query(collection(A, "raceBets"), where("uid", "==", "userA"))));
+  {
+    let f; await env.withSecurityRulesDisabled(async (ctx) => { f = (await getDoc(doc(ctx.firestore(), "raceBets/fixedB"))).data(); });
+    if (f.settled === false && f.payout === null) { pass++; log.push("PASS 他ユーザーの馬券は精算されていない"); } else { fail++; log.push("FAIL 他ユーザーの馬券が変わった"); }
+  }
 
   await env.cleanup();
   console.log(log.join("\n"));

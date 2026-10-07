@@ -18,6 +18,19 @@ import {
   RACE_SHOW_MAX_SECONDS
 } from "./derby-show.js?v=20261006-derby";
 
+/* ゆうダービーの固定オッズ（derby-runner と同じ計算） */
+import {
+  isFixedOddsRace,
+  getRaceOddsTable,
+  getTicketOddsTenths,
+  computeFixedPayout,
+  computeFixedBetSettlement,
+  formatOddsTenths,
+  buildRaceOddsRecord,
+  generateFixedOddsRaceOrder,
+  FIXED_PAYOUT_RULE
+} from "./derby-odds.js?v=20261013-fixed-odds";
+
 import {
   getFirestore, collection, addDoc, getDocs, getDoc, doc, setDoc,
   updateDoc, deleteDoc, query, where, onSnapshot, orderBy, limit, arrayUnion, arrayRemove, deleteField,
@@ -3636,8 +3649,23 @@ function listenWinBets(raceId) {
   );
 }
 
+/* 投票先のレースが固定オッズ方式なら、そのレースのオッズ表（投票では変わらない） */
+function getActiveFixedOddsTable() {
+  const raceId = getActiveBettingRaceContext()?.raceId;
+  return raceId && isFixedOddsRace(raceId) ? getRaceOddsTable(raceId) : null;
+}
+
 function renderOdds() {
-  if (oddsList) {
+  const fixedTable = getActiveFixedOddsTable();
+  if (oddsList && fixedTable) {
+    oddsList.innerHTML = "";
+    SAFE_RACE_HORSES.forEach((horse) => {
+      const item = document.createElement("div");
+      item.className = "odds-item";
+      item.innerHTML = `<strong>${horse.number} ${escapeHTML(horse.name)}</strong><span>${formatOddsTenths(fixedTable.win[horse.number])}倍</span>`;
+      oddsList.appendChild(item);
+    });
+  } else if (oddsList) {
     oddsList.innerHTML = "";
     SAFE_RACE_HORSES.forEach((horse) => {
       const odds = computeWinOdds(horse.number);
@@ -3652,6 +3680,24 @@ function renderOdds() {
 
 function renderHorseList() {
   if (!horseList) return;
+
+  /* 固定オッズ方式：人気順・オッズはレースごとに決まった値（投票では変わらない） */
+  const fixedTable = getActiveFixedOddsTable();
+  if (fixedTable) {
+    horseList.innerHTML = "";
+    [...SAFE_RACE_HORSES].sort((a, b) => fixedTable.popRank[a.number] - fixedTable.popRank[b.number]).forEach((horse) => {
+      const item = document.createElement("div");
+      item.className = "horse-card";
+      item.innerHTML = `
+      <strong>${horse.number}番　${escapeHTML(horse.name)}</strong>
+      <span>${escapeHTML(horse.character)}（${escapeHTML(RACE_STYLE_LABELS[horse.style] || "")}）</span>
+      <div style="margin-top:6px; font-size:11px; color:#777;">
+        ${fixedTable.popRank[horse.number]}番人気　単勝 ${formatOddsTenths(fixedTable.win[horse.number])}倍　複勝 ${formatOddsTenths(fixedTable.place[horse.number])}倍
+      </div>`;
+      horseList.appendChild(item);
+    });
+    return;
+  }
 
   const withPopularity = SAFE_RACE_HORSES
     .map((h) => ({ ...h, pool: currentWinPool[h.number] || 0 }))
@@ -3755,7 +3801,12 @@ function renderBetHorsesSelectionText() {
 
   if (selectedBetHorses.length === need) {
     const amount = Number(betAmount?.value || 0);
-    if (amount > 0) {
+    const fixedTable = getActiveFixedOddsTable();
+    const fixedTenths = fixedTable ? getTicketOddsTenths(fixedTable, type, selectedBetHorses) : null;
+    if (fixedTenths !== null) {
+      /* 固定オッズ方式：表示するオッズと払戻額は、実際の精算とまったく同じ計算 */
+      html += `<div class="bet-payout-estimate">🎯 確定オッズ ${formatOddsTenths(fixedTenths)}倍${amount > 0 ? `　的中時の払戻：${computeFixedPayout(amount, fixedTenths).toLocaleString()} コイン` : ""}</div>`;
+    } else if (amount > 0) {
       const estimate = estimateBetPayout(type, selectedBetHorses, amount);
       if (estimate) {
         html += `<div class="bet-payout-estimate">🎯 的中した場合の予想払戻：約 ${Math.floor(estimate).toLocaleString()} コイン（目安）</div>`;
@@ -3873,9 +3924,12 @@ betButton?.addEventListener("click", async () => {
       transaction.update(userRef, userUpdate);
 
       const betRef = doc(collection(db, "raceBets"));
+      /* 固定オッズ方式のレースは、買ったときのオッズも記録する（精算はレースIDから計算し直した値で行う） */
+      const fixedTenths = isFixedOddsRace(raceId) ? getTicketOddsTenths(getRaceOddsTable(raceId), type, horses) : null;
       transaction.set(betRef, {
         raceId, uid: currentUser.uid, username, type, horses, amount,
-        settled: false, win: null, payout: null, createdAt: serverTimestamp()
+        settled: false, win: null, payout: null, createdAt: serverTimestamp(),
+        ...(fixedTenths !== null ? { oddsVersion: getRaceOddsTable(raceId).oddsVersion, oddsTenths: fixedTenths } : {})
       });
     });
 
@@ -3985,8 +4039,12 @@ async function settleMyBets(raceId, resultOrder) {
       /* 1枚の精算に失敗しても、残りの馬券の精算は続ける */
       try {
         const bet = betDoc.data();
-        const isWin = evaluateBetWin(bet, resultOrder);
-        const payout = isWin ? await computePoolPayout(raceId, bet, resultOrder) : 0;
+        /* 固定オッズ方式：floor(賭け金 × オッズ)。オッズはレースIDから計算し直す（馬券に記録された値は使わない）。
+           それ以前のレースは従来の山分け方式 */
+        const fixed = isFixedOddsRace(raceId);
+        const fixedResult = fixed ? computeFixedBetSettlement(bet, raceId, evaluateBetWin(bet, resultOrder)) : null;
+        const isWin = fixed ? fixedResult.isWin : evaluateBetWin(bet, resultOrder);
+        const payout = fixed ? fixedResult.payout : (isWin ? await computePoolPayout(raceId, bet, resultOrder) : 0);
         let settledNow = false;
 
         await runTransaction(db, async (transaction) => {
@@ -4001,7 +4059,9 @@ async function settleMyBets(raceId, resultOrder) {
           settledNow = false;
           if (!freshBet.exists() || freshBet.data().settled) return;
 
-          transaction.update(betRef, { settled: true, win: isWin, payout });
+          transaction.update(betRef, fixed
+            ? { settled: true, win: isWin, payout, payoutRule: FIXED_PAYOUT_RULE, settledOddsTenths: fixedResult.oddsTenths }
+            : { settled: true, win: isWin, payout });
           if (payout > 0) {
             const coins = userSnap?.exists() ? Number(userSnap.data().coins || 0) : 0;
             transaction.update(userRef, { coins: coins + payout });
@@ -4118,6 +4178,12 @@ function formatBetHorsesForTicket(bet) {
 }
 
 /* 【① 購入した馬券】次のレースに賭けた内容を、発走前ならいつでも確認できるように表示 */
+/* 固定オッズ方式の馬券のオッズ（レースIDから計算。山分け方式のレースは null） */
+function getFixedTicketOddsTenths(bet) {
+  if (!bet?.raceId || !isFixedOddsRace(bet.raceId)) return null;
+  return getTicketOddsTenths(getRaceOddsTable(bet.raceId), bet.type, bet.horses);
+}
+
 function renderMyActiveTickets() {
   const el = document.getElementById("raceMyTickets");
   if (!el) return;
@@ -4136,11 +4202,13 @@ function renderMyActiveTickets() {
   let html = `<div class="race-tickets-title">🎫 購入した馬券</div>`;
   tickets.forEach((bet) => {
     total += Number(bet.amount || 0);
+    const tenths = getFixedTicketOddsTenths(bet);
     html += `
       <div class="race-ticket-item">
         <span class="race-ticket-type">${escapeHTML(getBetTypeName(bet.type))}</span>
         <span class="race-ticket-horses">${escapeHTML(formatBetHorsesForTicket(bet))}</span>
         <span class="race-ticket-amount">${Number(bet.amount || 0).toLocaleString()}コイン</span>
+        ${tenths !== null ? `<span class="race-ticket-odds">${formatOddsTenths(tenths)}倍・的中で${computeFixedPayout(bet.amount, tenths).toLocaleString()}コイン</span>` : ""}
       </div>`;
   });
   html += `<div class="race-tickets-total">合計投票額：${total.toLocaleString()}コイン</div>`;
@@ -4189,6 +4257,8 @@ function renderBetHistory(bets) {
 
     let resultText = "結果待ち";
     if (bet.settled) resultText = bet.win ? `的中！ +${bet.payout || 0}coin` : "不的中";
+    const tenths = getFixedTicketOddsTenths(bet);
+    if (tenths !== null) resultText = `${formatOddsTenths(tenths)}倍　${resultText}`;
 
     const item = document.createElement("div");
     item.className = "history-item";
@@ -4319,7 +4389,9 @@ async function tryGenerateRaceResult(raceId) {
       const snap = await transaction.get(raceRef);
       if (snap.exists()) return;
 
-      const resultOrder = generateWeightedRaceOrder();
+      /* 固定オッズ方式のレースは「能力 × 当日の調子」の比で着順を決め、オッズの記録も残す（乱数は今ここで引く） */
+      const fixed = isFixedOddsRace(raceId);
+      const resultOrder = fixed ? generateFixedOddsRaceOrder(raceId) : generateWeightedRaceOrder();
 
       transaction.set(raceRef, {
         raceId,
@@ -4328,7 +4400,8 @@ async function tryGenerateRaceResult(raceId) {
         finishStats: buildFinishStats(resultOrder),
         status: "finished",
         generatedAt: serverTimestamp(),
-        generatedBy: "client"
+        generatedBy: "client",
+        ...(fixed ? buildRaceOddsRecord(raceId) : {})
       });
 
       transaction.set(logRef, {
@@ -4661,7 +4734,11 @@ async function renderDetailedRaceResults(raceId, raceData) {
 
   if (cachedPopularityForRaceId !== raceId) {
     cachedPopularityForRaceId = raceId;
-    cachedPopularity = await computeFinalPopularity(raceId);
+    /* 固定オッズ方式のレースの人気順はレースごとに決まっているので、馬券は読まない */
+    const fixedTable = isFixedOddsRace(raceId) ? getRaceOddsTable(raceId) : null;
+    cachedPopularity = fixedTable
+      ? SAFE_RACE_HORSES.map((h) => ({ number: h.number, rank: fixedTable.popRank[h.number] }))
+      : await computeFinalPopularity(raceId);
   }
   const popularityMap = {};
   (cachedPopularity || []).forEach((p) => { popularityMap[p.number] = p.rank; });
@@ -4810,7 +4887,14 @@ function refreshDerbySubscriptionsIfNeeded() {
 
   if (activeId !== lastActiveBettingRaceId) {
     lastActiveBettingRaceId = activeId;
-    listenWinBets(activeId);
+    /* 固定オッズ方式のレースは、オッズのために馬券を購読しない（投票でオッズは変わらない） */
+    if (isFixedOddsRace(activeId)) {
+      if (unsubscribeWinBets) { unsubscribeWinBets(); unsubscribeWinBets = null; }
+      currentWinPool = {};
+      renderOdds();
+    } else {
+      listenWinBets(activeId);
+    }
     renderMyActiveTickets();
   }
 

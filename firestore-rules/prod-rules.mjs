@@ -139,6 +139,12 @@ const TEST_CASES = [
   testCase("DENY", "一般：参加記録の読み取り（廃止）", userA, "get", "eventParticipants/ev-test_rulesTestUserA", { existing: { eventId: "ev-test", uid: userA.uid } }),
   testCase("DENY", "一般：参加記録の作成（廃止）", userA, "create", "eventParticipants/ev-test_rulesTestUserA", { data: { eventId: "ev-test", uid: userA.uid, username: "x" } }),
   testCase("DENY", "一般：参加記録の削除（廃止）", userA, "delete", "eventParticipants/ev-test_rulesTestUserA", { existing: { eventId: "ev-test", uid: userA.uid } }),
+  // ゆうダービーの馬券：固定オッズ方式のレース（2026-10-09 以降）は固定オッズの精算だけ。自分の馬券だけ精算できる
+  testCase("ALLOW", "raceBets：旧方式のレースの自分の馬券を旧方式で精算", userA, "update", "raceBets/b-old", { data: { raceId: "2026-10-08", uid: userA.uid, settled: true, win: true, payout: 80 }, existing: { raceId: "2026-10-08", uid: userA.uid, settled: false } }),
+  testCase("DENY", "raceBets：新方式のレースの馬券を古い形式で精算", userA, "update", "raceBets/b-new", { data: { raceId: "2026-10-09", uid: userA.uid, settled: true, win: true, payout: 80 }, existing: { raceId: "2026-10-09", uid: userA.uid, settled: false } }),
+  testCase("ALLOW", "raceBets：新方式のレースの自分の馬券を固定オッズで精算", userA, "update", "raceBets/b-new", { data: { raceId: "2026-10-09", uid: userA.uid, settled: true, win: true, payout: 600, payoutRule: "fixed-v1" }, existing: { raceId: "2026-10-09", uid: userA.uid, settled: false } }),
+  testCase("DENY", "raceBets：他人の馬券を精算", userA, "update", "raceBets/b-other", { data: { raceId: "2026-10-09", uid: "someoneElse", settled: true, win: true, payout: 600, payoutRule: "fixed-v1" }, existing: { raceId: "2026-10-09", uid: "someoneElse", settled: false } }),
+  testCase("ALLOW", "raceBets：新方式のレースの馬券購入", userA, "create", "raceBets/b-buy", { data: { raceId: "2026-10-12", uid: userA.uid, type: "win", horses: [1], amount: 100, settled: false, oddsVersion: 1, oddsTenths: 25 } }),
   // 一般ユーザーの読み取りと既存データは今まで通り
   testCase("ALLOW", "一般：手動レースの読み取り", userA, "get", "derbyManualRaces/2030-01-01-m1200", { existing: manualRace }),
   testCase("ALLOW", "users：自分のデータ更新", userA, "update", "users/alice", { data: { uid: userA.uid, coins: 900 }, existing: { uid: userA.uid, coins: 1000 } }),
