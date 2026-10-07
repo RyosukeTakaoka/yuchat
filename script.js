@@ -926,6 +926,12 @@ async function waitForFirestoreAuth() {
    （ログアウトの後に購読や読み取りを始めないように） */
 let appSessionSeq = 0;
 
+/* ログアウト（やアカウントの切り替え）で途中になった読み取りの失敗は、エラーとして扱わない
+   （結果が返る前にログアウトすると、Firestore がログアウト後の状態で問い合わせ直して拒否されるため） */
+function isInterruptedBySignOut(session) {
+  return session !== appSessionSeq || !currentUser;
+}
+
 async function startApp() {
   if (!currentUser || !username) return;
 
@@ -3222,6 +3228,7 @@ async function loadMyPage() {
 }
 
 async function loadMyPageStats() {
+  const session = appSessionSeq;
   if (!currentUser || !username) return;
 
   try {
@@ -3243,6 +3250,7 @@ async function loadMyPageStats() {
     if (myHitCount) myHitCount.textContent = hitCount;
     if (myProfit) myProfit.textContent = (profit >= 0 ? "+" : "") + profit;
   } catch (error) {
+    if (isInterruptedBySignOut(session)) return;
     console.error("マイページ統計エラー:", error);
   }
 }
@@ -3250,6 +3258,7 @@ async function loadMyPageStats() {
 /* 「🏆 ユーコインランキング」の見出しに合わせ、実際のゆうcoin残高ランキングを表示
    （マイページ／ゆうダービー画面の両方から呼べる共通版。コインの仕組み自体は既存のまま） */
 async function renderCoinRankingInto(targetEl) {
+  const session = appSessionSeq;
   if (!targetEl) return;
   targetEl.innerHTML = `<div class="loading">ランキングを読み込み中...</div>`;
 
@@ -3317,6 +3326,7 @@ async function renderCoinRankingInto(targetEl) {
       targetEl.appendChild(myRow);
     }
   } catch (error) {
+    if (isInterruptedBySignOut(session)) return;
     console.error("ランキング取得エラー:", error);
     targetEl.innerHTML = `<div class="empty-state">ランキングを取得できませんでした</div>`;
   }
@@ -3989,6 +3999,7 @@ function showRaceHitAnimation(bet, payout) {
 }
 
 async function settleMyBets(raceId, resultOrder) {
+  const session = appSessionSeq;
   if (!currentUser || !username) return;
 
   try {
@@ -4030,12 +4041,14 @@ async function settleMyBets(raceId, resultOrder) {
 
         if (settledNow && isWin && payout > 0) showRaceHitAnimationWhenRevealed(raceId, bet, payout);
       } catch (error) {
+        if (isInterruptedBySignOut(session)) return;
         console.error(`[ベット精算エラー] raceId=${raceId} betId=${betDoc.id} code=${error?.code || "(なし)"} message=${error?.message || error}`, error);
       }
     }
 
     loadMyPageStats();
   } catch (error) {
+    if (isInterruptedBySignOut(session)) return;
     console.error("ベット精算エラー:", error);
   }
 }
@@ -4049,6 +4062,7 @@ async function catchUpMissedRaces(attempt = 1) {
   if (!currentUser || !username) return;
   /* 途中でログアウト・別のアカウントに切り替わったら、そこでやめる（ログアウト後に読みに行かない） */
   const uid = currentUser.uid;
+  const session = appSessionSeq;
   const isSameUser = () => currentUser?.uid === uid;
 
   try {
@@ -4079,7 +4093,7 @@ async function catchUpMissedRaces(attempt = 1) {
       }
     }
   } catch (error) {
-    if (!isSameUser()) return; /* ログアウト・切り替えの途中で失敗しただけ */
+    if (!isSameUser() || isInterruptedBySignOut(session)) return; /* ログアウト・切り替えの途中で失敗しただけ */
     /* ログイン直後は認証の受け渡しが間に合わず拒否されることがあるので、同じユーザーのまま1回だけやり直す */
     if (error?.code === "permission-denied" && attempt === 1) {
       setTimeout(() => { if (isSameUser()) catchUpMissedRaces(2); }, 3000);
@@ -4650,6 +4664,7 @@ function ensureDerbyLiveStructure() {
 
 /* 【⑥ 詳細結果】人気順はそのレースの最終的な単勝の賭け金から計算（既存のコイン・投票の仕組みをそのまま利用） */
 async function computeFinalPopularity(raceId) {
+  const session = appSessionSeq;
   try {
     const snap = await getDocs(query(collection(db, "raceBets"), where("raceId", "==", raceId), where("type", "==", "win")));
     const pool = {};
@@ -4664,6 +4679,7 @@ async function computeFinalPopularity(raceId) {
       .sort((a, b) => b.pool - a.pool)
       .map((h, i) => ({ ...h, rank: i + 1 }));
   } catch (error) {
+    if (isInterruptedBySignOut(session)) return [];
     console.error("人気順取得エラー:", error);
     return [];
   }
@@ -4760,6 +4776,7 @@ function renderRaceInfoHeavyParts() {
 }
 
 async function loadRecentRaceResults(excludeRaceId) {
+  const session = appSessionSeq;
   const el = document.getElementById("racePastResults");
   if (!el) return;
 
@@ -4784,6 +4801,7 @@ async function loadRecentRaceResults(excludeRaceId) {
     });
     el.innerHTML = html;
   } catch (error) {
+    if (isInterruptedBySignOut(session)) return;
     console.error("過去レース取得エラー:", error);
   }
 }
