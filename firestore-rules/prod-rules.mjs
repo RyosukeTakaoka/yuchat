@@ -107,6 +107,7 @@ const userA = { uid: "rulesTestUserA", token: {} };
 const fakeAdmin = { uid: "rulesTestFakeAdmin", token: { email: "admin@example.com", name: "admin" } };
 
 const manualRace = { raceId: "2030-01-01-m1200", dayId: "2030-01-01", status: "scheduled", betCount: 0, createdByUid: ADMIN_UID };
+const announcementDoc = { title: "お知らせ", body: "本文", createdByUid: ADMIN_UID, createdByName: "admin" };
 const eventDoc = { title: "テスト", description: "", location: "", capacity: 0, status: "scheduled", participantCount: 0, createdByUid: ADMIN_UID };
 
 function testCase(expectation, label, auth, method, docPath, { data, existing } = {}) {
@@ -145,10 +146,24 @@ const TEST_CASES = [
   testCase("ALLOW", "raceBets：新方式のレースの自分の馬券を固定オッズで精算", userA, "update", "raceBets/b-new", { data: { raceId: "2026-10-09", uid: userA.uid, settled: true, win: true, payout: 600, payoutRule: "fixed-v1" }, existing: { raceId: "2026-10-09", uid: userA.uid, settled: false } }),
   testCase("DENY", "raceBets：他人の馬券を精算", userA, "update", "raceBets/b-other", { data: { raceId: "2026-10-09", uid: "someoneElse", settled: true, win: true, payout: 600, payoutRule: "fixed-v1" }, existing: { raceId: "2026-10-09", uid: "someoneElse", settled: false } }),
   testCase("ALLOW", "raceBets：新方式のレースの馬券購入", userA, "create", "raceBets/b-buy", { data: { raceId: "2026-10-12", uid: userA.uid, type: "win", horses: [1], amount: 100, settled: false, oddsVersion: 1, oddsTenths: 25 } }),
+  // お知らせ（announcements）：読み取りはログイン済みなら誰でも・作成/編集/削除は管理者だけ
+  testCase("ALLOW", "一般：お知らせの読み取り", userA, "get", "announcements/a1", { existing: announcementDoc }),
+  testCase("ALLOW", "管理者：お知らせの削除", admin, "delete", "announcements/a1", { existing: announcementDoc }),
+  testCase("DENY", "一般：お知らせの作成", userA, "create", "announcements/a1", { data: announcementDoc }),
+  testCase("DENY", "一般：お知らせの編集", userA, "update", "announcements/a1", { data: { ...announcementDoc, title: "乗っ取り" }, existing: announcementDoc }),
+  testCase("DENY", "一般：お知らせの削除", userA, "delete", "announcements/a1", { existing: announcementDoc }),
+  testCase("DENY", "メール・名前が管理者風でも UID が違う人：お知らせの削除", fakeAdmin, "delete", "announcements/a1", { existing: announcementDoc }),
+  testCase("DENY", "未ログイン：お知らせの読み取り", null, "get", "announcements/a1", { existing: announcementDoc }),
+  testCase("ALLOW", "users：自分の lastAnnouncementReadAt の更新（既存の users のルールのまま）", userA, "update", "users/alice", { data: { uid: userA.uid, coins: 1000, lastAnnouncementReadAt: "2030-01-01" }, existing: { uid: userA.uid, coins: 1000 } }),
   // 一般ユーザーの読み取りと既存データは今まで通り
   testCase("ALLOW", "一般：手動レースの読み取り", userA, "get", "derbyManualRaces/2030-01-01-m1200", { existing: manualRace }),
   testCase("ALLOW", "users：自分のデータ更新", userA, "update", "users/alice", { data: { uid: userA.uid, coins: 900 }, existing: { uid: userA.uid, coins: 1000 } }),
   testCase("ALLOW", "users：ランキング（他人のデータの読み取り）", userA, "get", "users/bob", { existing: { uid: "bob", coins: 1000 } }),
+  testCase("DENY", "users：他人の名前の書き換え", userA, "update", "users/bob", { data: { uid: "bob", name: "へんななまえ", coins: 1000 }, existing: { uid: "bob", name: "bob", coins: 1000 } }),
+  testCase("DENY", "users：他人のコインの書き換え", userA, "update", "users/bob", { data: { uid: "bob", coins: 999999 }, existing: { uid: "bob", coins: 1000 } }),
+  testCase("DENY", "users：他人のデータの削除", userA, "delete", "users/bob", { existing: { uid: "bob", coins: 1000 } }),
+  testCase("DENY", "users：管理者でも他人の users を直接は書き換えられない（名前の強制変更以外）", admin, "update", "users/bob", { data: { uid: "bob", coins: 1 }, existing: { uid: "bob", coins: 1000 } }),
+  testCase("ALLOW", "users：自分の名前で新規登録", userA, "create", "users/alice2", { data: { uid: userA.uid, name: "alice2" } }),
   testCase("ALLOW", "friends：友達追加", userA, "create", "friends/alice_bob", { data: { user1: "alice", user2: "bob" } }),
   testCase("ALLOW", "groups：グループ作成", userA, "create", "groups/g1", { data: { name: "g", members: ["alice"] } }),
   testCase("ALLOW", "messages：メッセージ送信", userA, "create", "messages/m1", { data: { sender: "alice", text: "hi" } }),

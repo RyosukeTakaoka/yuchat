@@ -4,7 +4,7 @@ rules_version = '2';
 //
 // もとのルール（Firebase Console に公開中のもの）：
 //   match /{document=**} { allow read, write: if request.auth != null; }
-// を土台にして、管理者用のデータ（手動レース）だけを守るように変えている。
+// を土台にして、管理者用のデータ（手動レース・お知らせ）だけを守るように変えている。
 // それ以外のコレクション（users / friends / groups / messages / gameRooms / gameInvites /
 // races / raceBets / raceLogs / fcmTokens など）は、もとのルールと同じ「ログイン済みなら読み書き可」のまま。
 //
@@ -30,7 +30,7 @@ service cloud.firestore {
 
     // 下のコレクションは、このあとの専用のルールだけで書き込みを判定する
     function isAdminManagedCollection(collection) {
-      return collection in ['derbyManualRaces'];
+      return collection in ['derbyManualRaces', 'announcements'];
     }
 
     // 廃止した機能のコレクション。ブラウザからは読み取りも書き込みもできない
@@ -39,8 +39,15 @@ service cloud.firestore {
     }
 
     // 下のコレクションは、このあとの専用のルールで書き込みを判定する（今までの「ログイン済みなら書ける」をもとに、一部だけ絞る）
+    //   users：自分のデータだけ（管理者による名前の強制変更を除く）／adminNameChanges：管理者の名前変更の記録
+    //   raceBets：固定オッズ方式のレースの精算の条件
     function hasDedicatedWriteRules(collection) {
-      return collection in ['raceBets'];
+      return collection in ['users', 'adminNameChanges', 'raceBets'];
+    }
+
+    // 下のコレクションは管理者だけが読める
+    function isAdminOnlyReadCollection(collection) {
+      return collection in ['adminNameChanges'];
     }
 
     // 下のコレクションは自動処理（サービスアカウント）だけが書く。ブラウザからは書き込めない
@@ -50,7 +57,7 @@ service cloud.firestore {
 
     // ===== もとのルール（管理者用・自動処理用・廃止したコレクション以外は今まで通り） =====
     match /{collection}/{document=**} {
-      allow read: if signedIn() && !isRetiredCollection(collection);
+      allow read: if signedIn() && !isRetiredCollection(collection) && !isAdminOnlyReadCollection(collection);
       allow write: if signedIn() && !isAdminManagedCollection(collection) && !isServerOnlyCollection(collection) && !isRetiredCollection(collection) && !hasDedicatedWriteRules(collection);
     }
 
@@ -96,6 +103,113 @@ service cloud.firestore {
         return resource.data.get('uid', '') == request.auth.uid
           && (!isFixedOddsRaceId(resource.data.get('raceId', '')) || request.resource.data.get('payoutRule', '') == 'fixed-v1');
       }
+    }
+
+    // ===== お知らせ（announcements/{announcementId}） =====
+    // 読み取り：ログイン済みなら誰でも
+    // 作成・編集・削除：管理者だけ（項目・文字数・作成日時と作成者は書き換えられないことも確かめる）
+    // 未読の管理は users/{名前}.lastAnnouncementReadAt（users は今まで通りのルール）。お知らせ側には書かない
+    match /announcements/{announcementId} {
+      allow read: if signedIn();
+      allow create: if isAdmin()
+        && isValidAnnouncement(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.createdByUid == request.auth.uid;
+      allow update: if isAdmin()
+        && isValidAnnouncement(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'body', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
+
+      function isValidAnnouncement(data) {
+        return data.keys().hasOnly(['title', 'body', 'createdAt', 'updatedAt', 'createdByUid', 'createdByName'])
+          && data.keys().hasAll(['title', 'body', 'createdAt', 'updatedAt', 'createdByUid', 'createdByName'])
+          && data.title is string && data.title.size() >= 1 && data.title.size() <= 50
+          && data.body is string && data.body.size() >= 1 && data.body.size() <= 500
+          && data.createdByUid is string
+          && data.createdByName is string && data.createdByName.size() <= 100
+          && data.createdAt is timestamp
+          && data.updatedAt is timestamp;
+      }
+    }
+
+    // ===== ユーザー（users/{userName}。ドキュメントIDはユーザー名） =====
+    // 読み取り：ログイン済みなら誰でも（今まで通り。友達追加・ランキング・通知などで使う）
+    // 作成・更新・削除：自分のデータ（uid が自分）だけ。他人の users は書き換えられない
+    //   （名前変更・コイン・銀行・株・ログインボーナス・通知設定など、アプリが書くのはすべて自分のデータ）
+    // 管理者による名前の強制変更だけ例外：
+    //   新しい名前のドキュメントの作成は「古い名前のドキュメントと同じ内容 ＋ 名前と記録用の項目」だけで、
+    //   同時に古い名前のドキュメントを消し、adminNameChanges に記録する場合に限る（コインなど他の項目は変えられない）
+    match /users/{userName} {
+      allow read: if signedIn();
+      allow create: if signedIn() && (request.resource.data.get('uid', '') == request.auth.uid || isAdminRenameCreate());
+      allow update: if signedIn() && isOwnUserDoc() && request.resource.data.get('uid', '') == request.auth.uid;
+      allow delete: if signedIn() && (isOwnUserDoc() || isAdminRenameDelete());
+
+      function isOwnUserDoc() {
+        return resource.data.get('uid', '') == request.auth.uid;
+      }
+
+      function userPath(name) {
+        return /databases/$(database)/documents/users/$(name);
+      }
+
+      function isAdminRenameCreate() {
+        return isAdmin()
+          && request.resource.data.get('nameChangedFrom', '') is string
+          && request.resource.data.get('nameChangedFrom', '') != ''
+          && request.resource.data.get('nameChangedFrom', '') != userName
+          && request.resource.data.get('name', '') == userName
+          && request.resource.data.get('nameChangedByAdmin', false) == true
+          && request.resource.data.get('nameChangedByUid', '') == request.auth.uid
+          && request.resource.data.get('nameChangedAt', null) == request.time
+          && exists(userPath(request.resource.data.nameChangedFrom))
+          && !existsAfter(userPath(request.resource.data.nameChangedFrom))
+          && request.resource.data.diff(get(userPath(request.resource.data.nameChangedFrom)).data).affectedKeys()
+               .hasOnly(['name', 'nameChangedByAdmin', 'nameChangedByUid', 'nameChangedAt', 'nameChangedFrom']);
+      }
+
+      function isAdminRenameDelete() {
+        return isAdmin()
+          && existsAfter(/databases/$(database)/documents/adminNameChanges/$(userName))
+          && getAfter(/databases/$(database)/documents/adminNameChanges/$(userName)).data.get('changedAt', null) == request.time
+          && getAfter(/databases/$(database)/documents/adminNameChanges/$(userName)).data.get('to', '') is string
+          && getAfter(/databases/$(database)/documents/adminNameChanges/$(userName)).data.get('to', '') != ''
+          && existsAfter(userPath(getAfter(/databases/$(database)/documents/adminNameChanges/$(userName)).data.to))
+          && getAfter(userPath(getAfter(/databases/$(database)/documents/adminNameChanges/$(userName)).data.to)).data.get('uid', '') == resource.data.get('uid', '');
+      }
+    }
+
+    // users の下のデータ（サブコレクション）は今まで通り（{rest=**} は 0 階層にも一致するので、1階層目を {sub} で受ける）
+    match /users/{userName}/{sub}/{rest=**} {
+      allow read, write: if signedIn();
+    }
+
+    // ===== 管理者による名前の強制変更の記録（adminNameChanges/{古い名前}） =====
+    // 読み取り・書き込み：管理者だけ。users の移動と同じ書き込みの中でだけ作れる
+    match /adminNameChanges/{oldName} {
+      allow read: if isAdmin();
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasOnly(['from', 'to', 'uid', 'changedByUid', 'changedAt'])
+        && request.resource.data.from == oldName
+        && request.resource.data.to is string
+        && request.resource.data.to != oldName
+        && request.resource.data.changedByUid == request.auth.uid
+        && request.resource.data.changedAt == request.time
+        && existsAfter(/databases/$(database)/documents/users/$(request.resource.data.to))
+        && !existsAfter(/databases/$(database)/documents/users/$(oldName));
+      allow delete: if false;
+    }
+
+    // ===== 総資産ランキング（rankings/assets）：管理者が名前を強制変更したときだけ、ランキングの名前を書き換えられる =====
+    // （自動処理が毎日13:00に作り直す。管理者が変えられるのは users の並びだけで、人数は変えられない）
+    match /rankings/{rankingId} {
+      allow update: if isAdmin()
+        && rankingId == 'assets'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['users'])
+        && request.resource.data.users is list
+        && request.resource.data.users.size() == resource.data.users.size();
     }
   }
 }

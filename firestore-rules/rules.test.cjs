@@ -3,7 +3,7 @@
 const { initializeTestEnvironment, assertSucceeds, assertFails } = require("@firebase/rules-unit-testing");
 const fs = require("fs");
 const path = require("path");
-const { doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, addDoc, collection, query, where, runTransaction, writeBatch, serverTimestamp } = require("firebase/firestore");
+const { doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, addDoc, collection, query, where, orderBy, limit, runTransaction, writeBatch, serverTimestamp } = require("firebase/firestore");
 
 const ADMIN = "g51wzTvJFsZiYEfre5aDuDckJXY2";
 let pass = 0, fail = 0;
@@ -197,6 +197,106 @@ const min = (m) => new Date(Date.now() + m * 60000);
     let f; await env.withSecurityRulesDisabled(async (ctx) => { f = (await getDoc(doc(ctx.firestore(), "raceBets/fixedB"))).data(); });
     if (f.settled === false && f.payout === null) { pass++; log.push("PASS 他ユーザーの馬券は精算されていない"); } else { fail++; log.push("FAIL 他ユーザーの馬券が変わった"); }
   }
+
+  log.push("--- ⑧ お知らせ（announcements）：読み取りはログイン済みなら誰でも・作成/編集/削除は管理者だけ");
+  const annData = (o = {}) => ({ title: "メンテナンスのお知らせ", body: "本文です", createdAt: serverTimestamp(), updatedAt: serverTimestamp(), createdByUid: ADMIN, createdByName: "かんりしゃ", ...o });
+  const ja50 = "あ".repeat(50), ja500 = "本".repeat(500);
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), "announcements/ann-old"), { title: "既存", body: "既存の本文", createdAt: new Date(), updatedAt: new Date(), createdByUid: ADMIN, createdByName: "かんりしゃ" });
+  });
+  await ok("管理者：お知らせの作成（自動ID・アプリと同じ書き込み）", setDoc(doc(collection(admin, "announcements")), annData()));
+  await ok("管理者：タイトル50文字・本文500文字（日本語）で作成", setDoc(doc(admin, "announcements/ann-max"), annData({ title: ja50, body: ja500 })));
+  // 文字数はアプリの入力欄（maxlength）・JavaScript の length と同じ数え方（絵文字は1つで2文字分）
+  await ok("管理者：絵文字・改行を含むお知らせ（絵文字25個＝50文字分）", setDoc(doc(admin, "announcements/ann-emoji"), annData({ title: "📢".repeat(25), body: "1行目\n2行目 🎉" })));
+  await ng("管理者：絵文字26個（52文字分）のタイトルは拒否（アプリの入力欄でも入らない）", setDoc(doc(admin, "announcements/ann-x8"), annData({ title: "📢".repeat(26) })));
+  await ok("管理者：お知らせの編集（タイトル・本文・更新日時）", updateDoc(doc(admin, "announcements/ann-max"), { title: "変更後", body: "変更後の本文", updatedAt: serverTimestamp() }));
+  await ok("管理者：お知らせの削除", deleteDoc(doc(admin, "announcements/ann-emoji")));
+  await ng("管理者：タイトル51文字は拒否", setDoc(doc(admin, "announcements/ann-x1"), annData({ title: ja50 + "あ" })));
+  await ng("管理者：本文501文字は拒否", setDoc(doc(admin, "announcements/ann-x2"), annData({ body: ja500 + "本" })));
+  await ng("管理者：空のタイトルは拒否", setDoc(doc(admin, "announcements/ann-x3"), annData({ title: "" })));
+  await ng("管理者：決められた項目以外は拒否", setDoc(doc(admin, "announcements/ann-x4"), annData({ pinned: true })));
+  await ng("管理者：項目が足りないと拒否", setDoc(doc(admin, "announcements/ann-x5"), { title: "t", body: "b", createdAt: serverTimestamp(), updatedAt: serverTimestamp(), createdByUid: ADMIN }));
+  await ng("管理者：作成者を他人にして作成は拒否", setDoc(doc(admin, "announcements/ann-x6"), annData({ createdByUid: "userA" })));
+  await ng("管理者：作成日時を過去にして作成は拒否", setDoc(doc(admin, "announcements/ann-x7"), annData({ createdAt: new Date("2000-01-01") })));
+  await ng("管理者：編集で作成日時・作成者は変えられない", updateDoc(doc(admin, "announcements/ann-max"), { createdAt: new Date("2000-01-01"), updatedAt: serverTimestamp() }));
+  await ng("管理者：編集で本文を501文字にはできない", updateDoc(doc(admin, "announcements/ann-max"), { body: ja500 + "本", updatedAt: serverTimestamp() }));
+  await ok("一般：お知らせ一覧の読み取り（新しい順）", getDocs(query(collection(A, "announcements"), orderBy("createdAt", "desc"), limit(50))));
+  await ok("一般：最新のお知らせ1件だけの読み取り（未読マーク用）", getDocs(query(collection(A, "announcements"), orderBy("createdAt", "desc"), limit(1))));
+  await ng("一般：お知らせの作成", setDoc(doc(collection(A, "announcements")), annData({ createdByUid: "userA" })));
+  await ng("一般：管理者を名乗ってお知らせの作成", setDoc(doc(A, "announcements/ann-fake"), annData()));
+  await ng("一般：お知らせの編集", updateDoc(doc(A, "announcements/ann-old"), { title: "乗っ取り", updatedAt: serverTimestamp() }));
+  await ng("一般：お知らせの削除", deleteDoc(doc(A, "announcements/ann-old")));
+  await ng("一般：お知らせの下にデータを作る", setDoc(doc(A, "announcements/ann-old/x/y"), { a: 1 }));
+  await ng("メールアドレス・名前が管理者風でも UID が違えば拒否（お知らせ作成）", setDoc(doc(fake, "announcements/ann-fake2"), annData({ createdByUid: "fakeAdmin" })));
+  await ng("未ログイン：お知らせの読み取り", getDocs(collection(anon, "announcements")));
+  await ok("users：自分の lastAnnouncementReadAt の更新（既存の users のルールのまま・書き込み1回）", updateDoc(doc(A, "users/alice"), { lastAnnouncementReadAt: serverTimestamp() }));
+  await ng("未ログイン：lastAnnouncementReadAt の更新（今まで通り拒否）", updateDoc(doc(anon, "users/alice"), { lastAnnouncementReadAt: serverTimestamp() }));
+  {
+    let n; await env.withSecurityRulesDisabled(async (ctx) => { n = (await getDocs(collection(ctx.firestore(), "announcements"))).size; });
+    if (n === 3) { pass++; log.push("PASS お知らせは許可された書き込みだけが反映（既存・自動ID・50/500文字の3件）"); } else { fail++; log.push(`FAIL お知らせの件数が ${n}`); }
+  }
+
+  log.push("--- ⑨ users（ドキュメントIDはユーザー名）：書き込みは自分のデータだけ。管理者は名前の強制変更だけできる");
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const d = ctx.firestore();
+    await setDoc(doc(d, "users/carol"), { uid: "userC", name: "carol", coins: 777, bank: { deposit: 10, loan: 0 }, stocks: { YGM: { qty: 2, cost: 180 } }, totalBetAmount: 5, createdAt: new Date() });
+    await setDoc(doc(d, "users/dave"), { uid: "userD", name: "dave", coins: 300 });
+    await setDoc(doc(d, "users/erin"), { uid: "userE", name: "erin", coins: 100 });
+    await setDoc(doc(d, "rankings/assets"), { date: "2030-01-01", complete: true, prices: { YGM: 180 }, users: [{ name: "carol", total: 1500, rank: 1 }, { name: "dave", total: 300, rank: 2 }], userCount: 2 });
+  });
+  const C = env.authenticatedContext("userC").firestore();
+  /* アプリと同じ：管理者の名前変更（users の移動・記録・ランキングを1つのトランザクションで） */
+  const adminRename = (db, from, to, tweak = (x) => x, opts = {}) => runTransaction(db, async (t) => {
+    const oldRef = doc(db, "users", from), newRef = doc(db, "users", to), rRef = doc(db, "rankings/assets");
+    const o = await t.get(oldRef); await t.get(newRef); const r = await t.get(rRef);
+    t.set(newRef, tweak({ ...o.data(), name: to, nameChangedByAdmin: true, nameChangedAt: serverTimestamp(), nameChangedByUid: opts.byUid || ADMIN, nameChangedFrom: from }));
+    if (!opts.keepOld) t.delete(oldRef);
+    if (!opts.noLog) t.set(doc(db, "adminNameChanges", from), { from, to, uid: o.data().uid, changedByUid: opts.byUid || ADMIN, changedAt: opts.logAt || serverTimestamp() });
+    if (!opts.noRanking && r.exists()) t.update(rRef, { users: r.data().users.map((u) => (u.name === from ? { ...u, name: to } : u)) });
+  });
+  /* アプリと同じ：通常の名前変更（自分で） */
+  const selfRename = async (db, uid, from, to) => {
+    const old = (await getDoc(doc(db, "users", from))).data();
+    await setDoc(doc(db, "users", to), { uid, name: to, photoURL: "", profileImage: "", updatedAt: serverTimestamp(), createdAt: old.createdAt || serverTimestamp() });
+    await updateDoc(doc(db, "users", to), { coins: old.coins, ...(old.bank ? { bank: old.bank } : {}), ...(old.stocks ? { stocks: old.stocks } : {}) });
+    await deleteDoc(doc(db, "users", from));
+  };
+  await ok("1. 一般ユーザーが自分の名前を通常変更（新しい名前を作成→引き継ぎ→古い名前を削除）", selfRename(C, "userC", "carol", "carol2"));
+  await ok("1. 一般ユーザー：自分のデータの更新（コイン・通知設定など今まで通り）", updateDoc(doc(C, "users/carol2"), { notificationSetupDone: true }));
+  await ng("2. 一般ユーザーが他人の名前を変更（他人のデータを新しい名前で作る）", setDoc(doc(A, "users/dave-x"), { uid: "userD", name: "dave-x", coins: 300 }));
+  await ng("2. 一般ユーザーが他人の名前を変更（他人のデータを消す）", deleteDoc(doc(A, "users/dave")));
+  await ng("2. 一般ユーザーが他人の名前を書き換える（name の更新）", updateDoc(doc(A, "users/dave"), { name: "へんななまえ" }));
+  await ng("2. 一般ユーザーが管理者と同じ書き込みで他人の名前を変更", adminRename(A, "dave", "dave-x", (x) => x, { byUid: "userA" }));
+  await ng("2. 一般ユーザーが他人のコインを書き換える", updateDoc(doc(A, "users/dave"), { coins: 999999 }));
+  await ng("2. 一般ユーザーが自分のデータの uid を他人にする", updateDoc(doc(A, "users/alice"), { uid: "userD" }));
+  await ng("2. 一般ユーザーが他人の名前（既存の名前）を自分の名前として上書き", setDoc(doc(A, "users/dave"), { uid: "userA", name: "dave" }, { merge: true }));
+  await ng("メールアドレス・名前が管理者風でも UID が違えば他人の名前を変更できない", adminRename(fake, "dave", "dave-x", (x) => x, { byUid: "fakeAdmin" }));
+  await ok("3. 管理者が他ユーザーの名前を変更（アプリと同じトランザクション）", adminRename(admin, "dave", "でぃぶ"));
+  {
+    let nu, old, r, lg; await env.withSecurityRulesDisabled(async (ctx) => { const d = ctx.firestore(); nu = (await getDoc(doc(d, "users/でぃぶ"))).data(); old = (await getDoc(doc(d, "users/dave"))).exists(); r = (await getDoc(doc(d, "rankings/assets"))).data(); lg = (await getDoc(doc(d, "adminNameChanges/dave"))).data(); });
+    const okk = nu && nu.uid === "userD" && nu.coins === 300 && nu.name === "でぃぶ" && nu.nameChangedByAdmin === true && nu.nameChangedFrom === "dave" && !old && r.users.map((u) => u.name).join() === "carol,でぃぶ" && r.date === "2030-01-01" && lg.to === "でぃぶ" && lg.uid === "userD";
+    if (okk) { pass++; log.push("PASS 名前変更の結果：中身はそのまま・古い名前は削除・ランキングと記録も新しい名前"); } else { fail++; log.push(`FAIL 名前変更の結果 ${JSON.stringify({ nu, old, r, lg })}`); }
+  }
+  await ok("3. 管理者が自分自身の名前を変更", (async () => { await env.withSecurityRulesDisabled(async (ctx) => { await setDoc(doc(ctx.firestore(), "users/かんりしゃ"), { uid: ADMIN, name: "かんりしゃ", coins: 50 }); }); await adminRename(admin, "かんりしゃ", "かんりしゃ2"); })());
+  await ng("4. 管理者が名前変更と一緒にコインを書き換える", adminRename(admin, "erin", "erin2", (x) => ({ ...x, coins: 999999 })));
+  await ng("4. 管理者が名前変更と一緒に uid を書き換える", adminRename(admin, "erin", "erin2", (x) => ({ ...x, uid: "userA" })));
+  await ng("4. 管理者が名前変更と一緒に項目を足す", adminRename(admin, "erin", "erin2", (x) => ({ ...x, isVip: true })));
+  await ng("4. 管理者が古い名前を消さずに新しい名前を作る（データの複製）", adminRename(admin, "erin", "erin2", (x) => x, { keepOld: true }));
+  await ng("4. 管理者が記録を残さずに古い名前を消す", adminRename(admin, "erin", "erin2", (x) => x, { noLog: true }));
+  await ng("4. 管理者が他ユーザーの users を直接書き換える（コイン）", updateDoc(doc(admin, "users/erin"), { coins: 1 }));
+  await ng("4. 管理者が他ユーザーの users を直接書き換える（名前の項目だけ）", updateDoc(doc(admin, "users/erin"), { name: "x" }));
+  await ng("4. 管理者が名前変更と関係なく他ユーザーを削除", deleteDoc(doc(admin, "users/erin")));
+  await ng("4. 管理者がランキングの名前以外（日付）を書き換える", updateDoc(doc(admin, "rankings/assets"), { date: "2099-01-01" }));
+  await ng("4. 管理者がランキングの人数を変える", updateDoc(doc(admin, "rankings/assets"), { users: [] }));
+  await ng("4. 管理者が名前変更の記録を消す", deleteDoc(doc(admin, "adminNameChanges/dave")));
+  await ok("管理者は名前変更の記録を読める", getDoc(doc(admin, "adminNameChanges/dave")));
+  await ng("一般ユーザーは名前変更の記録を読めない", getDoc(doc(A, "adminNameChanges/dave")));
+  await ng("一般ユーザーがランキングの名前を書き換える", updateDoc(doc(A, "rankings/assets"), { users: [{ name: "x", total: 1, rank: 1 }, { name: "y", total: 1, rank: 2 }] }));
+  await ng("5. 未ログイン：users の作成", setDoc(doc(anon, "users/nobody"), { uid: "x", name: "nobody" }));
+  await ng("5. 未ログイン：users の更新（名前）", updateDoc(doc(anon, "users/erin"), { name: "x" }));
+  await ng("5. 未ログイン：users の削除", deleteDoc(doc(anon, "users/erin")));
+  await ok("users の読み取り（他人のデータ・友達追加やランキング用）は今まで通り", getDoc(doc(A, "users/erin")));
+  await ok("新しい名前での新規登録（自分の uid）は今まで通り", setDoc(doc(A, "users/alice-new2"), { uid: "userA", name: "alice-new2", createdAt: serverTimestamp() }, { merge: true }));
 
   await env.cleanup();
   console.log(log.join("\n"));
