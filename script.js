@@ -668,6 +668,7 @@ async function resolveAuthState(user) {
 
 function handleSignedOut() {
   authResolveSeq++;
+  appSessionSeq++;
   currentUser = null;
   username = null;
   resolvedUid = null;
@@ -905,8 +906,33 @@ function maybePromptSetPassword() {
    アプリ開始
 ========================================================= */
 
+/* ログイン直後は、Firestore がログイン情報を受け取る前に読み取りが出て拒否されることがある。
+   購読や読み取りを始める前に、自分のユーザー情報を1回読めることを確かめる（拒否されたら少し待ってやり直す） */
+async function waitForFirestoreAuth() {
+  const uid = currentUser?.uid;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      await getDoc(doc(db, "users", username));
+      return true;
+    } catch (error) {
+      if (error?.code !== "permission-denied" || currentUser?.uid !== uid) return false;
+      await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+    }
+  }
+  return false;
+}
+
+/* ログインのたびに番号を振る。ログアウトしたら番号を進め、待っている途中の古い起動処理はそこでやめる
+   （ログアウトの後に購読や読み取りを始めないように） */
+let appSessionSeq = 0;
+
 async function startApp() {
   if (!currentUser || !username) return;
+
+  const session = ++appSessionSeq;
+  const startedUid = currentUser.uid;
+  await waitForFirestoreAuth();
+  if (session !== appSessionSeq || !currentUser || currentUser.uid !== startedUid || !username) return;
 
   try {
     listenFriends();
@@ -3126,6 +3152,7 @@ function switchView(view) {
 logoutButton?.addEventListener("click", async () => {
   if (!confirm("ログアウトしますか？")) return;
 
+  appSessionSeq++;
   try {
     stopFriendListeners();
     if (unsubscribeGroups) { unsubscribeGroups(); unsubscribeGroups = null; }
@@ -4018,13 +4045,16 @@ async function settleMyBets(raceId, resultOrder) {
    ・レース結果がまだ無ければ（発走時刻を過ぎていれば）今すぐ生成
    ・結果があれば、その場で精算
    を行う。これにより、何日 log-inしなくても、賭けた結果は必ず反映される。 */
-async function catchUpMissedRaces() {
+async function catchUpMissedRaces(attempt = 1) {
   if (!currentUser || !username) return;
+  /* 途中でログアウト・別のアカウントに切り替わったら、そこでやめる（ログアウト後に読みに行かない） */
+  const uid = currentUser.uid;
+  const isSameUser = () => currentUser?.uid === uid;
 
   try {
     const pendingSnap = await getDocs(query(
       collection(db, "raceBets"),
-      where("uid", "==", currentUser.uid),
+      where("uid", "==", uid),
       where("settled", "==", false)
     ));
     if (pendingSnap.empty) return;
@@ -4032,6 +4062,7 @@ async function catchUpMissedRaces() {
     const raceIds = [...new Set(pendingSnap.docs.map((d) => d.data().raceId))];
 
     for (const raceId of raceIds) {
+      if (!isSameUser()) return;
       const raceRef = doc(db, "races", raceId);
       let raceSnap = await getDoc(raceRef);
 
@@ -4048,6 +4079,12 @@ async function catchUpMissedRaces() {
       }
     }
   } catch (error) {
+    if (!isSameUser()) return; /* ログアウト・切り替えの途中で失敗しただけ */
+    /* ログイン直後は認証の受け渡しが間に合わず拒否されることがあるので、同じユーザーのまま1回だけやり直す */
+    if (error?.code === "permission-denied" && attempt === 1) {
+      setTimeout(() => { if (isSameUser()) catchUpMissedRaces(2); }, 3000);
+      return;
+    }
     console.error("未精算レースの確認エラー:", error);
   }
 }
