@@ -4984,6 +4984,146 @@ button.secondary {
 }
 
 
+/* ==================================================
+   📢 お知らせ
+================================================== */
+
+/* 未読があるときのタブの赤丸（ゲーム招待の赤丸と同じ見た目） */
+.tabs button.has-unread::after {
+    content: "";
+
+    position: absolute;
+    top: 8px;
+    right: calc(50% - 18px);
+
+    width: 8px;
+    height: 8px;
+
+    border-radius: 50%;
+
+    background: #ff4d6d;
+}
+
+/* お知らせ管理の本文入力欄（手動レース管理の入力欄と同じ見た目） */
+.admin-form textarea {
+    width: 100%;
+    min-width: 0;
+
+    padding: 8px 10px;
+
+    border: 1px solid #ddd;
+    border-radius: 10px;
+
+    font-family: inherit;
+    font-size: 16px;
+    font-weight: 400;
+    color: #111;
+
+    background: #fff;
+
+    resize: vertical;
+}
+
+.announcements-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+
+    margin-top: 10px;
+}
+
+.announcement-empty {
+    padding: 24px 12px;
+
+    color: #777;
+    font-size: 13px;
+    text-align: center;
+}
+
+.announcement-card {
+    min-width: 0;
+    padding: 12px 14px;
+
+    border: 1px solid #e1e4e8;
+    border-radius: 14px;
+
+    background: #fff;
+    color: #111;
+
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.announcement-card.unread {
+    border-color: #111;
+    box-shadow: inset 4px 0 0 #ff4d6d;
+}
+
+.announcement-card:focus-visible {
+    outline: 2px solid #111;
+    outline-offset: 2px;
+}
+
+.announcement-card-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+}
+
+.announcement-unread {
+    flex-shrink: 0;
+    font-size: 11px;
+    line-height: 1.6;
+}
+
+.announcement-title {
+    min-width: 0;
+
+    font-size: 15px;
+    font-weight: 800;
+    line-height: 1.4;
+
+    overflow-wrap: anywhere;
+}
+
+.announcement-date {
+    margin-top: 2px;
+
+    color: #666;
+    font-size: 12px;
+}
+
+.announcement-body {
+    margin-top: 8px;
+
+    font-size: 14px;
+    line-height: 1.6;
+
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+
+    /* 閉じているときは2行まで */
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+}
+
+.announcement-card.open .announcement-body {
+    display: block;
+    -webkit-line-clamp: unset;
+    overflow: visible;
+}
+
+.announcement-more {
+    margin-top: 6px;
+
+    color: #555;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+
 /* ----- 管理者だけ：ランキングの「名前を変更」ボタン（一般ユーザーには表示しない） ----- */
 .ranking-item:has(.ranking-admin-rename) .ranking-info {
     min-width: 0;

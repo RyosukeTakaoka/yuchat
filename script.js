@@ -109,6 +109,11 @@ let liveRaceResult = null;
 /* 手動レース（derbyManualRaces）：raceId → 予定。管理者が作ったものを全員が読む */
 let manualRaces = new Map();
 let unsubscribeManualRaces = null;
+/* 📢 お知らせ（announcements）：一覧は「お知らせ」タブを開いている間だけ購読する。
+   未読は users/{名前}.lastAnnouncementReadAt（購読中の自分のユーザーデータ）と、お知らせの createdAt を比べて判定する */
+let announcements = [];
+let unsubscribeAnnouncements = null;
+let latestAnnouncementAt = null;
 let lastGenerationAttemptAt = -999;
 let lastActiveBettingRaceId = null;
 let lastLiveRaceId = null;
@@ -186,6 +191,7 @@ const chatView = document.getElementById("chatView");
 const derbyView = document.getElementById("derbyView");
 const gamesView = document.getElementById("gamesView");
 const mypageView = document.getElementById("mypageView");
+const announcementsView = document.getElementById("announcementsView");
 const economyView = document.getElementById("economyView");
 const economyContent = document.getElementById("economyContent");
 
@@ -947,6 +953,7 @@ async function startApp() {
     listenMyBetHistory();
     listenGameInvites();
     listenManualRaces();
+    checkLatestAnnouncement();
     updateAdminVisibility();
     catchUpMissedRaces();
     try { initializeSafeRace(); } catch (e) { console.error("レース初期化エラー:", e); }
@@ -1139,10 +1146,10 @@ changeNameButton?.addEventListener("click", async () => {
       ...(isNotifySetupDoneLocally() ? { notificationSetupDone: true } : {})
     });
 
-    /* コイン・ボーナス受け取り済み・累計賭け金・ゆう銀行（預金・借入）・ゆう株・ログインボーナスの状態を新しい名前に引き継ぐ
+    /* コイン・ボーナス受け取り済み・累計賭け金・ゆう銀行（預金・借入）・ゆう株・ログインボーナス・お知らせの既読の状態を新しい名前に引き継ぐ
        （引き継がないと、次に開いたときに初期コインやボーナスがもう一度付いてしまう） */
     const carriedCoinFields = {};
-    ["coins", "bonus500Granted", "bonus500GrantedAt", "totalBetAmount", "bank", "stocks", "lastLoginBonusDate"].forEach((key) => {
+    ["coins", "bonus500Granted", "bonus500GrantedAt", "totalBetAmount", "bank", "stocks", "lastLoginBonusDate", "lastAnnouncementReadAt"].forEach((key) => {
       if (oldUserData[key] !== undefined) carriedCoinFields[key] = oldUserData[key];
     });
     if (Object.keys(carriedCoinFields).length > 0) {
@@ -3127,7 +3134,7 @@ tabButtons.forEach((button) => {
 });
 
 function switchView(view) {
-  const views = { chat: chatView, derby: derbyView, economy: economyView, games: gamesView, mypage: mypageView };
+  const views = { chat: chatView, derby: derbyView, economy: economyView, games: gamesView, announcements: announcementsView, mypage: mypageView };
 
   Object.entries(views).forEach(([name, element]) => {
     if (!element) return;
@@ -3145,6 +3152,8 @@ function switchView(view) {
   else stopDerbySubscriptions();
   if (view === "games") loadGameRooms();
   if (view === "economy") openEconomyView();
+  if (view === "announcements") openAnnouncementsView();
+  else stopAnnouncementsSubscription();
 }
 
 /* =========================================================
@@ -3169,6 +3178,7 @@ logoutButton?.addEventListener("click", async () => {
     manualRaces = new Map();
     selectedBetRaceId = null;
     document.getElementById("derbyAdminPanel")?.classList.add("hidden");
+    resetAnnouncementsState();
     pendingGameInvites = [];
     gameInvitesInitialized = false;
     if (unsubscribeMyCoins) { unsubscribeMyCoins(); unsubscribeMyCoins = null; }
@@ -3595,6 +3605,7 @@ function listenMyCoins() {
       if (data.bonus500Granted !== true) grantBonusCoinsIfNeeded();
       else grantLoginBonusIfNeeded(data);
       if (isEconomyViewActive()) renderEconomyView();
+      updateAnnouncementUnreadMark();
     },
     (error) => console.error("コイン監視エラー:", error)
   );
@@ -4993,6 +5004,7 @@ async function runCountedTransaction(updateFunction, attempts = 8) {
 function updateAdminVisibility() {
   const admin = isAdminUser();
   document.getElementById("derbyAdminPanel")?.classList.toggle("hidden", !admin);
+  document.getElementById("announcementAdminPanel")?.classList.toggle("hidden", !admin);
   if (admin) renderManualRaceAdminList();
 }
 
@@ -5387,6 +5399,273 @@ function startAdminListsRefresh() {
     if (derbyView?.classList.contains("active")) renderManualRaceAdminList();
   }, 15000);
 }
+
+/* =========================================================
+   📢 お知らせ
+   ・announcements/{自動ID}：title・body・createdAt・updatedAt・createdByUid・createdByName（作成・編集・削除は管理者だけ）
+   ・一覧は「お知らせ」タブを開いている間だけ onSnapshot で購読し、タブを離れたら止める（お知らせごとのリスナーは作らない）
+   ・未読：createdAt が users/{名前}.lastAnnouncementReadAt より新しいお知らせ。
+     既読にするときは lastAnnouncementReadAt を「今」に更新する1回の書き込みだけ（お知らせごとの既読データは作らない）
+   ・タブの未読マーク：ログイン時に最新の1件だけを読んで判定する（タブを開いている間は購読の内容で更新）
+========================================================= */
+
+const ANNOUNCEMENT_TITLE_MAX = 50;
+const ANNOUNCEMENT_BODY_MAX = 500;
+const ANNOUNCEMENT_LIST_LIMIT = 50;
+/* この端末で既読にした「いちばん新しいお知らせの投稿日時」（保存された lastAnnouncementReadAt と新しいほうで判定する） */
+let announcementReadLocalAt = null;
+let announcementReadInFlight = false;
+const openedAnnouncementIds = new Set();
+let editingAnnouncementId = null;
+let announcementSubmitting = false;
+
+function normalizeAnnouncement(snap) {
+  /* 作成直後（サーバーの時刻がまだ無いとき）は、見積もりの時刻で並べる */
+  const data = snap.data({ serverTimestamps: "estimate" });
+  return {
+    id: snap.id,
+    title: String(data.title || ""),
+    body: String(data.body || ""),
+    createdAt: toDateValue(data.createdAt),
+    updatedAt: toDateValue(data.updatedAt),
+    createdByName: String(data.createdByName || "")
+  };
+}
+
+function getAnnouncementReadAt() {
+  const stored = toDateValue(myLatestUserData?.lastAnnouncementReadAt);
+  if (stored && announcementReadLocalAt) return stored > announcementReadLocalAt ? stored : announcementReadLocalAt;
+  return stored || announcementReadLocalAt;
+}
+
+function isAnnouncementUnread(createdAt) {
+  if (!createdAt || !myLatestUserData) return false;
+  const readAt = getAnnouncementReadAt();
+  return !readAt || createdAt > readAt;
+}
+
+function updateAnnouncementUnreadMark() {
+  const button = document.querySelector('.tabs button[data-view="announcements"]');
+  button?.classList.toggle("has-unread", isAnnouncementUnread(latestAnnouncementAt));
+  if (announcementsView?.classList.contains("active")) renderAnnouncements();
+}
+
+/* ログイン時：最新のお知らせ1件だけを読む（タブの未読マーク用・読み取り1回） */
+async function checkLatestAnnouncement() {
+  const session = appSessionSeq;
+  try {
+    const snap = await getDocs(query(collection(db, "announcements"), orderBy("createdAt", "desc"), limit(1)));
+    if (session !== appSessionSeq) return;
+    latestAnnouncementAt = snap.empty ? null : normalizeAnnouncement(snap.docs[0]).createdAt;
+    updateAnnouncementUnreadMark();
+  } catch (error) {
+    console.error("お知らせの確認エラー:", error);
+  }
+}
+
+function openAnnouncementsView() {
+  renderAnnouncements();
+  if (unsubscribeAnnouncements || !currentUser) return;
+  unsubscribeAnnouncements = onSnapshot(
+    query(collection(db, "announcements"), orderBy("createdAt", "desc"), limit(ANNOUNCEMENT_LIST_LIMIT)),
+    (snap) => {
+      announcements = snap.docs.map(normalizeAnnouncement).filter((a) => a.createdAt);
+      latestAnnouncementAt = announcements[0]?.createdAt || null;
+      updateAnnouncementUnreadMark();
+      renderAnnouncements();
+    },
+    (error) => console.error("お知らせの読み込みエラー:", error)
+  );
+}
+
+function stopAnnouncementsSubscription() {
+  if (unsubscribeAnnouncements) { unsubscribeAnnouncements(); unsubscribeAnnouncements = null; }
+}
+
+function resetAnnouncementsState() {
+  stopAnnouncementsSubscription();
+  announcements = [];
+  latestAnnouncementAt = null;
+  announcementReadLocalAt = null;
+  announcementReadInFlight = false;
+  openedAnnouncementIds.clear();
+  resetAnnouncementForm();
+  document.getElementById("announcementAdminPanel")?.classList.add("hidden");
+  document.querySelector('.tabs button[data-view="announcements"]')?.classList.remove("has-unread");
+  const list = document.getElementById("announcementsList");
+  if (list) list.innerHTML = "";
+  const adminList = document.getElementById("announcementAdminList");
+  if (adminList) adminList.innerHTML = "";
+}
+
+/* 2026/10/7 14:05（日本時間） */
+function formatAnnouncementDate(date) {
+  if (!date) return "";
+  const jst = toJstFields(date);
+  return `${jst.getUTCFullYear()}/${jst.getUTCMonth() + 1}/${jst.getUTCDate()} ${formatJstHourMinute(date)}`;
+}
+
+function renderAnnouncements() {
+  const el = document.getElementById("announcementsList");
+  if (!el) return;
+  if (!unsubscribeAnnouncements && announcements.length === 0) {
+    el.innerHTML = `<div class="announcement-empty">読み込み中…</div>`;
+  } else if (announcements.length === 0) {
+    el.innerHTML = `<div class="announcement-empty">お知らせはまだありません</div>`;
+  } else {
+    el.innerHTML = announcements.map((a) => {
+      const unread = isAnnouncementUnread(a.createdAt);
+      const open = openedAnnouncementIds.has(a.id);
+      const edited = a.updatedAt && a.createdAt && a.updatedAt - a.createdAt > 60000;
+      return `<article class="announcement-card${unread ? " unread" : ""}${open ? " open" : ""}" data-announcement-id="${escapeHTML(a.id)}" role="button" tabindex="0" aria-expanded="${open}">
+        <div class="announcement-card-head">
+          ${unread ? `<span class="announcement-unread" aria-label="未読">🔴</span>` : ""}
+          <span class="announcement-title">${escapeHTML(a.title)}</span>
+        </div>
+        <div class="announcement-date">${escapeHTML(formatAnnouncementDate(a.createdAt))}${edited ? `（編集 ${escapeHTML(formatAnnouncementDate(a.updatedAt))}）` : ""}</div>
+        <div class="announcement-body">${escapeHTML(a.body)}</div>
+        <div class="announcement-more">${open ? "▲ 閉じる" : "▼ タップして全文を表示"}</div>
+      </article>`;
+    }).join("");
+  }
+  renderAnnouncementAdminList();
+}
+
+/* お知らせを開いたら、その時点までのお知らせをすべて既読にする（users/{名前} を1回更新するだけ） */
+async function markAnnouncementsRead() {
+  if (!username || !currentUser || announcementReadInFlight) return;
+  if (!announcements.some((a) => isAnnouncementUnread(a.createdAt))) return;
+  announcementReadInFlight = true;
+  /* この端末では「表示中のいちばん新しいお知らせの投稿日時」までを既読として覚えておく（端末の時計は使わない）。
+     名前を変えたあとは、購読中のユーザーデータが古い名前のまま更新されないことがあるので、
+     書き込みが終わったあともこの値を残し、保存された値と新しいほうで判定する（再読み込みなしでも既読のまま） */
+  const previousLocalAt = announcementReadLocalAt;
+  const newest = announcements.reduce((max, a) => (a.createdAt && (!max || a.createdAt > max) ? a.createdAt : max), null);
+  announcementReadLocalAt = previousLocalAt && previousLocalAt > newest ? previousLocalAt : newest;
+  updateAnnouncementUnreadMark();
+  try {
+    await updateDoc(doc(db, "users", username), { lastAnnouncementReadAt: serverTimestamp() });
+  } catch (error) {
+    announcementReadLocalAt = previousLocalAt;
+    console.error("お知らせの既読エラー:", error);
+    updateAnnouncementUnreadMark();
+  } finally {
+    announcementReadInFlight = false;
+  }
+}
+
+function toggleAnnouncement(id) {
+  if (openedAnnouncementIds.has(id)) openedAnnouncementIds.delete(id);
+  else openedAnnouncementIds.add(id);
+  const a = announcements.find((x) => x.id === id);
+  if (openedAnnouncementIds.has(id) && a && isAnnouncementUnread(a.createdAt)) markAnnouncementsRead();
+  renderAnnouncements();
+}
+
+document.getElementById("announcementsList")?.addEventListener("click", (event) => {
+  const card = event.target?.closest?.("[data-announcement-id]");
+  if (card && currentUser) toggleAnnouncement(card.dataset.announcementId);
+});
+document.getElementById("announcementsList")?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const card = event.target?.closest?.("[data-announcement-id]");
+  if (!card || !currentUser) return;
+  event.preventDefault();
+  toggleAnnouncement(card.dataset.announcementId);
+});
+
+/* ----- 📢 お知らせ管理（管理者だけ） ----- */
+
+function renderAnnouncementAdminList() {
+  const el = document.getElementById("announcementAdminList");
+  if (!el || !isAdminUser()) return;
+  el.innerHTML = announcements.length ? announcements.map((a) => `<div class="admin-item">
+      <div class="admin-item-main">
+        <b>${escapeHTML(a.title)}</b>
+        <div class="admin-item-sub">${escapeHTML(formatAnnouncementDate(a.createdAt))}</div>
+      </div>
+      <div class="admin-item-buttons">
+        <button type="button" class="secondary" data-announcement-edit="${escapeHTML(a.id)}">編集</button>
+        <button type="button" class="secondary" data-announcement-delete="${escapeHTML(a.id)}">削除</button>
+      </div>
+    </div>`).join("") : `<div class="admin-item-sub">公開中のお知らせはありません</div>`;
+}
+
+function resetAnnouncementForm() {
+  editingAnnouncementId = null;
+  document.getElementById("announcementForm")?.reset();
+  const submit = document.getElementById("announcementSubmitButton");
+  if (submit) submit.textContent = "お知らせを公開する";
+  document.getElementById("announcementEditCancelButton")?.classList.add("hidden");
+  const errorEl = document.getElementById("announcementFormError");
+  if (errorEl) errorEl.textContent = "";
+}
+
+document.getElementById("announcementForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!isAdminUser() || announcementSubmitting) return;
+  const errorEl = document.getElementById("announcementFormError");
+  const button = document.getElementById("announcementSubmitButton");
+  const title = (document.getElementById("announcementTitleInput")?.value || "").trim();
+  const body = (document.getElementById("announcementBodyInput")?.value || "").trim();
+  const error = !title ? "タイトルを入力してください。"
+    : title.length > ANNOUNCEMENT_TITLE_MAX ? `タイトルは${ANNOUNCEMENT_TITLE_MAX}文字までです。`
+    : !body ? "本文を入力してください。"
+    : body.length > ANNOUNCEMENT_BODY_MAX ? `本文は${ANNOUNCEMENT_BODY_MAX}文字までです。`
+    : "";
+  if (errorEl) errorEl.textContent = error;
+  if (error) return;
+  announcementSubmitting = true;
+  if (button) button.disabled = true;
+  try {
+    if (editingAnnouncementId) {
+      await updateDoc(doc(db, "announcements", editingAnnouncementId), { title, body, updatedAt: serverTimestamp() });
+    } else {
+      /* ID は Firestore の自動ID（端末側で作る・衝突しない） */
+      await setDoc(doc(collection(db, "announcements")), {
+        title, body,
+        createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+        createdByUid: currentUser.uid, createdByName: username || ""
+      });
+    }
+    resetAnnouncementForm();
+  } catch (err) {
+    console.error("お知らせの保存エラー:", err);
+    if (errorEl) errorEl.textContent = editingAnnouncementId ? "保存できませんでした（削除された可能性があります）。" : "公開できませんでした。もう一度お試しください。";
+  } finally {
+    announcementSubmitting = false;
+    if (button) button.disabled = false;
+  }
+});
+
+document.getElementById("announcementEditCancelButton")?.addEventListener("click", resetAnnouncementForm);
+
+document.getElementById("announcementAdminList")?.addEventListener("click", async (event) => {
+  if (!isAdminUser()) return;
+  const target = event.target?.closest?.("button");
+  if (!target) return;
+  const a = announcements.find((x) => x.id === (target.dataset.announcementEdit || target.dataset.announcementDelete));
+  if (!a) return;
+  if (target.dataset.announcementEdit) {
+    editingAnnouncementId = a.id;
+    document.getElementById("announcementTitleInput").value = a.title;
+    document.getElementById("announcementBodyInput").value = a.body;
+    document.getElementById("announcementSubmitButton").textContent = "変更を保存する";
+    document.getElementById("announcementEditCancelButton")?.classList.remove("hidden");
+    document.getElementById("announcementFormError").textContent = "";
+    document.getElementById("announcementForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  if (target.dataset.announcementDelete) {
+    if (!confirm(`お知らせ「${a.title}」を削除しますか？\n削除すると元に戻せません。`)) return;
+    try {
+      await deleteDoc(doc(db, "announcements", a.id));
+      if (editingAnnouncementId === a.id) resetAnnouncementForm();
+    } catch (err) {
+      console.error("お知らせの削除エラー:", err);
+      alert("削除できませんでした。もう一度お試しください。");
+    }
+  }
+});
 
 /* =========================================================
    ゲーム部屋 共通
