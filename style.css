@@ -1295,6 +1295,9 @@ button {
 .othello-cell {
     border: 1px solid rgba(255,255,255,.55);
 
+    /* マス目は <button> なので、ブラウザ標準のボタンの色（灰色）が盤面の緑を隠していた */
+    background: transparent;
+
     display: flex;
     align-items: center;
     justify-content: center;
@@ -3960,4 +3963,270 @@ button.secondary.danger {
     color: #444;
 
     word-break: break-word;
+}
+
+
+/* ==================================================
+   未読マーク・既読表示
+================================================== */
+
+.chat-name-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+
+    min-width: 0;
+}
+
+.chat-name-row > .friend-name,
+.chat-name-row > .group-name {
+    min-width: 0;
+}
+
+.unread-dot {
+    flex-shrink: 0;
+
+    width: 8px;
+    height: 8px;
+
+    border-radius: 50%;
+
+    background: #ff3b30;
+}
+
+.message-read {
+    margin-right: 4px;
+
+    font-weight: 700;
+}
+
+
+/* ==================================================
+   グループの作成・設定
+================================================== */
+
+.chat-header-profile .group-manage-button {
+    margin-left: auto;
+
+    flex-shrink: 0;
+
+    padding: 6px 10px;
+
+    border: 1px solid #e3e5e8;
+    border-radius: 999px;
+
+    background: #fff;
+
+    font-size: 12px;
+}
+
+.group-modal-subtitle {
+    margin: 6px 0 8px;
+
+    font-size: 12px;
+    font-weight: 700;
+
+    color: #666;
+}
+
+.group-modal-note {
+    margin-bottom: 10px;
+
+    font-size: 12px;
+
+    color: #888;
+}
+
+.group-member-picker {
+    max-height: 220px;
+
+    overflow-y: auto;
+
+    margin-bottom: 10px;
+
+    border: 1px solid #eee;
+    border-radius: 10px;
+}
+
+.group-member-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    padding: 9px 12px;
+
+    border-bottom: 1px solid #f2f2f2;
+
+    font-size: 14px;
+
+    cursor: pointer;
+}
+
+.group-member-option:last-child {
+    border-bottom: none;
+}
+
+.modal-card .group-member-option input {
+    width: 18px;
+    min-height: 18px;
+    height: 18px;
+
+    margin: 0;
+}
+
+.group-manage-members {
+    list-style: none;
+
+    margin: 0 0 12px;
+    padding: 0;
+
+    border: 1px solid #eee;
+    border-radius: 10px;
+}
+
+.group-manage-member {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+
+    padding: 9px 12px;
+
+    border-bottom: 1px solid #f2f2f2;
+
+    font-size: 14px;
+}
+
+.group-manage-member:last-child {
+    border-bottom: none;
+}
+
+.group-remove-member {
+    padding: 4px 10px;
+
+    border: 1px solid #ffd2cf;
+    border-radius: 999px;
+
+    background: #fff5f4;
+    color: #d93025;
+
+    font-size: 12px;
+}
+
+.group-add-button {
+    width: 100%;
+
+    min-height: 40px;
+
+    margin-bottom: 12px;
+
+    border: none;
+    border-radius: 10px;
+}
+
+.group-manage-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.group-manage-actions button {
+    flex: 1;
+
+    min-height: 40px;
+
+    border-radius: 10px;
+
+    font-size: 13px;
+}
+
+.group-leave-button {
+    border: 1px solid #e3e5e8;
+
+    background: #fff;
+}
+
+.group-delete-button {
+    border: none;
+
+    background: #d93025;
+    color: #fff;
+}
+
+.group-modal-error {
+    min-height: 1em;
+
+    margin: 4px 0 8px;
+
+    font-size: 12px;
+
+    color: #d93025;
+}
+
+
+/* ==================================================
+   画像ビューア
+================================================== */
+
+.image-viewer {
+    position: fixed;
+
+    inset: 0;
+
+    z-index: 3000;
+
+    display: flex;
+    flex-direction: column;
+
+    background: #000;
+}
+
+.image-viewer-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+
+    padding: max(10px, env(safe-area-inset-top)) 12px 10px;
+}
+
+.image-viewer-button {
+    min-height: 40px;
+
+    padding: 8px 16px;
+
+    border: none;
+    border-radius: 999px;
+
+    background: rgba(255,255,255,.16);
+    color: #fff;
+
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.image-viewer-save {
+    background: #fff;
+    color: #111;
+}
+
+.image-viewer-body {
+    flex: 1;
+
+    min-height: 0;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    padding: 0 12px max(12px, env(safe-area-inset-bottom));
+}
+
+.image-viewer-body img {
+    max-width: 100%;
+    max-height: 100%;
+
+    object-fit: contain;
+
+    border-radius: 6px;
 }
