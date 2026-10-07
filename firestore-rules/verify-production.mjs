@@ -51,6 +51,26 @@ function encode(value) {
 }
 const fields = (obj) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, encode(v)]));
 
+/* ----- 公開直後のルールの反映待ち -----
+   ルールを公開してから本番全体に行き渡るまで、最大1分ほどかかる。そのあいだは古いルールで判定されて
+   「許可」（データが無いときは 404）が返ることがあるので、「拒否されるはず」の確認は、拒否が返るまで数秒おきに確かめ直す。
+   最大 90 秒待っても拒否にならなければ失敗（最後の結果をそのまま記録する）。
+   許可されて書き込めてしまったときは、onAllowed で消してから確かめ直す */
+const PROPAGATION_TIMEOUT_MS = Number(process.env.RULES_PROPAGATION_TIMEOUT_MS || 90000);
+const PROPAGATION_INTERVAL_MS = Number(process.env.RULES_PROPAGATION_INTERVAL_MS || 5000);
+
+async function waitForDeny(attempt, { timeoutMs = PROPAGATION_TIMEOUT_MS, intervalMs = PROPAGATION_INTERVAL_MS, onAllowed } = {}) {
+  const started = Date.now();
+  for (let tries = 1; ; tries++) {
+    const result = await attempt();
+    const waitedMs = Date.now() - started;
+    if (result.status === "DENY") return { ...result, tries, waitedMs };
+    if (result.status === "ALLOW" && onAllowed) await onAllowed();
+    if (waitedMs + intervalMs > timeoutMs) return { ...result, tries, waitedMs };
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 async function main() {
   const credentials = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || "{}");
   if (credentials.project_id !== EXPECTED_PROJECT_ID) throw new Error("サービスアカウントのプロジェクトが違います");
@@ -114,6 +134,13 @@ async function main() {
     const remove = (docPath) => call("DELETE", `${BASE}/${docPath}`);
     const get = (docPath, token) => call("GET", `${BASE}/${docPath}`, undefined, token);
     const check = async (label, expected, promise) => { const r = await promise; record(label, expected, r.status, r.text); };
+    /* 公開直後の反映待ちを考えて、拒否が返るまで確かめ直す（廃止したイベント機能の確認だけに使う） */
+    const propagationNotes = [];
+    const checkDeniedAfterPropagation = async (label, attempt, onAllowed) => {
+      const r = await waitForDeny(attempt, { onAllowed });
+      if (r.tries > 1) propagationNotes.push(`${label}：${r.tries}回目（約${Math.round(r.waitedMs / 1000)}秒後）に${r.status === "DENY" ? "拒否を確認" : "最後まで拒否にならず"}`);
+      record(label, "DENY", r.status, r.text);
+    };
 
     /* ① 手動レース：一般ユーザーは直接書き換えられない */
     await check("手動レースの作成", "DENY", create("derbyManualRaces", ids.createRace, { raceId: ids.createRace, dayId: "2000-01-02", status: "scheduled", betCount: 0, openAt: old, closeAt: old, raceAt: old }));
@@ -123,10 +150,13 @@ async function main() {
     await check("手動レースの削除", "DENY", remove(`derbyManualRaces/${ids.closedRace}`));
 
     /* ② 廃止したイベント機能：読み取りも書き込みもできない（存在しない ID で確かめる） */
-    await check("イベントの読み取り（廃止）", "DENY", get(`events/${ids.retiredEvent}`));
-    await check("イベントの作成（廃止）", "DENY", create("events", ids.retiredEvent, { title: "（自動テスト）", participantCount: 0 }));
-    await check("イベント参加記録の読み取り（廃止）", "DENY", get(`eventParticipants/${ids.retiredEvent}_${TEST_UID}`));
-    await check("イベント参加記録の作成（廃止）", "DENY", create("eventParticipants", `${ids.retiredEvent}_${TEST_UID}`, { eventId: ids.retiredEvent, uid: TEST_UID, username: "自動テスト", joinedAt: new Date() }));
+    /*    公開直後は古いルールで判定されることがあるので、拒否が返るまで数秒おきに確かめ直す（最大 90 秒） */
+    const retiredEventRef = db.doc(`events/${ids.retiredEvent}`);
+    const retiredEntryRef = db.doc(`eventParticipants/${ids.retiredEvent}_${TEST_UID}`);
+    await checkDeniedAfterPropagation("イベントの読み取り（廃止）", () => get(`events/${ids.retiredEvent}`));
+    await checkDeniedAfterPropagation("イベントの作成（廃止）", () => create("events", ids.retiredEvent, { title: "（自動テスト）", participantCount: 0 }), () => retiredEventRef.delete());
+    await checkDeniedAfterPropagation("イベント参加記録の読み取り（廃止）", () => get(`eventParticipants/${ids.retiredEvent}_${TEST_UID}`));
+    await checkDeniedAfterPropagation("イベント参加記録の作成（廃止）", () => create("eventParticipants", `${ids.retiredEvent}_${TEST_UID}`, { eventId: ids.retiredEvent, uid: TEST_UID, username: "自動テスト", joinedAt: new Date() }), () => retiredEntryRef.delete());
 
     /* ③ 読み取りと、管理用以外のデータ（今まで通りのルール） */
     await check("手動レースの読み取り", "ALLOW", get(`derbyManualRaces/${ids.closedRace}`));
@@ -148,6 +178,7 @@ async function main() {
   const passed = results.filter((r) => r.ok).length;
   out("");
   out(`- ${passed} / ${results.length} 期待どおり。確認用のデータとユーザーは削除しました`);
+  if (propagationNotes.length) out(`- ルールの反映待ち：${propagationNotes.join(" ／ ")}`);
   for (const r of results.filter((x) => !x.ok)) console.error(`期待と違う: ${r.label} → ${r.actual} ${r.detail}`);
   return passed === results.length;
 }
