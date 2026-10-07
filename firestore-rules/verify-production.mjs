@@ -105,6 +105,8 @@ async function main() {
   const record = (label, expected, actual, detail = "") => {
     results.push({ label, expected, actual, ok: expected === actual, detail });
   };
+  /* ルールの反映待ちで確かめ直した項目のメモ（最後のまとめに出すので、try の外で宣言する） */
+  const propagationNotes = [];
 
   try {
     const old = new Date("2000-01-01T00:00:00Z");
@@ -135,7 +137,6 @@ async function main() {
     const get = (docPath, token) => call("GET", `${BASE}/${docPath}`, undefined, token);
     const check = async (label, expected, promise) => { const r = await promise; record(label, expected, r.status, r.text); };
     /* 公開直後の反映待ちを考えて、拒否が返るまで確かめ直す（廃止したイベント機能の確認だけに使う） */
-    const propagationNotes = [];
     const checkDeniedAfterPropagation = async (label, attempt, onAllowed) => {
       const r = await waitForDeny(attempt, { onAllowed });
       if (r.tries > 1) propagationNotes.push(`${label}：${r.tries}回目（約${Math.round(r.waitedMs / 1000)}秒後）に${r.status === "DENY" ? "拒否を確認" : "最後まで拒否にならず"}`);
