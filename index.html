@@ -1433,9 +1433,11 @@
      JavaScript
 ================================================== -->
 
+<!-- メンテナンスの ON / OFF は maintenance.js の MAINTENANCE_MODE で切り替える。
+     OFF のとき（とテスト環境）は、data-app-src のアプリ本体を読み込む -->
 <script
-    type="module"
-    src="./script.js?v=20261008-admin"
+    src="./maintenance.js?v=20261007-maint"
+    data-app-src="./script.js?v=20261008-admin"
 ></script>
 
 
