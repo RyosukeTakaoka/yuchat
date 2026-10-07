@@ -22,7 +22,7 @@ on:
     - cron: "41 1 * * *"   # 10:41 JST 起動 → 11:30 まで待って開催
     - cron: "5 2 * * *"    # 11:05 JST 起動 → 11:30 まで待って開催（上の実行が遅れた・失敗したときの保険）
     - cron: "39 2 * * *"   # 11:39 JST 予備（11:30 の開催・精算の確認）
-    - cron: "17 3 * * *"   # 12:17 JST 予備
+    - cron: "41 3 * * *"   # 12:41 JST 起動 → 13:00 まで待って1日1回の処理（株価・利息・総資産ランキング）。11:30 の予備も兼ねる
     - cron: "13 5 * * *"   # 14:13 JST 起動 → 15:02 まで待って開催
     - cron: "37 5 * * *"   # 14:37 JST 起動 → 15:02 まで待って開催（上の実行が遅れた・失敗したときの保険）
     - cron: "11 6 * * *"   # 15:11 JST 予備（開催・精算の確認）
@@ -69,5 +69,8 @@ jobs:
         if: steps.secret.outputs.ready == 'true'
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          # ゆう株の株価・ニュースの乱数に使う秘密値（公開リポジトリから翌日の株価を計算されないように）。
+          # 未登録のときは、サービスアカウントの鍵から作った値を使う（鍵そのものは使わない）
+          STOCK_SEED_SECRET: ${{ secrets.STOCK_SEED_SECRET }}
           DERBY_WAIT_FOR_RACE: "1"
         run: node run.mjs
