@@ -4,7 +4,7 @@ rules_version = '2';
 //
 // もとのルール（Firebase Console に公開中のもの）：
 //   match /{document=**} { allow read, write: if request.auth != null; }
-// を土台にして、管理者用のデータ（手動レース）だけを守るように変えている。
+// を土台にして、管理者用のデータ（手動レース・お知らせ）だけを守るように変えている。
 // それ以外のコレクション（users / friends / groups / messages / gameRooms / gameInvites /
 // races / raceBets / raceLogs / fcmTokens など）は、もとのルールと同じ「ログイン済みなら読み書き可」のまま。
 //
@@ -30,7 +30,7 @@ service cloud.firestore {
 
     // 下のコレクションは、このあとの専用のルールだけで書き込みを判定する
     function isAdminManagedCollection(collection) {
-      return collection in ['derbyManualRaces'];
+      return collection in ['derbyManualRaces', 'announcements'];
     }
 
     // 廃止した機能のコレクション。ブラウザからは読み取りも書き込みもできない
@@ -66,6 +66,35 @@ service cloud.firestore {
           && resource.data.get('status', 'scheduled') == 'scheduled'
           && request.time >= resource.data.openAt
           && request.time < resource.data.closeAt;
+      }
+    }
+
+    // ===== お知らせ（announcements/{announcementId}） =====
+    // 読み取り：ログイン済みなら誰でも
+    // 作成・編集・削除：管理者だけ（項目・文字数・作成日時と作成者は書き換えられないことも確かめる）
+    // 未読の管理は users/{名前}.lastAnnouncementReadAt（users は今まで通りのルール）。お知らせ側には書かない
+    match /announcements/{announcementId} {
+      allow read: if signedIn();
+      allow create: if isAdmin()
+        && isValidAnnouncement(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.createdByUid == request.auth.uid;
+      allow update: if isAdmin()
+        && isValidAnnouncement(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'body', 'updatedAt'])
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
+
+      function isValidAnnouncement(data) {
+        return data.keys().hasOnly(['title', 'body', 'createdAt', 'updatedAt', 'createdByUid', 'createdByName'])
+          && data.keys().hasAll(['title', 'body', 'createdAt', 'updatedAt', 'createdByUid', 'createdByName'])
+          && data.title is string && data.title.size() >= 1 && data.title.size() <= 50
+          && data.body is string && data.body.size() >= 1 && data.body.size() <= 500
+          && data.createdByUid is string
+          && data.createdByName is string && data.createdByName.size() <= 100
+          && data.createdAt is timestamp
+          && data.updatedAt is timestamp;
       }
     }
   }

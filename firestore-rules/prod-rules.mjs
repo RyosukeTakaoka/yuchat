@@ -107,6 +107,7 @@ const userA = { uid: "rulesTestUserA", token: {} };
 const fakeAdmin = { uid: "rulesTestFakeAdmin", token: { email: "admin@example.com", name: "admin" } };
 
 const manualRace = { raceId: "2030-01-01-m1200", dayId: "2030-01-01", status: "scheduled", betCount: 0, createdByUid: ADMIN_UID };
+const announcementDoc = { title: "お知らせ", body: "本文", createdByUid: ADMIN_UID, createdByName: "admin" };
 const eventDoc = { title: "テスト", description: "", location: "", capacity: 0, status: "scheduled", participantCount: 0, createdByUid: ADMIN_UID };
 
 function testCase(expectation, label, auth, method, docPath, { data, existing } = {}) {
@@ -139,6 +140,15 @@ const TEST_CASES = [
   testCase("DENY", "一般：参加記録の読み取り（廃止）", userA, "get", "eventParticipants/ev-test_rulesTestUserA", { existing: { eventId: "ev-test", uid: userA.uid } }),
   testCase("DENY", "一般：参加記録の作成（廃止）", userA, "create", "eventParticipants/ev-test_rulesTestUserA", { data: { eventId: "ev-test", uid: userA.uid, username: "x" } }),
   testCase("DENY", "一般：参加記録の削除（廃止）", userA, "delete", "eventParticipants/ev-test_rulesTestUserA", { existing: { eventId: "ev-test", uid: userA.uid } }),
+  // お知らせ（announcements）：読み取りはログイン済みなら誰でも・作成/編集/削除は管理者だけ
+  testCase("ALLOW", "一般：お知らせの読み取り", userA, "get", "announcements/a1", { existing: announcementDoc }),
+  testCase("ALLOW", "管理者：お知らせの削除", admin, "delete", "announcements/a1", { existing: announcementDoc }),
+  testCase("DENY", "一般：お知らせの作成", userA, "create", "announcements/a1", { data: announcementDoc }),
+  testCase("DENY", "一般：お知らせの編集", userA, "update", "announcements/a1", { data: { ...announcementDoc, title: "乗っ取り" }, existing: announcementDoc }),
+  testCase("DENY", "一般：お知らせの削除", userA, "delete", "announcements/a1", { existing: announcementDoc }),
+  testCase("DENY", "メール・名前が管理者風でも UID が違う人：お知らせの削除", fakeAdmin, "delete", "announcements/a1", { existing: announcementDoc }),
+  testCase("DENY", "未ログイン：お知らせの読み取り", null, "get", "announcements/a1", { existing: announcementDoc }),
+  testCase("ALLOW", "users：自分の lastAnnouncementReadAt の更新（既存の users のルールのまま）", userA, "update", "users/alice", { data: { uid: userA.uid, coins: 1000, lastAnnouncementReadAt: "2030-01-01" }, existing: { uid: userA.uid, coins: 1000 } }),
   // 一般ユーザーの読み取りと既存データは今まで通り
   testCase("ALLOW", "一般：手動レースの読み取り", userA, "get", "derbyManualRaces/2030-01-01-m1200", { existing: manualRace }),
   testCase("ALLOW", "users：自分のデータ更新", userA, "update", "users/alice", { data: { uid: userA.uid, coins: 900 }, existing: { uid: userA.uid, coins: 1000 } }),
