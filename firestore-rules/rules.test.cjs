@@ -298,6 +298,33 @@ const min = (m) => new Date(Date.now() + m * 60000);
   await ok("users の読み取り（他人のデータ・友達追加やランキング用）は今まで通り", getDoc(doc(A, "users/erin")));
   await ok("新しい名前での新規登録（自分の uid）は今まで通り", setDoc(doc(A, "users/alice-new2"), { uid: "userA", name: "alice-new2", createdAt: serverTimestamp() }, { merge: true }));
 
+  log.push("--- 👤 ユーザー管理：停止の記録・操作の記録・削除の進み具合は、通知サーバー（サービスアカウント）だけが書く");
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const d = ctx.firestore();
+    await setDoc(doc(d, "suspendedUsers/userB"), { uid: "userB", name: "bob", reason: "", byUid: ADMIN });
+    await setDoc(doc(d, "adminAuditLogs/log1"), { action: "setPassword", targetUid: "userB", byUid: ADMIN });
+    await setDoc(doc(d, "userDeletions/userB"), { uid: "userB", name: "bob", status: "failed" });
+  });
+  const suspendedB = env.authenticatedContext("userB").firestore();
+  await ng("停止されたユーザー本人も、停止の記録は読めない（理由は管理者だけ）", getDoc(doc(suspendedB, "suspendedUsers/userB")));
+  await ng("一般ユーザーは、他人の停止の記録を読めない", getDoc(doc(A, "suspendedUsers/userB")));
+  await ng("一般ユーザーは、停止中のユーザーの一覧を読めない", getDocs(collection(A, "suspendedUsers")));
+  await ok("管理者は停止の記録を読める", getDoc(doc(admin, "suspendedUsers/userB")));
+  await ok("管理者は停止中のユーザーの一覧を読める", getDocs(collection(admin, "suspendedUsers")));
+  await ng("停止されたユーザー本人が、停止の記録を消す", deleteDoc(doc(suspendedB, "suspendedUsers/userB")));
+  await ng("一般ユーザーが他人を停止する（記録を作る）", setDoc(doc(A, "suspendedUsers/userC"), { uid: "userC" }));
+  await ng("管理者でも、ブラウザから停止の記録は書けない（Worker だけ）", setDoc(doc(admin, "suspendedUsers/userC"), { uid: "userC" }));
+  await ok("管理者は操作の記録を読める", getDocs(collection(admin, "adminAuditLogs")));
+  await ng("一般ユーザーは操作の記録を読めない", getDoc(doc(A, "adminAuditLogs/log1")));
+  await ng("一般ユーザーが操作の記録を作る", addDoc(collection(A, "adminAuditLogs"), { action: "setPassword" }));
+  await ng("管理者でも、ブラウザから操作の記録は書き換えられない", updateDoc(doc(admin, "adminAuditLogs/log1"), { action: "x" }));
+  await ng("管理者でも、ブラウザから操作の記録は消せない", deleteDoc(doc(admin, "adminAuditLogs/log1")));
+  await ok("管理者は削除の進み具合を読める", getDoc(doc(admin, "userDeletions/userB")));
+  await ng("一般ユーザーは削除の進み具合を読めない", getDoc(doc(suspendedB, "userDeletions/userB")));
+  await ng("一般ユーザーが削除の進み具合を書き換える", setDoc(doc(suspendedB, "userDeletions/userB"), { status: "completed" }));
+  await ng("管理者でも、ブラウザから削除の進み具合は書けない", setDoc(doc(admin, "userDeletions/userB"), { status: "completed" }));
+  await ng("未ログイン：停止の記録の読み取り", getDoc(doc(anon, "suspendedUsers/userB")));
+
   await env.cleanup();
   console.log(log.join("\n"));
   console.log(`\nRules セキュリティテスト: ${pass} PASS / ${fail} FAIL`);

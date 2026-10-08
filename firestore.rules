@@ -46,13 +46,15 @@ service cloud.firestore {
     }
 
     // 下のコレクションは管理者だけが読める
+    //   adminAuditLogs：👤 ユーザー管理の操作の記録／userDeletions：完全削除の進み具合／suspendedUsers：停止中のユーザー
     function isAdminOnlyReadCollection(collection) {
-      return collection in ['adminNameChanges'];
+      return collection in ['adminNameChanges', 'adminAuditLogs', 'userDeletions', 'suspendedUsers'];
     }
 
     // 下のコレクションは自動処理（サービスアカウント）だけが書く。ブラウザからは書き込めない
+    //   adminAuditLogs・userDeletions・suspendedUsers は、管理者の操作を受けた通知サーバー（Cloudflare Worker）だけが書く
     function isServerOnlyCollection(collection) {
-      return collection in ['market', 'rankings'];
+      return collection in ['market', 'rankings', 'adminAuditLogs', 'userDeletions', 'suspendedUsers'];
     }
 
     // ===== もとのルール（管理者用・自動処理用・廃止したコレクション以外は今まで通り） =====
@@ -200,6 +202,20 @@ service cloud.firestore {
         && existsAfter(/databases/$(database)/documents/users/$(request.resource.data.to))
         && !existsAfter(/databases/$(database)/documents/users/$(oldName));
       allow delete: if false;
+    }
+
+    // ===== 👤 ユーザー管理の記録：管理者だけが読める。書き込みは通知サーバー（Cloudflare Worker）だけ =====
+    //   suspendedUsers：停止中のユーザー（理由・停止した日時）／adminAuditLogs：操作の記録／userDeletions：完全削除の進み具合
+    match /suspendedUsers/{uid} {
+      allow read: if isAdmin();
+    }
+
+    match /adminAuditLogs/{logId} {
+      allow read: if isAdmin();
+    }
+
+    match /userDeletions/{uid} {
+      allow read: if isAdmin();
     }
 
     // ===== 総資産ランキング（rankings/assets）：管理者が名前を強制変更したときだけ、ランキングの名前を書き換えられる =====

@@ -205,6 +205,7 @@ const derbyView = document.getElementById("derbyView");
 const gamesView = document.getElementById("gamesView");
 const mypageView = document.getElementById("mypageView");
 const announcementsView = document.getElementById("announcementsView");
+const userManageView = document.getElementById("userManageView");
 const economyView = document.getElementById("economyView");
 const economyContent = document.getElementById("economyContent");
 
@@ -329,6 +330,7 @@ function describeFirebaseError(error, fallback) {
   if (code === "resource-exhausted" || code === "too-many-requests") return "混み合っています。しばらく待ってからお試しください。";
   if (code === "invalid-argument") return "保存できないデータが含まれていました。別の名前やプロフィール画像でお試しください。";
   if (code === "operation-not-allowed") return "このログイン方法は現在使えません。";
+  if (code === "user-disabled") return "このアカウントは管理者によって停止されています。";
   return code ? `${fallback}（${code}）` : fallback;
 }
 
@@ -3147,7 +3149,9 @@ tabButtons.forEach((button) => {
 });
 
 function switchView(view) {
-  const views = { chat: chatView, derby: derbyView, economy: economyView, games: gamesView, announcements: announcementsView, mypage: mypageView };
+  /* 👤 ユーザー管理は管理者だけ（タブも管理者にだけ表示） */
+  if (view === "usermanage" && !isAdminUser()) view = "chat";
+  const views = { chat: chatView, derby: derbyView, economy: economyView, games: gamesView, announcements: announcementsView, mypage: mypageView, usermanage: userManageView };
 
   Object.entries(views).forEach(([name, element]) => {
     if (!element) return;
@@ -3167,6 +3171,7 @@ function switchView(view) {
   if (view === "economy") openEconomyView();
   if (view === "announcements") openAnnouncementsView();
   else stopAnnouncementsSubscription();
+  if (view === "usermanage") openUserManageView();
 }
 
 /* =========================================================
@@ -3192,6 +3197,7 @@ logoutButton?.addEventListener("click", async () => {
     selectedBetRaceId = null;
     document.getElementById("derbyAdminPanel")?.classList.add("hidden");
     resetAnnouncementsState();
+    resetUserManageState();
     pendingGameInvites = [];
     gameInvitesInitialized = false;
     if (unsubscribeMyCoins) { unsubscribeMyCoins(); unsubscribeMyCoins = null; }
@@ -5089,6 +5095,7 @@ function updateAdminVisibility() {
   const admin = isAdminUser();
   document.getElementById("derbyAdminPanel")?.classList.toggle("hidden", !admin);
   document.getElementById("announcementAdminPanel")?.classList.toggle("hidden", !admin);
+  updateUserManageVisibility();
   if (admin) renderManualRaceAdminList();
 }
 
@@ -5247,6 +5254,531 @@ async function checkRenamedByAdmin() {
 }
 
 /* Firestore の Timestamp / Date / 文字列 → Date */
+/* =========================================================
+   👤 ユーザー管理（管理者だけ）
+   ・パスワード設定・停止・削除は、ブラウザ（Firebase のクライアント）からは他人のアカウントに対してできないので、
+     通知サーバー（Cloudflare Worker）の /admin に、管理者の ID トークンを付けて頼む
+     （Worker は ID トークンの uid が管理者のときだけ実行する。タブを隠しているのは見た目のためだけ）
+   ・パスワードは Firebase Authentication にだけ設定し、Firestore・ログには残さない。あとから表示もしない（必要なら再設定）
+   ・停止したアカウントは、アプリを開き直したとき Firebase Authentication がログアウトさせる（開いたままの端末は最大1時間ほど）
+   ・サブアカウントかどうかは自動で判定しない。一覧を見て、管理者が1件ずつ判断する
+     （確信がないときは、まず「停止」。完全削除は取り消せないので、ユーザー名の入力が必須）
+========================================================= */
+
+const ADMIN_ENDPOINT = NOTIFY_ENDPOINT.replace(/\/notify$/, "/admin");
+const ADMIN_PASSWORD_MIN_LENGTH = 8;
+const ADMIN_PASSWORD_MAX_LENGTH = 128;
+
+const userManageTabButton = document.getElementById("userManageTabButton");
+const userManageListEl = document.getElementById("userManageList");
+const userManageStatusEl = document.getElementById("userManageStatus");
+const userManagePendingEl = document.getElementById("userManagePending");
+const userManageAuthOnlyEl = document.getElementById("userManageAuthOnly");
+const userManageAuthOnlyListEl = document.getElementById("userManageAuthOnlyList");
+const userManageAuthOnlySummaryEl = document.getElementById("userManageAuthOnlySummary");
+const userManageSearchInput = document.getElementById("userManageSearchInput");
+const userManageSortSelect = document.getElementById("userManageSortSelect");
+
+let userManageData = null;
+let userManageLoading = false;
+let userManageBusy = false;
+let userManageSeq = 0;
+
+const ADMIN_ERROR_MESSAGES = {
+  not_admin: "管理者としてログインしていないため、操作できません。",
+  invalid_uid: "対象のユーザーが正しくありません。",
+  invalid_password: `パスワードは${ADMIN_PASSWORD_MIN_LENGTH}文字以上${ADMIN_PASSWORD_MAX_LENGTH}文字以内にしてください。`,
+  user_not_found: "このユーザーのデータ（users）が見つかりません。",
+  multiple_user_docs: "同じ uid のユーザーデータが複数あります。先にどちらかを整理してください。",
+  auth_user_not_found: "Firebase Authentication にこのユーザーがありません。",
+  other_email: "このユーザーには別のメールアドレスが設定されているため、パスワードを設定しませんでした。",
+  deletion_in_progress: "このユーザーは削除の途中です。「完全削除」から続きを実行してください。",
+  cannot_target_admin: "管理者のアカウントは停止・削除できません。",
+  confirm_mismatch: "入力したユーザー名が一致しません。",
+  has_user_doc: "このログイン情報にはユーザーデータがあるため、「完全削除」を使ってください。",
+  has_data: "このログイン情報に関係するデータが残っているため、削除しませんでした。",
+  verify_failed: "設定の確認に失敗しました。もう一度お試しください。",
+  auth_EMAIL_EXISTS: "内部用のメールアドレスが別のアカウントで使われています。",
+  invalid_message_id: "通知サーバー（Cloudflare Worker）がまだ管理機能に対応していません。Worker を更新してください。",
+  invalid_token: "ログインの確認に失敗しました。ログインし直してください。",
+  unauthenticated: "ログインの確認に失敗しました。ログインし直してください。"
+};
+
+function describeAdminError(error) {
+  const code = error?.code || "";
+  if (code === "blocked") {
+    const blockers = error.detail?.blockers || [];
+    if (blockers.includes("unsettled_bets")) return `未精算のゆうダービーの馬券が ${error.detail?.counts?.raceBetsUnsettled || 1} 件あるため、削除できません。精算されてから削除してください。`;
+    if (blockers.includes("admin")) return ADMIN_ERROR_MESSAGES.cannot_target_admin;
+    return "削除できない理由があります。";
+  }
+  if (code === "delete_failed") return `削除の途中で止まりました（${error.detail?.step || "不明"}）。もう一度「完全削除」を実行すると、続きから削除します。`;
+  if (ADMIN_ERROR_MESSAGES[code]) return ADMIN_ERROR_MESSAGES[code];
+  if (code === "network") return "通知サーバー（Cloudflare Worker）に接続できませんでした。";
+  if (code.startsWith("auth_")) return `Firebase Authentication でエラーになりました（${code.slice(5)}）。`;
+  return `処理できませんでした（${code || "不明なエラー"}）。`;
+}
+
+async function callAdminApi(action, payload = {}) {
+  if (!isAdminUser()) throw Object.assign(new Error("not_admin"), { code: "not_admin" });
+  const token = await currentUser.getIdToken();
+  let response;
+  try {
+    response = await fetch(ADMIN_ENDPOINT, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ action, ...payload })
+    });
+  } catch (error) {
+    throw Object.assign(new Error("network"), { code: "network" });
+  }
+  const json = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(json.error || `http_${response.status}`), { code: json.error || `http_${response.status}`, detail: json });
+  return json;
+}
+
+function updateUserManageVisibility() {
+  const admin = isAdminUser();
+  userManageTabButton?.classList.toggle("hidden", !admin);
+  if (!admin && userManageView && !userManageView.classList.contains("hidden")) switchView("chat");
+}
+
+function resetUserManageState() {
+  userManageSeq++;
+  userManageData = null;
+  userManageLoading = false;
+  userManageBusy = false;
+  if (userManageListEl) userManageListEl.innerHTML = "";
+  if (userManageAuthOnlyListEl) userManageAuthOnlyListEl.innerHTML = "";
+  userManagePendingEl?.classList.add("hidden");
+  userManageAuthOnlyEl?.classList.add("hidden");
+  if (userManageStatusEl) userManageStatusEl.textContent = "";
+  userManageTabButton?.classList.add("hidden");
+}
+
+function formatUmDate(value) {
+  const date = typeof value === "number" ? new Date(value) : toDateValue(value);
+  if (!date) return "-";
+  const jst = toJstFields(date);
+  return `${jst.getUTCFullYear()}/${jst.getUTCMonth() + 1}/${jst.getUTCDate()} ${formatJstHourMinute(date)}`;
+}
+
+function umLastLogin(entry) {
+  const auth = entry.auth;
+  return Math.max(auth?.lastLoginAt || 0, auth?.lastRefreshAt || 0) || null;
+}
+
+function umCreated(entry) {
+  return entry.auth?.createdAt || toDateValue(entry.createdAt)?.getTime() || null;
+}
+
+function umLoginMethods(auth) {
+  if (!auth) return "ログイン情報なし";
+  const labels = [];
+  if (auth.providers.includes("google.com")) labels.push("Google");
+  if (auth.providers.includes("password")) labels.push("パスワード");
+  if (auth.anonymous) labels.push("ゲスト");
+  auth.providers.filter((p) => !["google.com", "password"].includes(p)).forEach((p) => labels.push(p));
+  return labels.join("・") || "不明";
+}
+
+function umBadges(entry) {
+  const badges = [];
+  if (entry.isAdmin) badges.push(["admin", "管理者"]);
+  if (!entry.auth) badges.push(["warn", "ログイン情報なし"]);
+  else {
+    if (entry.auth.providers.includes("google.com")) badges.push(["", "Google"]);
+    if (entry.auth.anonymous) badges.push(["", "ゲスト"]);
+    badges.push(entry.auth.hasPassword ? ["ok", "パスワード設定済み"] : ["", "パスワード未設定"]);
+  }
+  if (entry.suspended || entry.auth?.disabled) badges.push(["stop", "停止中"]);
+  if (entry.deletion && entry.deletion !== "completed") badges.push(["stop", "削除途中"]);
+  if (entry.sameUidCount > 1) badges.push(["warn", `同じ uid が ${entry.sameUidCount} 件`]);
+  return badges.map(([kind, text]) => `<span class="um-badge ${kind}">${escapeHTML(text)}</span>`).join("");
+}
+
+async function openUserManageView() {
+  if (!isAdminUser()) { switchView("chat"); return; }
+  if (!userManageData && !userManageLoading) await loadUserManageList();
+  else renderUserManageList();
+}
+
+async function loadUserManageList() {
+  if (!isAdminUser() || userManageLoading) return;
+  const seq = ++userManageSeq;
+  userManageLoading = true;
+  if (userManageStatusEl) userManageStatusEl.textContent = "読み込み中…";
+  try {
+    const data = await callAdminApi("listUsers");
+    if (seq !== userManageSeq) return;
+    userManageData = data;
+    if (userManageStatusEl) userManageStatusEl.textContent = `ユーザー ${data.users.length} 人（ログイン情報だけのアカウント ${data.authOnly.length} 件）`;
+    renderUserManageList();
+  } catch (error) {
+    if (seq !== userManageSeq) return;
+    console.error("ユーザー一覧の読み込みエラー:", error);
+    if (userManageStatusEl) userManageStatusEl.textContent = describeAdminError(error);
+  } finally {
+    if (seq === userManageSeq) userManageLoading = false;
+  }
+}
+
+function renderUserManageList() {
+  if (!userManageListEl || !userManageData) return;
+  const keyword = (userManageSearchInput?.value || "").trim().toLowerCase();
+  const sort = userManageSortSelect?.value || "created";
+  const match = (text) => !keyword || String(text || "").toLowerCase().includes(keyword);
+
+  const users = userManageData.users.filter((u) => match(u.name) || match(u.uid) || match(u.auth?.googleEmail));
+  users.sort((a, b) => {
+    if (sort === "name") return a.name.localeCompare(b.name, "ja");
+    if (sort === "login") return (umLastLogin(b) || 0) - (umLastLogin(a) || 0);
+    return (umCreated(b) || 0) - (umCreated(a) || 0);
+  });
+
+  userManageListEl.innerHTML = users.length === 0
+    ? `<p class="um-note">該当するユーザーはいません。</p>`
+    : users.map((u) => `
+      <button class="um-item" type="button" data-um-uid="${escapeHTML(u.uid)}" data-um-name="${escapeHTML(u.name)}">
+        <span class="um-item-main">
+          <strong>${escapeHTML(u.name)}</strong>
+          <span class="um-badges">${umBadges(u)}</span>
+          <small>作成 ${escapeHTML(formatUmDate(umCreated(u)))} ・ 最終ログイン ${escapeHTML(formatUmDate(umLastLogin(u)))}${u.coins === null ? "" : ` ・ 🪙 ${u.coins.toLocaleString()}`}</small>
+        </span>
+        <span class="um-chevron" aria-hidden="true">›</span>
+      </button>`).join("");
+
+  const pending = userManageData.pendingDeletions || [];
+  userManagePendingEl?.classList.toggle("hidden", pending.length === 0);
+  if (userManagePendingEl) {
+    userManagePendingEl.innerHTML = pending.length === 0 ? "" : `
+      <h3>⚠ 削除の途中で止まっているアカウント</h3>
+      ${pending.map((p) => `
+        <button class="um-item" type="button" data-um-uid="${escapeHTML(p.uid)}" data-um-name="${escapeHTML(p.name)}">
+          <span class="um-item-main">
+            <strong>${escapeHTML(p.name || "（名前なし）")}</strong>
+            <small>${escapeHTML(p.status === "failed" ? `途中で止まりました（${p.failedStep || "不明"}）` : "削除中")} ・ タップして続きから削除</small>
+          </span>
+          <span class="um-chevron" aria-hidden="true">›</span>
+        </button>`).join("")}`;
+  }
+
+  const authOnly = userManageData.authOnly.filter((a) => !a.isAdmin && (match(a.uid) || match(a.auth?.googleEmail)));
+  authOnly.sort((a, b) => (umCreated(b) || 0) - (umCreated(a) || 0));
+  userManageAuthOnlyEl?.classList.toggle("hidden", userManageData.authOnly.length === 0);
+  if (userManageAuthOnlySummaryEl) userManageAuthOnlySummaryEl.textContent = `ログイン情報だけのアカウント（${userManageData.authOnly.length} 件）`;
+  if (userManageAuthOnlyListEl) {
+    userManageAuthOnlyListEl.innerHTML = authOnly.map((a) => `
+      <button class="um-item" type="button" data-um-uid="${escapeHTML(a.uid)}" data-um-name="">
+        <span class="um-item-main">
+          <strong>${escapeHTML(a.auth?.googleEmail || `uid ${a.uid.slice(0, 8)}…`)}</strong>
+          <span class="um-badges">${umBadges(a)}</span>
+          <small>作成 ${escapeHTML(formatUmDate(umCreated(a)))} ・ 最終ログイン ${escapeHTML(formatUmDate(umLastLogin(a)))}</small>
+        </span>
+        <span class="um-chevron" aria-hidden="true">›</span>
+      </button>`).join("");
+  }
+}
+
+function openUserManageModal(html) {
+  if (!modalEl) return null;
+  modalEl.innerHTML = `<div class="modal-card um-modal">${html}</div>`;
+  modalEl.classList.remove("hidden");
+  modalEl.querySelectorAll("[data-um-close]").forEach((button) => button.addEventListener("click", closeUserManageModal));
+  return modalEl;
+}
+
+/* パスワードを表示していた画面も、閉じたら中身ごと消す */
+function closeUserManageModal() {
+  if (!modalEl) return;
+  modalEl.classList.add("hidden");
+  modalEl.innerHTML = "";
+}
+
+async function openUserManageDetail(uid) {
+  if (!isAdminUser() || !uid) return;
+  openUserManageModal(`<h3>👤 ユーザーの詳細</h3><p class="um-note">読み込み中…</p><div class="modal-buttons"><button class="modal-secondary" type="button" data-um-close>閉じる</button></div>`);
+  let info;
+  try {
+    info = await callAdminApi("inspectUser", { uid });
+  } catch (error) {
+    openUserManageModal(`<h3>👤 ユーザーの詳細</h3><p class="admin-form-error">${escapeHTML(describeAdminError(error))}</p><div class="modal-buttons"><button class="modal-secondary" type="button" data-um-close>閉じる</button></div>`);
+    return;
+  }
+  renderUserManageDetail(info);
+}
+
+function renderUserManageDetail(info) {
+  const auth = info.auth;
+  const hasUserDoc = info.userDocNames.length === 1;
+  const deleting = info.deletion && info.deletion.status !== "completed";
+  const suspended = Boolean(info.suspended || auth?.disabled);
+  const rows = [
+    ["名前", info.name || "（なし）"],
+    ["uid", info.uid],
+    ["ログイン方法", umLoginMethods(auth)],
+    ["パスワード", auth ? (auth.hasPassword ? "設定済み" : "未設定") : "-"],
+    ...(auth?.googleEmail ? [["Google", auth.googleEmail]] : []),
+    ["作成日", formatUmDate(auth?.createdAt || info.user?.createdAt)],
+    ["最終ログイン", formatUmDate(Math.max(auth?.lastLoginAt || 0, auth?.lastRefreshAt || 0) || null)],
+    ...(info.user ? [["コイン", info.user.coins === null ? "-" : `🪙 ${info.user.coins.toLocaleString()}`]] : []),
+    ...(info.user?.nameChangedFrom ? [["前の名前", info.user.nameChangedFrom]] : []),
+    ["状態", deleting ? `削除の途中（${info.deletion.failedStep || info.deletion.status}）` : suspended ? `停止中${info.suspended?.reason ? `（${info.suspended.reason}）` : ""}` : "利用中"],
+    ...(info.userDocNames.length > 1 ? [["注意", `同じ uid のユーザーデータが ${info.userDocNames.length} 件あります（${info.userDocNames.join("、")}）`]] : [])
+  ];
+
+  const buttons = [];
+  if (hasUserDoc && auth && !deleting) buttons.push(`<button type="button" data-um-action="password">🔑 パスワードを${auth.hasPassword ? "再設定" : "設定"}</button>`);
+  if (!info.isAdmin && auth && !deleting) buttons.push(suspended
+    ? `<button type="button" class="secondary" data-um-action="unsuspend">▶ 停止を解除</button>`
+    : `<button type="button" class="secondary" data-um-action="suspend">⏸ アカウントを停止</button>`);
+  if (!info.isAdmin && (hasUserDoc || deleting)) buttons.push(`<button type="button" class="um-danger" data-um-action="delete">🗑 完全削除…</button>`);
+  if (!info.isAdmin && !hasUserDoc && !deleting && auth) buttons.push(`<button type="button" class="um-danger" data-um-action="deleteAuthOnly">🗑 ログイン情報を削除…</button>`);
+
+  openUserManageModal(`
+    <h3>👤 ${escapeHTML(info.name || "ログイン情報だけのアカウント")}</h3>
+    <dl class="um-detail">${rows.map(([k, v]) => `<dt>${escapeHTML(k)}</dt><dd>${escapeHTML(v)}</dd>`).join("")}</dl>
+    ${info.isAdmin ? `<p class="um-note">管理者のアカウントは停止・削除できません。</p>` : `<p class="um-note">サブアカウントかどうか確信がないときは、まず「停止」を使ってください（あとで解除できます）。完全削除は取り消せません。</p>`}
+    <div class="um-actions">${buttons.join("")}</div>
+    <div class="modal-buttons"><button class="modal-secondary" type="button" data-um-close>閉じる</button></div>
+  `);
+  modalEl.querySelector('[data-um-action="password"]')?.addEventListener("click", () => renderUserManagePassword(info));
+  modalEl.querySelector('[data-um-action="suspend"]')?.addEventListener("click", () => renderUserManageSuspend(info));
+  modalEl.querySelector('[data-um-action="unsuspend"]')?.addEventListener("click", () => runUserManageUnsuspend(info));
+  modalEl.querySelector('[data-um-action="delete"]')?.addEventListener("click", () => renderUserManageDelete(info));
+  modalEl.querySelector('[data-um-action="deleteAuthOnly"]')?.addEventListener("click", () => renderUserManageDeleteAuthOnly(info));
+}
+
+/* 読み間違えにくい文字だけで、ランダムなパスワードを作る */
+function generateAdminPassword(length = 12) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+  const limit = 256 - (256 % chars.length);
+  let out = "";
+  while (out.length < length) {
+    const bytes = crypto.getRandomValues(new Uint8Array(length * 2));
+    for (const b of bytes) {
+      if (b < limit && out.length < length) out += chars[b % chars.length];
+    }
+  }
+  return out;
+}
+
+function renderUserManagePassword(info) {
+  openUserManageModal(`
+    <h3>🔑 パスワードを${info.auth?.hasPassword ? "再設定" : "設定"}（${escapeHTML(info.name)}）</h3>
+    <p class="um-note">今の uid のまま、Firebase Authentication にパスワードを設定します。設定したパスワードは保存されず、あとから表示できません（必要になったら再設定してください）。</p>
+    <input id="umPasswordInput1" type="password" placeholder="新しいパスワード（${ADMIN_PASSWORD_MIN_LENGTH}文字以上）" autocomplete="new-password" maxlength="${ADMIN_PASSWORD_MAX_LENGTH}">
+    <input id="umPasswordInput2" type="password" placeholder="もう一度入力" autocomplete="new-password" maxlength="${ADMIN_PASSWORD_MAX_LENGTH}">
+    <label class="um-check"><input id="umPasswordShow" type="checkbox"> パスワードを表示する</label>
+    <button id="umPasswordGenerate" class="secondary um-wide" type="button">🎲 ランダムに作る</button>
+    <p id="umPasswordError" class="admin-form-error"></p>
+    <div id="umPasswordDone" class="um-done hidden"></div>
+    <div class="modal-buttons">
+      <button class="modal-secondary" type="button" data-um-close>閉じる</button>
+      <button id="umPasswordSubmit" class="modal-primary" type="button">設定する</button>
+    </div>
+  `);
+  const input1 = document.getElementById("umPasswordInput1");
+  const input2 = document.getElementById("umPasswordInput2");
+  const errorEl = document.getElementById("umPasswordError");
+  const submit = document.getElementById("umPasswordSubmit");
+  const setVisible = (visible) => { input1.type = input2.type = visible ? "text" : "password"; };
+  document.getElementById("umPasswordShow").addEventListener("change", (e) => setVisible(e.target.checked));
+  document.getElementById("umPasswordGenerate").addEventListener("click", () => {
+    const password = generateAdminPassword();
+    input1.value = input2.value = password;
+    document.getElementById("umPasswordShow").checked = true;
+    setVisible(true);
+  });
+  submit.addEventListener("click", async () => {
+    showError(errorEl, "");
+    const p1 = input1.value, p2 = input2.value;
+    if (p1.length < ADMIN_PASSWORD_MIN_LENGTH || p1.length > ADMIN_PASSWORD_MAX_LENGTH) return showError(errorEl, ADMIN_ERROR_MESSAGES.invalid_password);
+    if (p1 !== p2) return showError(errorEl, "パスワードが一致しません。");
+    if (userManageBusy) return;
+    userManageBusy = true;
+    submit.disabled = true;
+    try {
+      await callAdminApi("setPassword", { uid: info.uid, password: p1 });
+      input1.readOnly = input2.readOnly = true;
+      submit.classList.add("hidden");
+      document.getElementById("umPasswordGenerate").classList.add("hidden");
+      const done = document.getElementById("umPasswordDone");
+      done.classList.remove("hidden");
+      done.textContent = `設定しました。「ユーザー名とパスワードでログイン」から、ユーザー名「${info.name}」とこのパスワードで入れます。この画面を閉じるとパスワードは表示できなくなるので、本人に伝えてから閉じてください。`;
+      loadUserManageList();
+    } catch (error) {
+      console.error("パスワード設定エラー:", error.code || error.message);
+      showError(errorEl, describeAdminError(error));
+    } finally {
+      userManageBusy = false;
+      submit.disabled = false;
+    }
+  });
+}
+
+function renderUserManageSuspend(info) {
+  openUserManageModal(`
+    <h3>⏸ アカウントを停止（${escapeHTML(info.name || info.uid)}）</h3>
+    <p class="um-note">ログインできなくなります。すでに開いている端末も、最大1時間ほどで使えなくなります（アプリを開き直したときは、すぐにログアウトします）。データは消えず、あとで「停止を解除」できます。</p>
+    <input id="umSuspendReason" type="text" maxlength="200" placeholder="理由（任意・管理者だけが見られます）">
+    <p id="umSuspendError" class="admin-form-error"></p>
+    <div class="modal-buttons">
+      <button class="modal-secondary" type="button" data-um-close>やめる</button>
+      <button id="umSuspendSubmit" class="modal-primary" type="button">停止する</button>
+    </div>
+  `);
+  const submit = document.getElementById("umSuspendSubmit");
+  submit.addEventListener("click", async () => {
+    if (userManageBusy) return;
+    if (!confirm(`「${info.name || info.uid}」を停止しますか？`)) return;
+    userManageBusy = true;
+    submit.disabled = true;
+    try {
+      await callAdminApi("suspend", { uid: info.uid, reason: document.getElementById("umSuspendReason").value });
+      closeUserManageModal();
+      showAppToast("👤 ユーザー管理", `「${info.name || info.uid}」を停止しました`);
+      loadUserManageList();
+    } catch (error) {
+      showError(document.getElementById("umSuspendError"), describeAdminError(error));
+    } finally {
+      userManageBusy = false;
+      submit.disabled = false;
+    }
+  });
+}
+
+async function runUserManageUnsuspend(info) {
+  if (userManageBusy) return;
+  if (!confirm(`「${info.name || info.uid}」の停止を解除しますか？`)) return;
+  userManageBusy = true;
+  try {
+    await callAdminApi("unsuspend", { uid: info.uid });
+    closeUserManageModal();
+    showAppToast("👤 ユーザー管理", `「${info.name || info.uid}」の停止を解除しました`);
+    loadUserManageList();
+  } catch (error) {
+    alert(describeAdminError(error));
+  } finally {
+    userManageBusy = false;
+  }
+}
+
+function describeDeletionPlan(plan) {
+  const c = plan.counts;
+  const line = (text, n, kind = "del") => `<li class="${kind}">${escapeHTML(text)}：${n}件</li>`;
+  const groupLines = plan.groups.map((g) => g.action === "transfer"
+    ? `<li class="change">グループ「${escapeHTML(g.name)}」：退出して、${escapeHTML(g.nextOwner)} さんに管理者を引き継ぐ</li>`
+    : g.action === "delete"
+      ? `<li class="del">グループ「${escapeHTML(g.name)}」：ほかにメンバーがいないので、グループとそのメッセージを削除</li>`
+      : `<li class="change">グループ「${escapeHTML(g.name)}」：メンバーから外す</li>`).join("");
+  return `
+    <ul class="um-plan">
+      ${line("1対1のメッセージ（削除）", c.friendMessages)}
+      ${line("フレンド関係（削除）", c.friends)}
+      ${groupLines}
+      ${line("グループで送ったメッセージ（残す）", c.groupMessagesKept, "keep")}
+      ${line("ゆうダービーの精算済みの馬券（削除）", c.raceBetsSettled)}
+      ${c.raceBetsUnsettled ? line("ゆうダービーの未精算の馬券（あるため削除できません）", c.raceBetsUnsettled, "block") : ""}
+      ${c.gameRoomsDelete + c.gameRoomsLeave ? line("ゲームルーム（作ったものは削除・参加中は退出）", c.gameRoomsDelete + c.gameRoomsLeave, "change") : ""}
+      ${c.gameInvites + c.gameRoomOwners ? line("ゲームの招待・ルームの記録（削除）", c.gameInvites + c.gameRoomOwners) : ""}
+      ${c.fcmTokens ? line("通知を受け取る端末の登録（削除）", c.fcmTokens) : ""}
+      ${c.adminNameChanges ? line("名前変更の記録（削除）", c.adminNameChanges) : ""}
+      ${c.rankingEntry ? line("総資産ランキングの行（削除）", c.rankingEntry) : ""}
+      ${line("ユーザーデータ（コイン・銀行・株など）（削除）", c.userDoc + c.userSubDocs)}
+      <li class="del">ログイン情報（Firebase Authentication）：最後に削除</li>
+    </ul>`;
+}
+
+function renderUserManageDelete(info) {
+  const name = info.name;
+  const blocked = info.plan.blockers.length > 0;
+  openUserManageModal(`
+    <h3>🗑 完全削除（${escapeHTML(name)}）</h3>
+    <p class="um-warning">完全削除は取り消せません。サブアカウントかどうか確信がないときは、先に「停止」を使ってください。</p>
+    <p class="um-note">削除すると、次のようになります（削除後、この名前はすぐに別の人が使えるようになります）。</p>
+    ${describeDeletionPlan(info.plan)}
+    ${blocked ? `<p class="admin-form-error">${escapeHTML(describeAdminError({ code: "blocked", detail: { blockers: info.plan.blockers, counts: info.plan.counts } }))}</p>` : ""}
+    <label class="um-confirm-label" for="umDeleteConfirm">削除するには、ユーザー名「${escapeHTML(name)}」を入力してください</label>
+    <input id="umDeleteConfirm" type="text" autocomplete="off" ${blocked ? "disabled" : ""}>
+    <p id="umDeleteError" class="admin-form-error"></p>
+    <div class="modal-buttons">
+      <button class="modal-secondary" type="button" data-um-close>やめる</button>
+      <button id="umDeleteSubmit" class="modal-primary um-danger" type="button" disabled>完全に削除する</button>
+    </div>
+  `);
+  const input = document.getElementById("umDeleteConfirm");
+  const submit = document.getElementById("umDeleteSubmit");
+  input.addEventListener("input", () => { submit.disabled = blocked || input.value !== name; });
+  submit.addEventListener("click", async () => {
+    if (userManageBusy || blocked || input.value !== name) return;
+    if (!confirm(`「${name}」を完全に削除します。取り消せません。本当に削除しますか？`)) return;
+    userManageBusy = true;
+    submit.disabled = true;
+    input.disabled = true;
+    try {
+      await callAdminApi("deleteUser", { uid: info.uid, confirmName: input.value });
+      closeUserManageModal();
+      showAppToast("👤 ユーザー管理", `「${name}」を完全に削除しました`);
+      loadUserManageList();
+    } catch (error) {
+      console.error("ユーザー削除エラー:", error.code || error.message);
+      showError(document.getElementById("umDeleteError"), describeAdminError(error));
+      input.disabled = false;
+      submit.disabled = input.value !== name;
+      loadUserManageList();
+    } finally {
+      userManageBusy = false;
+    }
+  });
+}
+
+function renderUserManageDeleteAuthOnly(info) {
+  const key = info.uid.slice(0, 6);
+  const total = Object.values(info.plan.counts).reduce((sum, n) => sum + n, 0);
+  openUserManageModal(`
+    <h3>🗑 ログイン情報を削除</h3>
+    <p class="um-note">Firestore にユーザーデータが無いログイン情報です（uid ${escapeHTML(info.uid)}）。関係するデータが1件も無いことを確かめてから、Firebase Authentication のログイン情報だけを削除します。取り消せません。</p>
+    ${total > 0 ? `<p class="admin-form-error">関係するデータが ${total} 件あるため削除できません。</p>` : ""}
+    <label class="um-confirm-label" for="umDeleteAuthConfirm">削除するには、uid の最初の6文字「${escapeHTML(key)}」を入力してください</label>
+    <input id="umDeleteAuthConfirm" type="text" autocomplete="off" ${total > 0 ? "disabled" : ""}>
+    <p id="umDeleteAuthError" class="admin-form-error"></p>
+    <div class="modal-buttons">
+      <button class="modal-secondary" type="button" data-um-close>やめる</button>
+      <button id="umDeleteAuthSubmit" class="modal-primary um-danger" type="button" disabled>削除する</button>
+    </div>
+  `);
+  const input = document.getElementById("umDeleteAuthConfirm");
+  const submit = document.getElementById("umDeleteAuthSubmit");
+  input.addEventListener("input", () => { submit.disabled = total > 0 || input.value !== key; });
+  submit.addEventListener("click", async () => {
+    if (userManageBusy || input.value !== key) return;
+    if (!confirm("このログイン情報を削除します。取り消せません。よろしいですか？")) return;
+    userManageBusy = true;
+    submit.disabled = true;
+    try {
+      await callAdminApi("deleteAuthOnly", { uid: info.uid });
+      closeUserManageModal();
+      showAppToast("👤 ユーザー管理", "ログイン情報を削除しました");
+      loadUserManageList();
+    } catch (error) {
+      showError(document.getElementById("umDeleteAuthError"), describeAdminError(error));
+      submit.disabled = false;
+    } finally {
+      userManageBusy = false;
+    }
+  });
+}
+
+document.getElementById("userManageRefreshButton")?.addEventListener("click", () => loadUserManageList());
+userManageSearchInput?.addEventListener("input", renderUserManageList);
+userManageSortSelect?.addEventListener("change", renderUserManageList);
+userManageView?.addEventListener("click", (event) => {
+  const item = event.target.closest("[data-um-uid]");
+  if (item) openUserManageDetail(item.dataset.umUid);
+});
+
+
 function toDateValue(value) {
   if (!value) return null;
   if (value instanceof Date) return value;

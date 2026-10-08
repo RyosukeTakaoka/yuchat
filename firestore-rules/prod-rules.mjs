@@ -176,7 +176,18 @@ const TEST_CASES = [
   testCase("ALLOW", "raceLogs：開催ログ", userA, "create", "raceLogs/2030-01-02", { data: { raceId: "2030-01-02" } }),
   testCase("DENY", "未ログイン：users の読み取り（今まで通り拒否）", null, "get", "users/alice", { existing: { uid: userA.uid } }),
   testCase("DENY", "未ログイン：メッセージ送信（今まで通り拒否）", null, "create", "messages/m2", { data: { text: "x" } }),
-  testCase("DENY", "未ログイン：イベントの読み取り", null, "get", "events/ev-test", { existing: eventDoc })
+  testCase("DENY", "未ログイン：イベントの読み取り", null, "get", "events/ev-test", { existing: eventDoc }),
+  // 👤 ユーザー管理：停止の記録・操作の記録・削除の進み具合は、通知サーバー（サービスアカウント）だけが書く
+  testCase("DENY", "一般：自分の停止の記録の読み取り", userA, "get", `suspendedUsers/${userA.uid}`, { existing: { uid: userA.uid } }),
+  testCase("ALLOW", "管理者：停止の記録の読み取り", admin, "get", `suspendedUsers/${userA.uid}`, { existing: { uid: userA.uid } }),
+  testCase("DENY", "一般：他人の停止の記録の読み取り", userA, "get", "suspendedUsers/someoneElse", { existing: { uid: "someoneElse" } }),
+  testCase("DENY", "一般：自分の停止の記録を消す", userA, "delete", `suspendedUsers/${userA.uid}`, { existing: { uid: userA.uid } }),
+  testCase("DENY", "管理者：ブラウザから停止の記録を作る", admin, "create", "suspendedUsers/someoneElse", { data: { uid: "someoneElse" } }),
+  testCase("ALLOW", "管理者：操作の記録の読み取り", admin, "get", "adminAuditLogs/l1", { existing: { action: "setPassword" } }),
+  testCase("DENY", "一般：操作の記録の読み取り", userA, "get", "adminAuditLogs/l1", { existing: { action: "setPassword" } }),
+  testCase("DENY", "管理者：ブラウザから操作の記録を書き換える", admin, "update", "adminAuditLogs/l1", { data: { action: "x" }, existing: { action: "setPassword" } }),
+  testCase("DENY", "一般：削除の進み具合の読み取り", userA, "get", `userDeletions/${userA.uid}`, { existing: { status: "failed" } }),
+  testCase("DENY", "管理者：ブラウザから削除の進み具合を書く", admin, "create", "userDeletions/someoneElse", { data: { status: "completed" } })
 ];
 
 async function runProductionEngineTests(api, projectId, source) {
