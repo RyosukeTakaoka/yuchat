@@ -16,7 +16,7 @@
 
    管理者専用（👤 ユーザー管理）：
      POST /admin    Authorization: Bearer <管理者の ID トークン>
-                    { "action": "listUsers" | "inspectUser" | "setPassword" | "suspend" | "unsuspend" | "deleteUser" | "deleteAuthOnly", ... }
+                    { "action": "listUsers" | "inspectUser" | "setPassword" | "suspend" | "unsuspend" | "deleteUser" | "deleteAuthOnly" | "adjustCoins", ... }
    ID トークンの uid が ADMIN_UID のときだけ実行する（それ以外は 403）。パスワードはどこにも保存・記録しない。
 
    設定（Cloudflare の Worker → Settings → Variables and Secrets）：
@@ -308,6 +308,7 @@ export async function handleAdminAction(deps, callerUid, body) {
       case "unsuspend": return await adminUnsuspend(deps, callerUid, uid);
       case "deleteUser": return await adminDeleteUser(deps, callerUid, uid, body.confirmName);
       case "deleteAuthOnly": return await adminDeleteAuthOnly(deps, callerUid, uid);
+      case "adjustCoins": return await adminAdjustCoins(deps, callerUid, uid, body);
       default: return { status: 400, error: "unknown_action" };
     }
   } catch (error) {
@@ -739,6 +740,82 @@ async function adminDeleteUser(deps, callerUid, uid, confirmName) {
   }
 }
 
+/* ----- ゆうコインの増減（管理者） -----
+   ・users/{名前} の coins だけを書き換える（銀行・株・馬券などには触れない）
+   ・読んだときの更新時刻を条件にして書く（その間にアプリや自動処理がコインを変えていたら、読み直してやり直す）
+     → 同時に操作されても、増減が失われたり二重になったりしない
+   ・操作の記録（adminAuditLogs）は、コインの書き換えと同じ1回の書き込みで作る（どちらか片方だけにはならない）
+   ・残高がマイナスになる減らし方はしない */
+
+const ADMIN_COIN_ADJUST_MAX = 1000000;
+const ADMIN_COIN_BALANCE_MAX = 1000000000000;
+const ADMIN_COIN_RETRY = 8;
+
+function readIntegerField(field) {
+  if (!field) return 0;
+  if ("integerValue" in field) return Number(field.integerValue);
+  if ("doubleValue" in field) return Number(field.doubleValue);
+  return NaN;
+}
+
+async function adminAdjustCoins(deps, callerUid, uid, body) {
+  const direction = body?.direction;
+  const amount = body?.amount;
+  if (direction !== "increase" && direction !== "decrease") return { status: 400, error: "invalid_direction" };
+  if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount <= 0 || amount > ADMIN_COIN_ADJUST_MAX) {
+    return { status: 400, error: "invalid_amount" };
+  }
+  const expected = body?.expectedCoins;
+  if (expected !== undefined && (typeof expected !== "number" || !Number.isSafeInteger(expected))) return { status: 400, error: "invalid_expected" };
+
+  const fs = deps.firestore;
+  const docs = await findUserDocsByUid(fs, uid);
+  if (docs.length !== 1) return { status: 409, error: docs.length === 0 ? "user_not_found" : "multiple_user_docs" };
+  const record = await fs.get(`userDeletions/${uid}`);
+  if (record && record.status !== "completed") return { status: 409, error: "deletion_in_progress" };
+  const name = docs[0].id;
+  const callerDocs = await findUserDocsByUid(fs, callerUid);
+  const byName = callerDocs.length === 1 ? callerDocs[0].id : "";
+  const delta = direction === "increase" ? amount : -amount;
+
+  for (let attempt = 1; attempt <= ADMIN_COIN_RETRY; attempt++) {
+    const user = await fs.getRaw(`users/${name}`);
+    if (!user || user.fields?.uid?.stringValue !== uid) return { status: 409, error: "user_not_found" };
+    const before = readIntegerField(user.fields.coins);
+    if (!Number.isSafeInteger(before)) return { status: 409, error: "invalid_balance" };
+    if (expected !== undefined && before !== expected) return { status: 409, error: "balance_changed", coins: before };
+    const after = before + delta;
+    if (after < 0) return { status: 409, error: "insufficient_coins", coins: before };
+    if (after > ADMIN_COIN_BALANCE_MAX) return { status: 400, error: "balance_too_large", coins: before };
+
+    const logId = crypto.randomUUID().replace(/-/g, "");
+    try {
+      await fs.commit([
+        {
+          update: { name: fs.docName(`users/${name}`), fields: { coins: { integerValue: String(after) } } },
+          updateMask: { fieldPaths: ["coins"] },
+          currentDocument: { updateTime: user.updateTime }
+        },
+        {
+          update: {
+            name: fs.docName(`adminAuditLogs/${logId}`),
+            fields: encodeFields({ action: "adjustCoins", targetUid: uid, targetName: name, direction, amount, delta, beforeCoins: before, afterCoins: after, byUid: callerUid, byName, result: "ok" })
+          },
+          updateTransforms: [{ fieldPath: "at", setToServerValue: "REQUEST_TIME" }],
+          currentDocument: { exists: false }
+        }
+      ]);
+      return { ok: true, name, direction, amount, beforeCoins: before, afterCoins: after };
+    } catch (error) {
+      /* 読んだあとに users が変わっていた（条件が合わない）・ほかの書き込みと重なったときは、少し待ってから読み直す */
+      const retryable = [400, 409].includes(error?.status) && /FAILED_PRECONDITION|ABORTED|does not match|contention|ALREADY_EXISTS/i.test(String(error.message));
+      if (!retryable) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 60 * attempt));
+    }
+  }
+  return { status: 409, error: "busy" };
+}
+
 /* Firestore にデータが1件もない Authentication のユーザー（名前を決める前にやめたゲストなど）だけを消す */
 async function adminDeleteAuthOnly(deps, callerUid, uid) {
   if (uid === deps.adminUid) return { status: 400, error: "cannot_target_admin" };
@@ -988,7 +1065,7 @@ function createFirestoreClient({ base, projectId, getAccessToken, fetchImpl }) {
     async commit(writes) {
       if (writes.length === 0) return;
       const response = await call(`${base}/${root}:commit`, { method: "POST", body: JSON.stringify({ writes }) });
-      if (!response.ok) throw new Error(`firestore commit ${response.status} ${await response.text()}`);
+      if (!response.ok) throw Object.assign(new Error(`firestore commit ${response.status} ${await response.text()}`), { status: response.status });
     },
 
     docName: (path) => `${root}/${path}`,

@@ -1,0 +1,202 @@
+/* 📢 お知らせの自動作成（.github/announcements/post-announcement.mjs）のテスト
+   GitHub の API と Firestore は偽物（本物には接続しない）
+   実行：node --test ".github/announcements/test/*.test.mjs" */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { parseAnnouncement, findSecret, run, truncate, AUTO_CREATED_BY_NAME, AUTO_CREATED_BY_UID } from "../post-announcement.mjs";
+
+const BODY = `## 変更内容
+- いろいろ
+
+## 📢 お知らせ文
+<!-- ここはアプリに載ります -->
+
+### タイトル
+ゆうコインの管理を追加しました
+
+### 本文
+管理者がユーザーのゆうコインを増やしたり減らしたりできるようになりました。
+
+ほかの機能はこれまで通り使えます。
+
+## テスト
+- ここは載らない
+`;
+
+/* ===== PR の本文の読み取り ===== */
+
+test("PR の本文からタイトル・本文を取り出す（コメント・ほかの見出しは含めない）", () => {
+  const r = parseAnnouncement(BODY);
+  assert.equal(r.title, "ゆうコインの管理を追加しました");
+  assert.equal(r.body, "管理者がユーザーのゆうコインを増やしたり減らしたりできるようになりました。\n\nほかの機能はこれまで通り使えます。");
+  assert.equal(r.truncated, false);
+});
+
+test("改行コードが CRLF でも・見出しの空白が違っても読める", () => {
+  const r = parseAnnouncement(BODY.replace(/\n/g, "\r\n").replace("## 📢 お知らせ文", "##📢お知らせ文").replace("### タイトル", "###  タイトル "));
+  assert.equal(r.title, "ゆうコインの管理を追加しました");
+});
+
+test("お知らせの欄が無い・空・「なし」なら作らない", () => {
+  assert.equal(parseAnnouncement("## 変更内容\nなにか").reason, "no_section");
+  assert.equal(parseAnnouncement("").reason, "no_section");
+  assert.equal(parseAnnouncement(null).reason, "no_section");
+  assert.equal(parseAnnouncement("## 📢 お知らせ文\n<!-- 空のまま -->\n### タイトル\n\n### 本文\n\n").reason, "empty");
+  assert.equal(parseAnnouncement("## 📢 お知らせ文\n### タイトル\nあり\n### 本文\n").reason, "empty");
+  assert.equal(parseAnnouncement("## 📢 お知らせ文\n### タイトル\nなし\n### 本文\nなし").reason, "opted_out");
+});
+
+test("PR のテンプレート（.github/pull_request_template.md）のまま空欄なら作らない", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const template = await readFile(new URL("../../pull_request_template.md", import.meta.url), "utf8");
+  assert.equal(parseAnnouncement(template).reason, "empty");
+});
+
+test("長いタイトル・本文は、アプリと同じ上限（50・500文字）で切る。絵文字の途中では切らない", () => {
+  const r = parseAnnouncement(`## 📢 お知らせ文\n### タイトル\n${"あ".repeat(60)}\n### 本文\n${"い".repeat(600)}`);
+  assert.equal(r.title.length, 50); assert.ok(r.title.endsWith("…"));
+  assert.equal(r.body.length, 500); assert.ok(r.body.endsWith("…"));
+  assert.equal(r.truncated, true);
+  const t = truncate(`${"a".repeat(48)}😀😀`, 50);
+  assert.ok(t.length <= 50 && !/[\uD800-\uDBFF]…$/.test(t), t);
+});
+
+/* ===== 秘密の値 ===== */
+
+test("秘密の値らしいものを見つける（鍵・トークン・パスワード・長いランダムな文字列）", () => {
+  for (const s of [
+    "-----BEGIN PRIVATE KEY-----\nMIIE",
+    '{"private_key": "x"}',
+    "キーは AIzaSyDJFat47USz6KKaGuvj1dVjfELhRmH_2Tw です",
+    "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+    "github_pat_11ABCDEFG0123456789_abcdefghijk",
+    "sk-abcdefghijklmnopqrstuvwxyz123456",
+    "パスワード：hunter22",
+    "password=abcd1234",
+    "token: abcdefgh",
+    "0123456789abcdef0123456789abcdef0123456789abcdef"
+  ]) assert.ok(findSecret(s), s);
+  assert.equal(findSecret("管理者がユーザーのゆうコインを増やしたり減らしたりできるようになりました。パスワードの再設定もできます。"), null);
+  assert.equal(findSecret("詳しくは https://yuchin0809.github.io/yuchat/ を見てください"), null);
+});
+
+/* ===== 本体（GitHub・Firestore は偽物） ===== */
+
+function fakeGitHub(pulls) {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), auth: init?.headers?.Authorization });
+    const u = new URL(url);
+    let m;
+    if ((m = u.pathname.match(/^\/repos\/o\/r\/commits\/([0-9a-f]+)\/pulls$/))) return new Response(JSON.stringify(pulls.filter((p) => p.commits.includes(m[1]))));
+    if ((m = u.pathname.match(/^\/repos\/o\/r\/pulls\/(\d+)$/))) {
+      const pr = pulls.find((p) => p.number === Number(m[1]));
+      return pr ? new Response(JSON.stringify(pr)) : new Response("{}", { status: 404 });
+    }
+    return new Response("{}", { status: 404 });
+  };
+  return { fetchImpl, calls };
+}
+
+function fakeFirestore() {
+  const docs = new Map();
+  return {
+    docs,
+    async createIfAbsent(path, data) { if (docs.has(path)) return false; docs.set(path, data); return true; }
+  };
+}
+
+const PRS = [
+  { number: 27, body: BODY, merged_at: "2026-10-08T13:57:42Z", base: { ref: "main" }, merge_commit_sha: "aaa111", commits: ["aaa111"] },
+  { number: 28, body: BODY, merged_at: null, base: { ref: "main" }, merge_commit_sha: "bbb222", commits: ["bbb222"] },
+  { number: 29, body: "## 変更内容\nテストだけ", merged_at: "2026-10-08T14:00:00Z", base: { ref: "main" }, merge_commit_sha: "ccc333", commits: ["ccc333"] },
+  { number: 30, body: BODY, merged_at: "2026-10-08T14:10:00Z", base: { ref: "develop" }, merge_commit_sha: "ddd444", commits: ["ddd444"] },
+  { number: 31, body: BODY.replace("ほかの機能はこれまで通り使えます。", "鍵は AIzaSyDJFat47USz6KKaGuvj1dVjfELhRmH_2Tw です"), merged_at: "2026-10-08T14:20:00Z", base: { ref: "main" }, merge_commit_sha: "eee555", commits: ["eee555"] },
+  /* 開いたままの PR に含まれるコミット（その PR のマージではない） */
+  { number: 32, body: BODY, merged_at: null, base: { ref: "main" }, merge_commit_sha: "fff666", commits: ["fff000"] }
+];
+
+const SECRET_JSON = JSON.stringify({ project_id: "yuuchat-be666", private_key: "-----BEGIN PRIVATE KEY-----SHOULD-NOT-LEAK" });
+const TOKEN = "ghs_tokenThatMustNeverBePrinted0123456789";
+const baseEnv = (extra) => ({ GITHUB_REPOSITORY: "o/r", GITHUB_TOKEN: TOKEN, FIREBASE_SERVICE_ACCOUNT: SECRET_JSON, GITHUB_EVENT_NAME: "push", ...extra });
+
+async function runWith(env, firestore = fakeFirestore()) {
+  const lines = [];
+  const { fetchImpl, calls } = fakeGitHub(PRS);
+  const result = await run({ env: baseEnv(env), fetchImpl, firestore, log: (l) => lines.push(l) });
+  return { result, firestore, lines, calls };
+}
+
+test("main にマージされた PR の push：お知らせを announcements/pr-27 に、既存と同じ形で保存する", async () => {
+  const { result, firestore, calls } = await runWith({ GITHUB_SHA: "aaa111" });
+  assert.deepEqual([result.posted, result.id], [true, "pr-27"]);
+  const doc = firestore.docs.get("announcements/pr-27");
+  assert.deepEqual(Object.keys(doc).sort(), ["body", "createdAt", "createdByName", "createdByUid", "title", "updatedAt"]);
+  assert.equal(doc.title, "ゆうコインの管理を追加しました");
+  assert.match(doc.body, /^管理者がユーザーのゆうコインを/);
+  assert.equal(doc.createdByName, AUTO_CREATED_BY_NAME);
+  assert.equal(doc.createdByName, "ゆうChat自動更新");
+  assert.equal(doc.createdByUid, AUTO_CREATED_BY_UID);
+  assert.ok(doc.createdAt instanceof Date && doc.updatedAt instanceof Date);
+  assert.ok(calls.every((c) => c.auth === `Bearer ${TOKEN}`), "GitHub の API には GITHUB_TOKEN で問い合わせる");
+});
+
+test("同じ PR で何回実行しても、お知らせは1件だけ（push と手動実行の両方）", async () => {
+  const firestore = fakeFirestore();
+  const first = await runWith({ GITHUB_SHA: "aaa111" }, firestore);
+  const second = await runWith({ GITHUB_SHA: "aaa111" }, firestore);
+  const third = await runWith({ GITHUB_EVENT_NAME: "workflow_dispatch", PR_NUMBER: "27" }, firestore);
+  assert.deepEqual([first.result.posted, second.result.posted, third.result.posted], [true, false, false]);
+  assert.equal(second.result.reason, "duplicate");
+  assert.equal(firestore.docs.size, 1);
+});
+
+test("マージされていない PR では作らない（手動実行で番号を指定しても）", async () => {
+  const r = await runWith({ GITHUB_EVENT_NAME: "workflow_dispatch", PR_NUMBER: "28" });
+  assert.deepEqual([r.result.posted, r.result.reason], [false, "not_merged"]);
+  assert.equal(r.firestore.docs.size, 0);
+});
+
+test("main 以外へのマージ・PR ではない push・開いている PR に含まれるだけのコミットでは作らない", async () => {
+  assert.equal((await runWith({ GITHUB_EVENT_NAME: "workflow_dispatch", PR_NUMBER: "30" })).result.reason, "not_main");
+  assert.equal((await runWith({ GITHUB_SHA: "9999999" })).result.reason, "no_merged_pr");
+  assert.equal((await runWith({ GITHUB_SHA: "fff000" })).result.reason, "no_merged_pr");
+  assert.equal((await runWith({ GITHUB_SHA: "bbb222" })).result.reason, "no_merged_pr");
+});
+
+test("お知らせの欄が無い PR では作らない", async () => {
+  const r = await runWith({ GITHUB_SHA: "ccc333" });
+  assert.deepEqual([r.result.posted, r.result.reason], [false, "no_section"]);
+  assert.equal(r.firestore.docs.size, 0);
+});
+
+test("手動実行の PR 番号が正しくなければ、GitHub にも問い合わせない", async () => {
+  for (const n of ["", "0", "abc", "27; rm -rf /", "-1"]) {
+    const r = await runWith({ GITHUB_EVENT_NAME: "workflow_dispatch", PR_NUMBER: n });
+    assert.equal(r.result.reason, "invalid_pr_number", n);
+    assert.equal(r.calls.length, 0);
+  }
+});
+
+test("お知らせ文に秘密の値らしいものがあれば作らず、その中身はログに出さない", async () => {
+  const r = await runWith({ GITHUB_SHA: "eee555" });
+  assert.deepEqual([r.result.posted, r.result.reason], [false, "secret"]);
+  assert.equal(r.firestore.docs.size, 0);
+  const all = r.lines.join("\n");
+  assert.match(all, /::warning::/);
+  assert.ok(!all.includes("AIzaSy"), "見つけた値そのものは出さない");
+});
+
+test("どの場合も、ログに GITHUB_TOKEN・サービスアカウントの鍵が出ない", async () => {
+  for (const env of [{ GITHUB_SHA: "aaa111" }, { GITHUB_SHA: "ccc333" }, { GITHUB_SHA: "eee555" }, { GITHUB_EVENT_NAME: "workflow_dispatch", PR_NUMBER: "28" }]) {
+    const r = await runWith(env);
+    const all = r.lines.join("\n");
+    assert.ok(!all.includes(TOKEN) && !all.includes("SHOULD-NOT-LEAK") && !all.includes("PRIVATE KEY"), all);
+  }
+});
+
+test("サービスアカウントが別のプロジェクトのものなら、Firestore に書かずに止める", async () => {
+  const { fetchImpl } = fakeGitHub(PRS);
+  await assert.rejects(run({ env: baseEnv({ GITHUB_SHA: "aaa111", FIREBASE_SERVICE_ACCOUNT: JSON.stringify({ project_id: "other" }) }), fetchImpl, log: () => {} }), /プロジェクトが違います/);
+});
