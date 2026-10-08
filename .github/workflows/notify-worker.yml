@@ -1,0 +1,184 @@
+# 通知サーバー（Cloudflare Worker：yuuchat-notify）のテストと、本番への自動公開
+#
+# ・プルリクエスト（notify-worker/** などを変えたとき）
+#     テストと wrangler deploy --dry-run だけ（本番には公開しない。Cloudflare の鍵も使わない）
+# ・main への push（notify-worker/** が変わったとき＝プルリクエストのマージ）
+#     1. テスト
+#     2. 公開中のコードが、リポジトリの worker.js のいずれかの版と一致するか確かめる（読み取りだけ）
+#        一致しなければ（管理画面で直接変更されていたら）公開しない
+#        いまの worker.js と同じなら、公開する必要がないので何もしない
+#     3. 公開（wrangler deploy）→ 公開後のコードが worker.js と一致するか → 本番の確認（CORS・/notify と /admin のログインなし 401）
+#     4. 公開後の確認に失敗したら、公開前の版（2 で一致した版）を公開し直して元に戻す
+# ・手動実行（Actions タブ → 通知サーバー → Run workflow）
+#     check（確認だけ：テスト・公開中のコードとの比較）／ deploy（公開。いまの版と同じでも公開し直す）
+#
+# 鍵：CLOUDFLARE_API_TOKEN・CLOUDFLARE_ACCOUNT_ID（Secrets）。未登録なら本番の処理はスキップする
+# Firebase の鍵（FIREBASE_SERVICE_ACCOUNT）は Cloudflare の Secret に登録済みのものを使い、このワークフローでは扱わない
+# （wrangler deploy は Cloudflare の Secret を変更しない。wrangler.toml の keep_vars で管理画面の変数も消さない）
+
+name: 通知サーバー（Cloudflare Worker）
+
+on:
+  pull_request:
+    paths:
+      - "notify-worker/**"
+      - ".github/notify-worker/**"
+      - ".github/workflows/notify-worker.yml"
+  push:
+    branches: [main]
+    paths:
+      - "notify-worker/**"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check（確認だけ）/ deploy（公開）"
+        type: choice
+        options: [check, deploy]
+        default: check
+
+permissions:
+  contents: read
+
+env:
+  SCRIPT_NAME: yuuchat-notify
+  WORKER_URL: https://yuuchat-notify.yuchin08092010.workers.dev
+  APP_ORIGIN: https://yuchin0809.github.io
+  WRANGLER_VERSION: 4.138.0
+  WRANGLER_SEND_METRICS: "false"
+
+jobs:
+  test:
+    name: テスト・wrangler deploy --dry-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: テスト（Worker・公開の仕組み）
+        run: node --test "notify-worker/test/*.test.mjs" ".github/notify-worker/test/*.test.mjs"
+      - name: wrangler deploy --dry-run（本番には公開しない）
+        working-directory: notify-worker
+        run: |
+          npx --yes "wrangler@${WRANGLER_VERSION}" deploy --dry-run --outdir "$RUNNER_TEMP/dry-run"
+          # まとめ直さずにそのまま公開する設定（no_bundle）なので、公開されるのは worker.js そのもの
+          cmp "$RUNNER_TEMP/dry-run/worker.js" worker.js
+
+  deploy:
+    name: 本番への公開
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: notify-worker-deploy
+      cancel-in-progress: false
+    env:
+      MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'deploy' }}
+      FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 鍵が登録されているか確認
+        id: secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID が未登録のため、本番への公開をスキップしました"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.secret.outputs.ready == 'true'
+        with:
+          node-version: 22
+
+      - name: リポジトリの過去の worker.js を集める
+        if: steps.secret.outputs.ready == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/known"
+          git log --format=%H -- notify-worker/worker.js > "$RUNNER_TEMP/known/order.txt"
+          while read -r c; do
+            git show "$c:notify-worker/worker.js" > "$RUNNER_TEMP/known/$c.js" 2>/dev/null || sed -i "/^$c$/d" "$RUNNER_TEMP/known/order.txt"
+          done < <(cat "$RUNNER_TEMP/known/order.txt")
+          echo "比べる版：$(wc -l < "$RUNNER_TEMP/known/order.txt") 個"
+
+      - name: 公開前の確認（公開中のコードとリポジトリの比較・読み取りだけ）
+        id: before
+        if: steps.secret.outputs.ready == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CURRENT_FILE: notify-worker/worker.js
+          KNOWN_DIR: ${{ runner.temp }}/known
+        run: node .github/notify-worker/compare-deployed.mjs before
+
+      - name: 公開するかを決める
+        id: plan
+        if: steps.secret.outputs.ready == 'true'
+        run: |
+          if [ "$MODE" = "check" ]; then
+            echo "確認だけ（check）なので、公開しません"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.before.outputs.up_to_date }}" = "true" ] && [ "$FORCE" != "true" ]; then
+            echo "公開中のコードは、いまの worker.js と同じなので、公開しません"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 公開（wrangler deploy）
+        id: deploy
+        if: steps.plan.outputs.deploy == 'true'
+        working-directory: notify-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes "wrangler@${WRANGLER_VERSION}" deploy --message "GitHub Actions ${GITHUB_SHA::7}"
+
+      - name: 公開後のコードがリポジトリの worker.js と一致するか
+        id: after
+        if: steps.deploy.outcome == 'success'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CURRENT_FILE: notify-worker/worker.js
+        run: node .github/notify-worker/compare-deployed.mjs after
+
+      - name: 本番の確認（CORS・/notify と /admin のログインなし 401）
+        id: smoke
+        if: steps.deploy.outcome == 'success'
+        run: node .github/notify-worker/smoke.mjs
+
+      - name: 確認に失敗したので、公開前の版に戻す
+        id: rollback
+        if: failure() && steps.deploy.outcome == 'success' && steps.before.outputs.matched_commit != ''
+        working-directory: notify-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PREVIOUS: ${{ steps.before.outputs.matched_commit }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/rollback"
+          git show "$PREVIOUS:notify-worker/worker.js" > "$RUNNER_TEMP/rollback/worker.js"
+          cp wrangler.toml "$RUNNER_TEMP/rollback/wrangler.toml"
+          cd "$RUNNER_TEMP/rollback"
+          npx --yes "wrangler@${WRANGLER_VERSION}" deploy --message "GitHub Actions rollback to ${PREVIOUS::7}"
+          echo "- ↩ 公開前の版（${PREVIOUS::7}）に戻しました" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 元に戻した版の確認
+        if: failure() && steps.rollback.outcome == 'success'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CURRENT_FILE: ${{ runner.temp }}/rollback/worker.js
+        run: |
+          node .github/notify-worker/compare-deployed.mjs after
+          node .github/notify-worker/smoke.mjs
