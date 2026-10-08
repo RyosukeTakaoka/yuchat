@@ -325,6 +325,21 @@ const min = (m) => new Date(Date.now() + m * 60000);
   await ng("管理者でも、ブラウザから削除の進み具合は書けない", setDoc(doc(admin, "userDeletions/userB"), { status: "completed" }));
   await ng("未ログイン：停止の記録の読み取り", getDoc(doc(anon, "suspendedUsers/userB")));
 
+  log.push("--- 🔔 通知の送信記録（notificationLogs）は、通知サーバー（サービスアカウント）だけが書く（先に作って通知を止められないように）");
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), "notificationLogs/derby-2030-01-01"), { kind: "derby", by: "notify-worker" });
+  });
+  await ng("一般ユーザーが、これから始まるダービーの通知記録を先に作る", setDoc(doc(A, "notificationLogs/derby-2030-01-02"), { kind: "derby" }));
+  await ng("一般ユーザーが、お知らせの通知記録を先に作る", setDoc(doc(A, "notificationLogs/announcement-pr-99"), { kind: "announcement" }));
+  await ng("一般ユーザーが、チャットの通知記録を作る", addDoc(collection(A, "notificationLogs"), { createdAt: 1 }));
+  await ng("一般ユーザーが、通知記録を書き換える", updateDoc(doc(A, "notificationLogs/derby-2030-01-01"), { by: "x" }));
+  await ng("一般ユーザーが、通知記録を消す", deleteDoc(doc(A, "notificationLogs/derby-2030-01-01")));
+  await ng("管理者でも、ブラウザから通知記録は書けない（Worker だけ）", setDoc(doc(admin, "notificationLogs/derby-2030-01-03"), { kind: "derby" }));
+  await ng("一般ユーザーは通知記録を読めない", getDoc(doc(A, "notificationLogs/derby-2030-01-01")));
+  await ng("管理者でも、ブラウザから通知記録は読めない（アプリは使わない）", getDoc(doc(admin, "notificationLogs/derby-2030-01-01")));
+  await ng("未ログイン：通知記録を作る", setDoc(doc(anon, "notificationLogs/derby-2030-01-04"), { kind: "derby" }));
+  await ok("通知トークンの保存（fcmTokens）は今まで通り", setDoc(doc(A, "fcmTokens/token-a"), { uid: "userA" }));
+
   log.push("--- 友達関係の解除（friends の削除）は当事者だけ。作成・更新は今まで通り");
   await env.withSecurityRulesDisabled(async (ctx) => {
     const d = ctx.firestore();

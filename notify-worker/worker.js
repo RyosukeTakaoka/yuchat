@@ -16,8 +16,14 @@
 
    管理者専用（👤 ユーザー管理）：
      POST /admin    Authorization: Bearer <管理者の ID トークン>
-                    { "action": "listUsers" | "inspectUser" | "setPassword" | "suspend" | "unsuspend" | "deleteUser" | "deleteAuthOnly", ... }
+                    { "action": "listUsers" | "inspectUser" | "setPassword" | "suspend" | "unsuspend" | "deleteUser" | "deleteAuthOnly" | "adjustCoins" | "notifyAnnouncement", ... }
    ID トークンの uid が ADMIN_UID のときだけ実行する（それ以外は 403）。パスワードはどこにも保存・記録しない。
+
+   全員への通知（通知を ON にした全端末 = fcmTokens）：
+     ・🏇 ゆうダービー開始1分前：Cron Triggers（毎分）で runScheduled が確かめる（アプリを閉じていても届く）
+     ・📢 新しいお知らせ：管理者がアプリで作ったときは /admin の notifyAnnouncement、
+       自動のお知らせ（GitHub Actions）は同じ sendBroadcastNotification を Actions から呼ぶ
+     ・どちらも notificationLogs/{derby-… / announcement-…} を「まだ無いときだけ」作ってから送るので、同じ通知は1回だけ
 
    設定（Cloudflare の Worker → Settings → Variables and Secrets）：
      FIREBASE_SERVICE_ACCOUNT  （Secret）Firebase のサービスアカウントの鍵 JSON
@@ -46,8 +52,16 @@ const NOTIFICATION_TTL_SECONDS = 24 * 60 * 60;
 export default {
   async fetch(request, env) {
     return handleRequest(request, env);
+  },
+  /* Cron Triggers（wrangler.toml の [triggers]）：毎分、ゆうダービー開始1分前の通知を確かめる */
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runScheduled(env, event.scheduledTime).catch((error) => console.error("scheduled error", String(error?.message || error).slice(0, 300))));
   }
 };
+
+export async function runScheduled(env = {}, scheduledTime = Date.now(), deps = createDefaultDeps(env)) {
+  return notifyDerbyStartingSoon(deps, scheduledTime);
+}
 
 export async function handleRequest(request, env = {}, deps = createDefaultDeps(env)) {
   const cors = getCorsHeaders(request, env);
@@ -235,6 +249,138 @@ async function getTokensForUids(fs, uids) {
   return [...new Set(tokens)];
 }
 
+/* =========================================================
+   全員への通知（🏇 ゆうダービー開始1分前・📢 新しいお知らせ）
+   ・送り先は fcmTokens（通知を ON にした端末だけが登録している）。トークンが無ければ何も送らない
+   ・notificationLogs/{logId} を「まだ無いときだけ」作ってから送る（何回呼ばれても、同じ通知は1回だけ）
+     ログには by: "notify-worker" を付ける。この印の無いログ（ルールで書き込みを止める前にブラウザから作られたものなど）は
+     「送った記録」として扱わず、更新時刻を条件にして1回だけ引き継いで送る（引き継げるのは1つの実行だけ）
+   ・使えなくなったトークンは消す。1台への送信に失敗しても、ほかの端末への送信は続ける
+========================================================= */
+
+const BROADCAST_LOG_BY = "notify-worker";
+
+async function claimBroadcastLog(deps, logId, kind) {
+  const fs = deps.firestore;
+  const path = `notificationLogs/${logId}`;
+  if (await fs.createIfAbsent(path, { kind, by: BROADCAST_LOG_BY, createdAt: new Date(deps.now()) })) return true;
+  const existing = await fs.getRaw(path);
+  if (!existing) return false;
+  if (existing.fields.by?.stringValue === BROADCAST_LOG_BY) return false;
+  try {
+    await fs.commit([{
+      update: { name: fs.docName(path), fields: encodeFields({ kind, by: BROADCAST_LOG_BY, createdAt: new Date(deps.now()) }) },
+      currentDocument: { updateTime: existing.updateTime }
+    }]);
+    return true;
+  } catch (error) {
+    if (error?.status === 400 || error?.status === 409) return false; // ほかの実行が先に引き継いだ
+    throw error;
+  }
+}
+
+export async function sendBroadcastNotification(deps, logId, data) {
+  const fs = deps.firestore;
+  const claimed = await claimBroadcastLog(deps, logId, data.kind || "");
+  if (!claimed) return { skipped: "duplicate" };
+
+  const tokens = (await fs.query("fcmTokens", [], { select: ["uid"] })).map((d) => d.id);
+  let sent = 0, failed = 0, removed = 0;
+  await Promise.all(tokens.map(async (token) => {
+    try {
+      const outcome = await deps.sendFcm(token, data);
+      if (outcome.ok) { sent++; return; }
+      failed++;
+      if (outcome.invalidToken) { removed++; await fs.delete(`fcmTokens/${token}`).catch(() => {}); }
+    } catch {
+      failed++;
+    }
+  }));
+  await fs.update(`notificationLogs/${logId}`, { tokenCount: tokens.length, sent, failed, removedTokens: removed })
+    .catch((error) => console.warn("log update failed", String(error?.message || error).slice(0, 200)));
+  return { sent, failed, removed, tokens: tokens.length };
+}
+
+/* ----- 🏇 ゆうダービー開始1分前 -----
+   開催スケジュール（script.js・derby-runner/run.mjs と同じ）：
+     ・毎日 15:02（raceId「YYYY-MM-DD」）
+     ・毎日 11:30（raceId「YYYY-MM-DD-1130」。DERBY_TWICE_DAILY_FROM の日から）
+     ・管理者が作る手動レース（derbyManualRaces/{raceId} の raceAt。キャンセルされたものは除く）
+   毎分の Cron で「開始の1分前（開始 − 60 秒）がこの分に入る」レースを探す（15:02 の回は 15:01、11:30 の回は 11:29 の Cron で通知）。
+   Cron の時刻は分の頭（scheduledTime）。少し遅れて動いても、分単位に切り捨ててから判定するので結果は同じ。
+   自動開催の回は計算だけで決まるので Firestore は読まない。手動レースだけ、その時間帯を1回問い合わせる */
+
+const MINUTE_MS = 60 * 1000;
+const DERBY_DAILY_RACES = [
+  { hour: 11, minute: 30, suffix: "-1130", from: "2026-10-07" },
+  { hour: 15, minute: 2, suffix: "", from: "" }
+];
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+function jstDateText(ms) {
+  return new Date(ms + JST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/* その日（日本時間）の自動開催の回：[{ raceId, raceAt }] */
+export function dailyDerbyRaces(dateText) {
+  const [y, m, d] = dateText.split("-").map(Number);
+  return DERBY_DAILY_RACES
+    .filter((r) => !r.from || dateText >= r.from)
+    .map((r) => ({ raceId: `${dateText}${r.suffix}`, raceAt: Date.UTC(y, m - 1, d, r.hour, r.minute) - JST_OFFSET_MS }));
+}
+
+export function derbyNotificationData(raceId) {
+  return {
+    kind: "derby",
+    raceId,
+    title: "🏇 ゆうダービー",
+    body: "あと1分でゆうダービーが始まります！",
+    link: "./?open=derby",
+    tag: `derby-${raceId}`
+  };
+}
+
+export async function notifyDerbyStartingSoon(deps, now = deps.now()) {
+  /* この分（M）に通知するのは、開始時刻が [M + 1分, M + 2分) のレース（開始 − 60 秒が M〜M + 59 秒） */
+  const minute = Math.floor(now / MINUTE_MS) * MINUTE_MS;
+  const from = minute + MINUTE_MS, to = minute + 2 * MINUTE_MS;
+  /* 日付をまたぐ時間帯（23:59 など）も考えて、今日と明日の回を見る */
+  const days = [...new Set([jstDateText(from), jstDateText(to)])];
+  const due = days.flatMap(dailyDerbyRaces).filter((r) => r.raceAt >= from && r.raceAt < to);
+
+  const manual = await deps.firestore.query("derbyManualRaces", [
+    ["raceAt", "GREATER_THAN_OR_EQUAL", new Date(from)],
+    ["raceAt", "LESS_THAN", new Date(to)]
+  ], { select: ["raceAt", "status"] });
+  manual.filter((r) => r.data.status !== "cancelled").forEach((r) => due.push({ raceId: r.id, raceAt: Date.parse(r.data.raceAt) }));
+
+  const results = [];
+  for (const race of due) {
+    const result = await sendBroadcastNotification(deps, `derby-${race.raceId}`, derbyNotificationData(race.raceId));
+    results.push({ raceId: race.raceId, ...result });
+  }
+  return { checkedAt: now, races: results };
+}
+
+/* ----- 📢 新しいお知らせ ----- */
+
+export function announcementNotificationData(id, announcement) {
+  return {
+    kind: "announcement",
+    announcementId: id,
+    title: "📢 ゆうChatアップデート",
+    body: truncate(announcement?.title || "新しいお知らせがあります", 60),
+    link: "./?open=announcements",
+    tag: `announcement-${id}`
+  };
+}
+
+export async function notifyNewAnnouncement(deps, id) {
+  const announcement = await deps.firestore.get(`announcements/${id}`);
+  if (!announcement) return { status: 404, error: "announcement_not_found" };
+  return sendBroadcastNotification(deps, `announcement-${id}`, announcementNotificationData(id, announcement));
+}
+
 function truncate(text, max) {
   const chars = [...String(text || "")];
   return chars.length > max ? chars.slice(0, max - 1).join("") + "…" : chars.join("");
@@ -297,7 +443,7 @@ export async function handleAdminAction(deps, callerUid, body) {
 
   const action = typeof body?.action === "string" ? body.action : "";
   const uid = typeof body?.uid === "string" ? body.uid : "";
-  if (action !== "listUsers" && !UID_PATTERN.test(uid)) return { status: 400, error: "invalid_uid" };
+  if (action !== "listUsers" && action !== "notifyAnnouncement" && !UID_PATTERN.test(uid)) return { status: 400, error: "invalid_uid" };
 
   try {
     switch (action) {
@@ -308,6 +454,8 @@ export async function handleAdminAction(deps, callerUid, body) {
       case "unsuspend": return await adminUnsuspend(deps, callerUid, uid);
       case "deleteUser": return await adminDeleteUser(deps, callerUid, uid, body.confirmName);
       case "deleteAuthOnly": return await adminDeleteAuthOnly(deps, callerUid, uid);
+      case "adjustCoins": return await adminAdjustCoins(deps, callerUid, uid, body);
+      case "notifyAnnouncement": return await adminNotifyAnnouncement(deps, body);
       default: return { status: 400, error: "unknown_action" };
     }
   } catch (error) {
@@ -739,6 +887,90 @@ async function adminDeleteUser(deps, callerUid, uid, confirmName) {
   }
 }
 
+/* ----- 新しいお知らせの通知（管理者がアプリでお知らせを作った直後に呼ぶ）。同じお知らせは1回だけ ----- */
+async function adminNotifyAnnouncement(deps, body) {
+  const id = typeof body?.announcementId === "string" ? body.announcementId : "";
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return { status: 400, error: "invalid_announcement_id" };
+  const result = await notifyNewAnnouncement(deps, id);
+  return result.status ? result : { ok: true, ...result };
+}
+
+/* ----- ゆうコインの増減（管理者） -----
+   ・users/{名前} の coins だけを書き換える（銀行・株・馬券などには触れない）
+   ・読んだときの更新時刻を条件にして書く（その間にアプリや自動処理がコインを変えていたら、読み直してやり直す）
+     → 同時に操作されても、増減が失われたり二重になったりしない
+   ・操作の記録（adminAuditLogs）は、コインの書き換えと同じ1回の書き込みで作る（どちらか片方だけにはならない）
+   ・残高がマイナスになる減らし方はしない */
+
+const ADMIN_COIN_ADJUST_MAX = 1000000;
+const ADMIN_COIN_BALANCE_MAX = 1000000000000;
+const ADMIN_COIN_RETRY = 8;
+
+function readIntegerField(field) {
+  if (!field) return 0;
+  if ("integerValue" in field) return Number(field.integerValue);
+  if ("doubleValue" in field) return Number(field.doubleValue);
+  return NaN;
+}
+
+async function adminAdjustCoins(deps, callerUid, uid, body) {
+  const direction = body?.direction;
+  const amount = body?.amount;
+  if (direction !== "increase" && direction !== "decrease") return { status: 400, error: "invalid_direction" };
+  if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount <= 0 || amount > ADMIN_COIN_ADJUST_MAX) {
+    return { status: 400, error: "invalid_amount" };
+  }
+  const expected = body?.expectedCoins;
+  if (expected !== undefined && (typeof expected !== "number" || !Number.isSafeInteger(expected))) return { status: 400, error: "invalid_expected" };
+
+  const fs = deps.firestore;
+  const docs = await findUserDocsByUid(fs, uid);
+  if (docs.length !== 1) return { status: 409, error: docs.length === 0 ? "user_not_found" : "multiple_user_docs" };
+  const record = await fs.get(`userDeletions/${uid}`);
+  if (record && record.status !== "completed") return { status: 409, error: "deletion_in_progress" };
+  const name = docs[0].id;
+  const callerDocs = await findUserDocsByUid(fs, callerUid);
+  const byName = callerDocs.length === 1 ? callerDocs[0].id : "";
+  const delta = direction === "increase" ? amount : -amount;
+
+  for (let attempt = 1; attempt <= ADMIN_COIN_RETRY; attempt++) {
+    const user = await fs.getRaw(`users/${name}`);
+    if (!user || user.fields?.uid?.stringValue !== uid) return { status: 409, error: "user_not_found" };
+    const before = readIntegerField(user.fields.coins);
+    if (!Number.isSafeInteger(before)) return { status: 409, error: "invalid_balance" };
+    if (expected !== undefined && before !== expected) return { status: 409, error: "balance_changed", coins: before };
+    const after = before + delta;
+    if (after < 0) return { status: 409, error: "insufficient_coins", coins: before };
+    if (after > ADMIN_COIN_BALANCE_MAX) return { status: 400, error: "balance_too_large", coins: before };
+
+    const logId = crypto.randomUUID().replace(/-/g, "");
+    try {
+      await fs.commit([
+        {
+          update: { name: fs.docName(`users/${name}`), fields: { coins: { integerValue: String(after) } } },
+          updateMask: { fieldPaths: ["coins"] },
+          currentDocument: { updateTime: user.updateTime }
+        },
+        {
+          update: {
+            name: fs.docName(`adminAuditLogs/${logId}`),
+            fields: encodeFields({ action: "adjustCoins", targetUid: uid, targetName: name, direction, amount, delta, beforeCoins: before, afterCoins: after, byUid: callerUid, byName, result: "ok" })
+          },
+          updateTransforms: [{ fieldPath: "at", setToServerValue: "REQUEST_TIME" }],
+          currentDocument: { exists: false }
+        }
+      ]);
+      return { ok: true, name, direction, amount, beforeCoins: before, afterCoins: after };
+    } catch (error) {
+      /* 読んだあとに users が変わっていた（条件が合わない）・ほかの書き込みと重なったときは、少し待ってから読み直す */
+      const retryable = [400, 409].includes(error?.status) && /FAILED_PRECONDITION|ABORTED|does not match|contention|ALREADY_EXISTS/i.test(String(error.message));
+      if (!retryable) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 60 * attempt));
+    }
+  }
+  return { status: 409, error: "busy" };
+}
+
 /* Firestore にデータが1件もない Authentication のユーザー（名前を決める前にやめたゲストなど）だけを消す */
 async function adminDeleteAuthOnly(deps, callerUid, uid) {
   if (uid === deps.adminUid) return { status: 400, error: "cannot_target_admin" };
@@ -988,7 +1220,7 @@ function createFirestoreClient({ base, projectId, getAccessToken, fetchImpl }) {
     async commit(writes) {
       if (writes.length === 0) return;
       const response = await call(`${base}/${root}:commit`, { method: "POST", body: JSON.stringify({ writes }) });
-      if (!response.ok) throw new Error(`firestore commit ${response.status} ${await response.text()}`);
+      if (!response.ok) throw Object.assign(new Error(`firestore commit ${response.status} ${await response.text()}`), { status: response.status });
     },
 
     docName: (path) => `${root}/${path}`,

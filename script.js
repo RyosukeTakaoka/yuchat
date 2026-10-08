@@ -3049,7 +3049,10 @@ let pendingNotificationTarget = parseNotificationTarget(window.location.search);
 function parseNotificationTarget(search) {
   try {
     const params = new URLSearchParams(search || "");
-    if (params.get("open") !== "chat") return null;
+    const open = params.get("open");
+    /* 🏇 ゆうダービー開始前・📢 新しいお知らせの通知は、その画面を開く */
+    if (open === "derby" || open === "announcements") return { open };
+    if (open !== "chat") return null;
     return { open: "chat", friendship: params.get("friendship") || null, group: params.get("group") || null };
   } catch (error) {
     return null;
@@ -3071,6 +3074,13 @@ function clearNotificationParamsFromUrl() {
 function applyPendingNotificationTarget(source) {
   const target = pendingNotificationTarget;
   if (!target || !currentUser || !username) return;
+
+  if (target.open !== "chat") {
+    pendingNotificationTarget = null;
+    clearNotificationParamsFromUrl();
+    switchView(target.open);
+    return;
+  }
 
   if (!target.viewApplied) { target.viewApplied = true; switchView("chat"); }
 
@@ -5367,7 +5377,15 @@ let userManageLoading = false;
 let userManageBusy = false;
 let userManageSeq = 0;
 
+const ADMIN_COIN_ADJUST_MAX = 1000000;
+
 const ADMIN_ERROR_MESSAGES = {
+  invalid_amount: `金額は1〜${ADMIN_COIN_ADJUST_MAX.toLocaleString()}の整数で入力してください。`,
+  insufficient_coins: "残高がマイナスになるため、減らせません。",
+  balance_changed: "表示したあとに残高が変わっていました。最新の残高を表示し直したので、もう一度操作してください。",
+  balance_too_large: "残高が大きくなりすぎるため、増やせません。",
+  invalid_balance: "このユーザーのコインの値が正しくないため、変更できません。",
+  busy: "ほかの操作と重なったため変更できませんでした。もう一度お試しください。",
   not_admin: "管理者としてログインしていないため、操作できません。",
   invalid_uid: "対象のユーザーが正しくありません。",
   invalid_password: `パスワードは${ADMIN_PASSWORD_MIN_LENGTH}文字以上${ADMIN_PASSWORD_MAX_LENGTH}文字以内にしてください。`,
@@ -5618,9 +5636,23 @@ function renderUserManageDetail(info) {
   if (!info.isAdmin && (hasUserDoc || deleting)) buttons.push(`<button type="button" class="um-danger" data-um-action="delete">🗑 完全削除…</button>`);
   if (!info.isAdmin && !hasUserDoc && !deleting && auth) buttons.push(`<button type="button" class="um-danger" data-um-action="deleteAuthOnly">🗑 ログイン情報を削除…</button>`);
 
+  /* ゆうコインの増減（users があるユーザーだけ） */
+  const coins = Number.isSafeInteger(info.user?.coins) ? info.user.coins : 0;
+  const coinHtml = hasUserDoc && info.user && !deleting ? `
+    <section class="um-coins" aria-label="ゆうコインの増減">
+      <div class="um-coins-balance">ゆうコイン <b id="umCoinBalance">🪙 ${coins.toLocaleString()}</b></div>
+      <div class="um-coins-row">
+        <input id="umCoinAmount" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="7" placeholder="金額" aria-label="増減する金額" autocomplete="off">
+        <button type="button" data-um-coin="increase">＋増やす</button>
+        <button type="button" class="secondary" data-um-coin="decrease">−減らす</button>
+      </div>
+      <p id="umCoinError" class="admin-form-error"></p>
+    </section>` : "";
+
   openUserManageModal(`
     <h3>👤 ${escapeHTML(info.name || "ログイン情報だけのアカウント")}</h3>
     <dl class="um-detail">${rows.map(([k, v]) => `<dt>${escapeHTML(k)}</dt><dd>${escapeHTML(v)}</dd>`).join("")}</dl>
+    ${coinHtml}
     ${info.isAdmin ? `<p class="um-note">管理者のアカウントは停止・削除できません。</p>` : `<p class="um-note">サブアカウントかどうか確信がないときは、まず「停止」を使ってください（あとで解除できます）。完全削除は取り消せません。</p>`}
     <div class="um-actions">${buttons.join("")}</div>
     <div class="modal-buttons"><button class="modal-secondary" type="button" data-um-close>閉じる</button></div>
@@ -5630,6 +5662,47 @@ function renderUserManageDetail(info) {
   modalEl.querySelector('[data-um-action="unsuspend"]')?.addEventListener("click", () => runUserManageUnsuspend(info));
   modalEl.querySelector('[data-um-action="delete"]')?.addEventListener("click", () => renderUserManageDelete(info));
   modalEl.querySelector('[data-um-action="deleteAuthOnly"]')?.addEventListener("click", () => renderUserManageDeleteAuthOnly(info));
+  modalEl.querySelectorAll("[data-um-coin]").forEach((button) => button.addEventListener("click", () => runUserManageAdjustCoins(info, button.dataset.umCoin)));
+}
+
+/* ゆうコインを増やす・減らす（確認のあと Worker に頼む。残高の計算・確認は Worker でも必ず行う） */
+async function runUserManageAdjustCoins(info, direction) {
+  if (userManageBusy) return;
+  const input = document.getElementById("umCoinAmount");
+  const errorEl = document.getElementById("umCoinError");
+  showError(errorEl, "");
+  const text = (input?.value || "").trim();
+  const amount = /^[0-9]{1,7}$/.test(text) ? Number(text) : NaN;
+  if (!Number.isSafeInteger(amount) || amount < 1 || amount > ADMIN_COIN_ADJUST_MAX) return showError(errorEl, ADMIN_ERROR_MESSAGES.invalid_amount);
+
+  const before = Number.isSafeInteger(info.user?.coins) ? info.user.coins : 0;
+  const after = direction === "increase" ? before + amount : before - amount;
+  if (after < 0) return showError(errorEl, ADMIN_ERROR_MESSAGES.insufficient_coins);
+  if (!confirm(`ゆうコインを${amount.toLocaleString()}${direction === "increase" ? "増やし" : "減らし"}ますか？\n現在：${before.toLocaleString()} → ${after.toLocaleString()}`)) return;
+
+  userManageBusy = true;
+  modalEl.querySelectorAll("[data-um-coin]").forEach((b) => { b.disabled = true; });
+  try {
+    const result = await callAdminApi("adjustCoins", { uid: info.uid, direction, amount, expectedCoins: before });
+    info.user = { ...info.user, coins: result.afterCoins };
+    showAppToast("👤 ユーザー管理", `${info.name}のゆうコインを${amount.toLocaleString()}${direction === "increase" ? "増やしました" : "減らしました"}（${result.beforeCoins.toLocaleString()} → ${result.afterCoins.toLocaleString()}）`);
+    userManageBusy = false;
+    renderUserManageDetail(info);
+    loadUserManageList();
+  } catch (error) {
+    userManageBusy = false;
+    console.error("ゆうコインの増減エラー:", error.code || error.message);
+    if (error.code === "balance_changed" || error.code === "insufficient_coins") {
+      if (Number.isSafeInteger(error.detail?.coins)) info.user = { ...info.user, coins: error.detail.coins };
+      renderUserManageDetail(info);
+      showError(document.getElementById("umCoinError"), describeAdminError(error));
+      return;
+    }
+    showError(errorEl, describeAdminError(error));
+    modalEl.querySelectorAll("[data-um-coin]").forEach((b) => { b.disabled = false; });
+  } finally {
+    userManageBusy = false;
+  }
 }
 
 /* 読み間違えにくい文字だけで、ランダムなパスワードを作る */
@@ -6321,11 +6394,13 @@ document.getElementById("announcementForm")?.addEventListener("submit", async (e
       await updateDoc(doc(db, "announcements", editingAnnouncementId), { title, body, updatedAt: serverTimestamp() });
     } else {
       /* ID は Firestore の自動ID（端末側で作る・衝突しない） */
-      await setDoc(doc(collection(db, "announcements")), {
+      const ref = doc(collection(db, "announcements"));
+      await setDoc(ref, {
         title, body,
         createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
         createdByUid: currentUser.uid, createdByName: username || ""
       });
+      notifyNewAnnouncementToAll(ref.id);
     }
     resetAnnouncementForm();
   } catch (err) {
@@ -6336,6 +6411,16 @@ document.getElementById("announcementForm")?.addEventListener("submit", async (e
     if (button) button.disabled = false;
   }
 });
+
+/* 新しいお知らせのプッシュ通知を、通知サーバーに頼む（管理者だけ。同じお知らせは通知サーバーが1回だけ送る）。
+   お知らせはすでに保存済みなので、通知に失敗してもお知らせはそのまま */
+async function notifyNewAnnouncementToAll(announcementId) {
+  try {
+    await callAdminApi("notifyAnnouncement", { announcementId });
+  } catch (error) {
+    console.warn("お知らせの通知に失敗しました（お知らせは公開済み）:", error?.code || error?.message || error);
+  }
+}
 
 document.getElementById("announcementEditCancelButton")?.addEventListener("click", resetAnnouncementForm);
 
