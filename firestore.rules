@@ -40,9 +40,9 @@ service cloud.firestore {
 
     // 下のコレクションは、このあとの専用のルールで書き込みを判定する（今までの「ログイン済みなら書ける」をもとに、一部だけ絞る）
     //   users：自分のデータだけ（管理者による名前の強制変更を除く）／adminNameChanges：管理者の名前変更の記録
-    //   raceBets：固定オッズ方式のレースの精算の条件
+    //   raceBets：固定オッズ方式のレースの精算の条件／friends：友達関係の解除（削除）は当事者だけ
     function hasDedicatedWriteRules(collection) {
-      return collection in ['users', 'adminNameChanges', 'raceBets'];
+      return collection in ['users', 'adminNameChanges', 'raceBets', 'friends'];
     }
 
     // 下のコレクションは管理者だけが読める
@@ -186,6 +186,28 @@ service cloud.firestore {
     // users の下のデータ（サブコレクション）は今まで通り（{rest=**} は 0 階層にも一致するので、1階層目を {sub} で受ける）
     match /users/{userName}/{sub}/{rest=**} {
       allow read, write: if signedIn();
+    }
+
+    // ===== 友達関係（friends/{friendshipId}） =====
+    // 作成・更新（友達追加・最新メッセージ・既読・プロフィール画像・名前変更の引き継ぎ）：今まで通りログイン済みなら可
+    // 削除（友達関係の解除）：その友達関係の当事者（user1 / user2）だけ。メッセージ（messages）は消さない
+    //   当事者かどうかは uid の項目（user1Uid / user2Uid）で判定し、uid の項目が無い古い友達関係は、名前から users の uid を見て判定する
+    match /friends/{friendshipId} {
+      allow create, update: if signedIn();
+      allow delete: if signedIn() && isFriendshipMember(resource.data);
+
+      function isFriendshipMember(data) {
+        return data.get('user1Uid', '') == request.auth.uid
+          || data.get('user2Uid', '') == request.auth.uid
+          || (data.get('user1Uid', '') == '' && isUserNamed(data.get('user1', '')))
+          || (data.get('user2Uid', '') == '' && isUserNamed(data.get('user2', '')));
+      }
+
+      function isUserNamed(name) {
+        return name is string && name != ''
+          && exists(/databases/$(database)/documents/users/$(name))
+          && get(/databases/$(database)/documents/users/$(name)).data.get('uid', '') == request.auth.uid;
+      }
     }
 
     // ===== 管理者による名前の強制変更の記録（adminNameChanges/{古い名前}） =====

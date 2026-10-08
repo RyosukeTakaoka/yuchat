@@ -325,6 +325,32 @@ const min = (m) => new Date(Date.now() + m * 60000);
   await ng("管理者でも、ブラウザから削除の進み具合は書けない", setDoc(doc(admin, "userDeletions/userB"), { status: "completed" }));
   await ng("未ログイン：停止の記録の読み取り", getDoc(doc(anon, "suspendedUsers/userB")));
 
+  log.push("--- 友達関係の解除（friends の削除）は当事者だけ。作成・更新は今まで通り");
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const d = ctx.firestore();
+    await setDoc(doc(d, "users/carol"), { uid: "userC", name: "carol" });
+    await setDoc(doc(d, "friends/alice_bob"), { user1: "alice", user2: "bob", user1Uid: "userA", user2Uid: "userB" });
+    await setDoc(doc(d, "friends/bob_carol"), { user1: "bob", user2: "carol", user1Uid: "userB", user2Uid: "userC" });
+    await setDoc(doc(d, "friends/alice_carol"), { user1: "alice", user2: "carol", user1Uid: "userA", user2Uid: "userC" });
+    await setDoc(doc(d, "friends/alice_dave"), { user1: "alice", user2: "dave" }); /* uid の項目が無い古い友達関係 */
+    await setDoc(doc(d, "friends/bob_dave"), { user1: "bob", user2: "dave" });
+    await setDoc(doc(d, "messages/fm1"), { type: "friend", friendshipId: "alice_bob", sender: "alice", receiver: "bob", text: "やあ" });
+  });
+  const carol = env.authenticatedContext("userC").firestore();
+  await ng("友達削除：当事者でない人（carol）が alice と bob の友達関係を消す", deleteDoc(doc(carol, "friends/alice_bob")));
+  await ng("友達削除：当事者でない人（alice）が bob と carol の友達関係を消す", deleteDoc(doc(A, "friends/bob_carol")));
+  await ng("友達削除：未ログインで消す", deleteDoc(doc(anon, "friends/alice_bob")));
+  await ng("友達削除：uid の項目が無い古い友達関係を、当事者でない人（carol）が消す", deleteDoc(doc(carol, "friends/bob_dave")));
+  await ng("友達削除：一括書き込み（batch）でも、他人の友達関係は消せない", (() => { const b = writeBatch(carol); b.delete(doc(carol, "friends/alice_bob")); return b.commit(); })());
+  await ok("友達削除：当事者（user1 の alice）が消せる", deleteDoc(doc(A, "friends/alice_carol")));
+  await ok("友達削除：当事者（user2 の bob）が消せる", deleteDoc(doc(B, "friends/alice_bob")));
+  await ok("友達削除：uid の項目が無い古い友達関係も、名前の持ち主（alice）なら消せる", deleteDoc(doc(A, "friends/alice_dave")));
+  await ok("友達削除のあとも、1対1のメッセージは残っていて読める", (async () => { const m = await getDoc(doc(A, "messages/fm1")); if (!m.exists()) throw new Error("メッセージが消えた"); })());
+  await ok("友達削除のあとも、別の友達関係（bob と carol）は残っている", (async () => { const f = await getDoc(doc(carol, "friends/bob_carol")); if (!f.exists()) throw new Error("消えた"); })());
+  await ok("友達追加（作成）は今まで通り", setDoc(doc(A, "friends/alice_bob"), { user1: "alice", user2: "bob", user1Uid: "userA", user2Uid: "userB", createdAt: serverTimestamp() }));
+  await ok("友達関係の更新（最新メッセージ・既読）は今まで通り", updateDoc(doc(B, "friends/alice_bob"), { lastMessagePreview: "x", user2LastReadAt: serverTimestamp() }));
+  await ok("名前変更の引き継ぎ（他人も含む友達関係の更新）は今まで通り", updateDoc(doc(carol, "friends/bob_carol"), { user2: "carol2", updatedAt: serverTimestamp() }));
+
   await env.cleanup();
   console.log(log.join("\n"));
   console.log(`\nRules セキュリティテスト: ${pass} PASS / ${fail} FAIL`);

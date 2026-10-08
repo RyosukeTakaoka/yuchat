@@ -187,7 +187,11 @@ const TEST_CASES = [
   testCase("DENY", "一般：操作の記録の読み取り", userA, "get", "adminAuditLogs/l1", { existing: { action: "setPassword" } }),
   testCase("DENY", "管理者：ブラウザから操作の記録を書き換える", admin, "update", "adminAuditLogs/l1", { data: { action: "x" }, existing: { action: "setPassword" } }),
   testCase("DENY", "一般：削除の進み具合の読み取り", userA, "get", `userDeletions/${userA.uid}`, { existing: { status: "failed" } }),
-  testCase("DENY", "管理者：ブラウザから削除の進み具合を書く", admin, "create", "userDeletions/someoneElse", { data: { status: "completed" } })
+  testCase("DENY", "管理者：ブラウザから削除の進み具合を書く", admin, "create", "userDeletions/someoneElse", { data: { status: "completed" } }),
+  // 友達関係の解除（friends の削除）は当事者だけ。作成・更新は今まで通り
+  testCase("ALLOW", "friends：当事者が友達関係を解除", userA, "delete", "friends/alice_bob", { existing: { user1: "alice", user2: "bob", user1Uid: userA.uid, user2Uid: "someoneElse" } }),
+  testCase("DENY", "friends：当事者でない人が友達関係を解除", userA, "delete", "friends/bob_carol", { existing: { user1: "bob", user2: "carol", user1Uid: "someoneElse", user2Uid: "anotherOne" } }),
+  testCase("ALLOW", "friends：最新メッセージ・既読の更新（今まで通り）", userA, "update", "friends/bob_carol", { data: { user1: "bob", user2: "carol", lastMessagePreview: "x" }, existing: { user1: "bob", user2: "carol" } })
 ];
 
 async function runProductionEngineTests(api, projectId, source) {

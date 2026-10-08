@@ -5477,3 +5477,49 @@ button.secondary {
     font-size: 13px;
     font-weight: 700;
 }
+
+
+/* ==================================================
+   友達：タップでチャット・長押し／「⋯」で友達の削除
+================================================== */
+
+/* 長押しで文字選択や iOS のメニューが出ないように */
+.chips button.friend-item {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.chat-header-profile .friend-menu-button {
+    min-width: 40px;
+    min-height: 32px;
+
+    font-size: 18px;
+    line-height: 1;
+}
+
+.friend-menu-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.friend-menu-actions button {
+    width: 100%;
+    min-height: 44px;
+
+    border: none;
+    border-radius: 10px;
+
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.modal-danger {
+    background: #c62828;
+    color: #fff;
+}
+
+.modal-buttons button.modal-danger:disabled {
+    opacity: .5;
+}
