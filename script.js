@@ -3049,7 +3049,10 @@ let pendingNotificationTarget = parseNotificationTarget(window.location.search);
 function parseNotificationTarget(search) {
   try {
     const params = new URLSearchParams(search || "");
-    if (params.get("open") !== "chat") return null;
+    const open = params.get("open");
+    /* 🏇 ゆうダービー開始前・📢 新しいお知らせの通知は、その画面を開く */
+    if (open === "derby" || open === "announcements") return { open };
+    if (open !== "chat") return null;
     return { open: "chat", friendship: params.get("friendship") || null, group: params.get("group") || null };
   } catch (error) {
     return null;
@@ -3071,6 +3074,13 @@ function clearNotificationParamsFromUrl() {
 function applyPendingNotificationTarget(source) {
   const target = pendingNotificationTarget;
   if (!target || !currentUser || !username) return;
+
+  if (target.open !== "chat") {
+    pendingNotificationTarget = null;
+    clearNotificationParamsFromUrl();
+    switchView(target.open);
+    return;
+  }
 
   if (!target.viewApplied) { target.viewApplied = true; switchView("chat"); }
 
@@ -6384,11 +6394,13 @@ document.getElementById("announcementForm")?.addEventListener("submit", async (e
       await updateDoc(doc(db, "announcements", editingAnnouncementId), { title, body, updatedAt: serverTimestamp() });
     } else {
       /* ID は Firestore の自動ID（端末側で作る・衝突しない） */
-      await setDoc(doc(collection(db, "announcements")), {
+      const ref = doc(collection(db, "announcements"));
+      await setDoc(ref, {
         title, body,
         createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
         createdByUid: currentUser.uid, createdByName: username || ""
       });
+      notifyNewAnnouncementToAll(ref.id);
     }
     resetAnnouncementForm();
   } catch (err) {
@@ -6399,6 +6411,16 @@ document.getElementById("announcementForm")?.addEventListener("submit", async (e
     if (button) button.disabled = false;
   }
 });
+
+/* 新しいお知らせのプッシュ通知を、通知サーバーに頼む（管理者だけ。同じお知らせは通知サーバーが1回だけ送る）。
+   お知らせはすでに保存済みなので、通知に失敗してもお知らせはそのまま */
+async function notifyNewAnnouncementToAll(announcementId) {
+  try {
+    await callAdminApi("notifyAnnouncement", { announcementId });
+  } catch (error) {
+    console.warn("お知らせの通知に失敗しました（お知らせは公開済み）:", error?.code || error?.message || error);
+  }
+}
 
 document.getElementById("announcementEditCancelButton")?.addEventListener("click", resetAnnouncementForm);
 

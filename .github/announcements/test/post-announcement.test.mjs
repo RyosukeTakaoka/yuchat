@@ -106,11 +106,17 @@ function fakeGitHub(pulls) {
   return { fetchImpl, calls };
 }
 
-function fakeFirestore() {
-  const docs = new Map();
+function fakeFirestore(tokens = []) {
+  const docs = new Map(tokens.map((t) => [`fcmTokens/${t}`, { uid: `u-${t}` }]));
+  const announcements = () => [...docs.keys()].filter((k) => k.startsWith("announcements/"));
   return {
     docs,
-    async createIfAbsent(path, data) { if (docs.has(path)) return false; docs.set(path, data); return true; }
+    announcements,
+    async createIfAbsent(path, data) { if (docs.has(path)) return false; docs.set(path, data); return true; },
+    async get(path) { return docs.has(path) ? { ...docs.get(path) } : null; },
+    async query(collection) { return [...docs.keys()].filter((k) => k.startsWith(`${collection}/`)).map((k) => ({ id: k.split("/")[1], path: k, data: docs.get(k) })); },
+    async update(path, data) { docs.set(path, { ...(docs.get(path) || {}), ...data }); },
+    async delete(path) { docs.delete(path); }
   };
 }
 
@@ -128,11 +134,12 @@ const SECRET_JSON = JSON.stringify({ project_id: "yuuchat-be666", private_key: "
 const TOKEN = "ghs_tokenThatMustNeverBePrinted0123456789";
 const baseEnv = (extra) => ({ GITHUB_REPOSITORY: "o/r", GITHUB_TOKEN: TOKEN, FIREBASE_SERVICE_ACCOUNT: SECRET_JSON, GITHUB_EVENT_NAME: "push", ...extra });
 
-async function runWith(env, firestore = fakeFirestore()) {
+async function runWith(env, firestore = fakeFirestore(), sendFcm = undefined) {
   const lines = [];
+  const pushes = [];
   const { fetchImpl, calls } = fakeGitHub(PRS);
-  const result = await run({ env: baseEnv(env), fetchImpl, firestore, log: (l) => lines.push(l) });
-  return { result, firestore, lines, calls };
+  const result = await run({ env: baseEnv(env), fetchImpl, firestore, sendFcm: sendFcm || (async (token, data) => { pushes.push({ token, data }); return { ok: true }; }), log: (l) => lines.push(l) });
+  return { result, firestore, lines, calls, pushes };
 }
 
 test("main にマージされた PR の push：お知らせを announcements/pr-27 に、既存と同じ形で保存する", async () => {
@@ -156,13 +163,13 @@ test("同じ PR で何回実行しても、お知らせは1件だけ（push と�
   const third = await runWith({ GITHUB_EVENT_NAME: "workflow_dispatch", PR_NUMBER: "27" }, firestore);
   assert.deepEqual([first.result.posted, second.result.posted, third.result.posted], [true, false, false]);
   assert.equal(second.result.reason, "duplicate");
-  assert.equal(firestore.docs.size, 1);
+  assert.equal(firestore.announcements().length, 1);
 });
 
 test("マージされていない PR では作らない（手動実行で番号を指定しても）", async () => {
   const r = await runWith({ GITHUB_EVENT_NAME: "workflow_dispatch", PR_NUMBER: "28" });
   assert.deepEqual([r.result.posted, r.result.reason], [false, "not_merged"]);
-  assert.equal(r.firestore.docs.size, 0);
+  assert.equal(r.firestore.announcements().length, 0);
 });
 
 test("main 以外へのマージ・PR ではない push・開いている PR に含まれるだけのコミットでは作らない", async () => {
@@ -175,7 +182,7 @@ test("main 以外へのマージ・PR ではない push・開いている PR に
 test("お知らせの欄が無い PR では作らない", async () => {
   const r = await runWith({ GITHUB_SHA: "ccc333" });
   assert.deepEqual([r.result.posted, r.result.reason], [false, "no_section"]);
-  assert.equal(r.firestore.docs.size, 0);
+  assert.equal(r.firestore.announcements().length, 0);
 });
 
 test("手動実行の PR 番号が正しくなければ、GitHub にも問い合わせない", async () => {
@@ -189,7 +196,7 @@ test("手動実行の PR 番号が正しくなければ、GitHub にも問い合
 test("お知らせ文に秘密の値らしいものがあれば作らず、その中身はログに出さない", async () => {
   const r = await runWith({ GITHUB_SHA: "eee555" });
   assert.deepEqual([r.result.posted, r.result.reason], [false, "secret"]);
-  assert.equal(r.firestore.docs.size, 0);
+  assert.equal(r.firestore.announcements().length, 0);
   const all = r.lines.join("\n");
   assert.match(all, /::warning::/);
   assert.ok(!all.includes("AIzaSy"), "見つけた値そのものは出さない");
@@ -206,4 +213,42 @@ test("どの場合も、ログに GITHUB_TOKEN・サービスアカウントの�
 test("サービスアカウントが別のプロジェクトのものなら、Firestore に書かずに止める", async () => {
   const { fetchImpl } = fakeGitHub(PRS);
   await assert.rejects(run({ env: baseEnv({ GITHUB_SHA: "aaa111", FIREBASE_SERVICE_ACCOUNT: JSON.stringify({ project_id: "other" }) }), fetchImpl, log: () => {} }), /プロジェクトが違います/);
+});
+
+/* ===== 📢 プッシュ通知（自動のお知らせ） ===== */
+
+test("自動のお知らせを作ったら、通知を ON にした全端末へ「📢 ゆうChatアップデート」を送る（タップでお知らせ画面）", async () => {
+  const firestore = fakeFirestore(["t1", "t2"]);
+  const r = await runWith({ GITHUB_SHA: "aaa111" }, firestore);
+  assert.equal(r.result.posted, true);
+  assert.deepEqual(r.pushes.map((p) => p.token).sort(), ["t1", "t2"]);
+  assert.deepEqual(r.pushes[0].data, { kind: "announcement", announcementId: "pr-27", title: "📢 ゆうChatアップデート", body: "ゆうコインの管理を追加しました", link: "./?open=announcements", tag: "announcement-pr-27" });
+  assert.ok(firestore.docs.has("notificationLogs/announcement-pr-27"));
+});
+
+test("同じ PR で再実行しても、通知は二重に送らない", async () => {
+  const firestore = fakeFirestore(["t1"]);
+  const first = await runWith({ GITHUB_SHA: "aaa111" }, firestore);
+  const second = await runWith({ GITHUB_SHA: "aaa111" }, firestore);
+  assert.deepEqual([first.pushes.length, second.pushes.length], [1, 0]);
+  assert.equal(second.result.notified.skipped, "duplicate");
+});
+
+test("通知が失敗しても、お知らせは作られたまま（警告だけ）。トークンが無くてもエラーにならない", async () => {
+  const failing = fakeFirestore(["t1"]);
+  failing.query = async () => { throw new Error("firestore query 500 boom"); };
+  const r = await runWith({ GITHUB_SHA: "aaa111" }, failing);
+  assert.equal(r.result.posted, true);
+  assert.ok(failing.docs.has("announcements/pr-27"));
+  assert.match(r.lines.join("\n"), /::warning::プッシュ通知を送れませんでした（お知らせは作成済み）/);
+  const empty = await runWith({ GITHUB_SHA: "aaa111" }, fakeFirestore([]));
+  assert.equal(empty.result.posted, true);
+  assert.deepEqual([empty.result.notified.tokens, empty.result.notified.sent], [0, 0]);
+});
+
+test("お知らせを作らなかったとき（欄が無い・未マージ・秘密の値）は通知もしない", async () => {
+  for (const env of [{ GITHUB_SHA: "ccc333" }, { GITHUB_EVENT_NAME: "workflow_dispatch", PR_NUMBER: "28" }, { GITHUB_SHA: "eee555" }]) {
+    const r = await runWith(env, fakeFirestore(["t1"]));
+    assert.equal(r.pushes.length, 0);
+  }
 });

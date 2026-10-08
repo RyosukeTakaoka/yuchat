@@ -7,6 +7,8 @@
    2. PR の本文から「## 📢 お知らせ文」の「### タイトル」「### 本文」を取り出す（無い・空なら何もしない）
    3. 秘密の値（鍵・トークン・パスワードなど）らしいものが含まれていたら、載せずに止める
    4. announcements/pr-{番号} を「まだ無いときだけ」作る（同じ PR で何回実行しても1件だけ）
+   5. 通知を ON にした端末へ「📢 ゆうChatアップデート」のプッシュ通知を送る（通知サーバーと同じ処理。同じお知らせは1回だけ）
+      通知に失敗しても、お知らせはそのまま（警告だけ出す）
 
    環境変数：FIREBASE_SERVICE_ACCOUNT（Secrets）、GITHUB_TOKEN、GITHUB_REPOSITORY、GITHUB_SHA、GITHUB_EVENT_NAME、
             PR_NUMBER（手動実行のとき）、GITHUB_STEP_SUMMARY
@@ -14,7 +16,7 @@
 ========================================================= */
 
 import fs from "fs";
-import { createDefaultDeps } from "../../notify-worker/worker.js";
+import { createDefaultDeps, notifyNewAnnouncement } from "../../notify-worker/worker.js";
 
 export const TITLE_MAX = 50;
 export const BODY_MAX = 500;
@@ -104,7 +106,7 @@ export async function findMergedPullRequest({ repo, sha, eventName, prNumber, to
 
 /* ----- 本体 ----- */
 
-export async function run({ env = process.env, fetchImpl = fetch, firestore = null, log = console.log } = {}) {
+export async function run({ env = process.env, fetchImpl = fetch, firestore = null, sendFcm = null, log = console.log } = {}) {
   const summary = (text) => { if (env.GITHUB_STEP_SUMMARY) fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `${text}\n`); };
   const found = await findMergedPullRequest({
     repo: env.GITHUB_REPOSITORY, sha: env.GITHUB_SHA, eventName: env.GITHUB_EVENT_NAME, prNumber: env.PR_NUMBER, token: env.GITHUB_TOKEN, fetchImpl
@@ -135,12 +137,15 @@ export async function run({ env = process.env, fetchImpl = fetch, firestore = nu
     return { posted: false, reason: "secret", number: pr.number };
   }
 
-  let fsClient = firestore;
-  if (!fsClient) {
+  let deps;
+  if (firestore) {
+    deps = { firestore, sendFcm: sendFcm || (async () => ({ ok: true })), now: () => Date.now() };
+  } else {
     const sa = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT || "{}");
     if (sa.project_id !== EXPECTED_PROJECT_ID) throw new Error("サービスアカウントのプロジェクトが違います");
-    fsClient = createDefaultDeps({ FIREBASE_SERVICE_ACCOUNT: env.FIREBASE_SERVICE_ACCOUNT, FIREBASE_PROJECT_ID: EXPECTED_PROJECT_ID }).firestore;
+    deps = createDefaultDeps({ FIREBASE_SERVICE_ACCOUNT: env.FIREBASE_SERVICE_ACCOUNT, FIREBASE_PROJECT_ID: EXPECTED_PROJECT_ID });
   }
+  const fsClient = deps.firestore;
 
   const now = new Date();
   const id = `pr-${pr.number}`;
@@ -156,7 +161,21 @@ export async function run({ env = process.env, fetchImpl = fetch, firestore = nu
     ? `PR #${pr.number} のお知らせを作りました（announcements/${id}・タイトル「${parsed.title}」・本文 ${parsed.body.length} 文字${parsed.truncated ? "・長いので途中まで" : ""}）`
     : `PR #${pr.number} のお知らせはすでにあるので、作りませんでした（announcements/${id}）`;
   log(message); summary(`- ${message}`);
-  return { posted: created, reason: created ? "posted" : "duplicate", number: pr.number, id };
+
+  /* プッシュ通知（すでに作ってあったお知らせでも呼ぶ。送った記録があれば送らないので二重にならない） */
+  let notified = null;
+  try {
+    const result = await notifyNewAnnouncement(deps, id);
+    notified = result;
+    const note = result.skipped === "duplicate"
+      ? "このお知らせのプッシュ通知はすでに送ってあります"
+      : `プッシュ通知：${result.tokens ?? 0} 台中 ${result.sent ?? 0} 台に送信${result.failed ? `（失敗 ${result.failed} 台）` : ""}`;
+    log(note); summary(`- ${note}`);
+  } catch (error) {
+    const note = `プッシュ通知を送れませんでした（お知らせは作成済み）：${String(error?.message || error).split(" ")[0].slice(0, 80)}`;
+    log(`::warning::${note}`); summary(`- ⚠ ${note}`);
+  }
+  return { posted: created, reason: created ? "posted" : "duplicate", number: pr.number, id, notified };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
