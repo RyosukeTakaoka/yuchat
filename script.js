@@ -1322,6 +1322,8 @@ function listenFriends() {
     friendDocsAsUser1.forEach((item) => byId.set(item.id, toFriendEntry(item, true)));
     friendDocsAsUser2.forEach((item) => { if (!byId.has(item.id)) byId.set(item.id, toFriendEntry(item, false)); });
     friendsData = [...byId.values()].sort((a, b) => (a.friendshipId < b.friendshipId ? -1 : 1));
+    /* 開いていた友達との友達関係が解除されたら（自分・相手のどちらが解除しても）チャットを閉じる */
+    if (selectedChatType === "friend" && selectedFriendshipId && !friendsData.some((f) => f.friendshipId === selectedFriendshipId)) resetChat();
     notifyNewChatMessages("friend", friendsData);
     renderFriends();
     refreshSelectedChatReadMarks();
@@ -1376,11 +1378,17 @@ function renderFriends() {
     info.append(buildNameWithUnreadMark(name, friend.unread && !isViewingChat("friend", friend.friendshipId)));
     item.append(avatar, info);
 
-    item.addEventListener("click", () => selectFriendChat(friend));
-    item.addEventListener("contextmenu", async (event) => {
-      event.preventDefault();
-      if (confirm(`${friend.friend}を友達から削除しますか？`)) await deleteFriend(friend);
+    /* タップ：その友達との1対1チャットを開く（ほかのタブを表示中でもチャット画面に切り替える）
+       長押し（スマホ・iPad）・右クリック（パソコン）：友達の削除 */
+    item.addEventListener("click", (event) => {
+      if (item.dataset.longPressed === "1") { delete item.dataset.longPressed; event.preventDefault(); return; }
+      openFriendChat(friend);
     });
+    item.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      openDeleteFriendDialog(friend);
+    });
+    attachLongPress(item, () => openDeleteFriendDialog(friend));
 
     friendsList.appendChild(item);
   });
@@ -1431,15 +1439,80 @@ addFriendButton?.addEventListener("click", async () => {
   }
 });
 
+/* 友達関係の解除：friends/{friendshipId} だけを消す（自分と相手の両方の友達一覧から消える）
+   1対1のメッセージ（messages）・グループ・通知の登録には触れない（もう一度友達になれば、過去のメッセージも表示される） */
 async function deleteFriend(friend) {
-  if (!friend?.friendshipId) return;
+  if (!friend?.friendshipId) return false;
   try {
     await deleteDoc(doc(db, "friends", friend.friendshipId));
-    if (selectedChat === friend.friend) resetChat();
+    if (selectedChatType === "friend" && selectedFriendshipId === friend.friendshipId) resetChat();
+    showAppToast("👥 友達", `${friend.friend}との友達関係を解除しました`);
+    return true;
   } catch (error) {
     console.error("友達削除エラー:", error);
     alert("友達の削除に失敗しました。");
+    return false;
   }
+}
+
+/* 友達をタップしたとき：その友達との1対1チャットを開く（チャットタブから開いたときと同じ画面・同じデータ） */
+function openFriendChat(friend) {
+  if (!friend) return;
+  if (!chatView?.classList.contains("active")) switchView("chat");
+  selectFriendChat(friend);
+}
+
+/* 長押し（タッチ・ペン）。マウスは右クリック（contextmenu）で扱う */
+function attachLongPress(element, onLongPress, delay = 550) {
+  let timer = null;
+  let startX = 0, startY = 0;
+  const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  element.addEventListener("pointerdown", (event) => {
+    delete element.dataset.longPressed;
+    if (event.pointerType === "mouse") return;
+    cancel();
+    startX = event.clientX; startY = event.clientY;
+    timer = setTimeout(() => { timer = null; element.dataset.longPressed = "1"; onLongPress(); }, delay);
+  });
+  element.addEventListener("pointermove", (event) => {
+    if (timer && Math.hypot(event.clientX - startX, event.clientY - startY) > 10) cancel();
+  });
+  ["pointerup", "pointercancel", "pointerleave"].forEach((type) => element.addEventListener(type, cancel));
+}
+
+/* 友達のメニュー（チャット画面の「⋯」） */
+function openFriendMenu(friend) {
+  if (!friend) return;
+  const modal = openChatModal(`
+    <h3>${escapeHTML(friend.friend)}</h3>
+    <div class="friend-menu-actions">
+      <button class="modal-danger" type="button" data-friend-delete>友達を削除</button>
+    </div>
+    <div class="modal-buttons">
+      <button class="modal-secondary" type="button" data-modal-close>閉じる</button>
+    </div>`);
+  modal?.querySelector("[data-friend-delete]")?.addEventListener("click", () => openDeleteFriendDialog(friend));
+}
+
+/* 削除の確認（誤操作を防ぐため、必ずこの画面で「友達を削除」を押したときだけ消す） */
+function openDeleteFriendDialog(friend) {
+  if (!friend?.friendshipId || !modalEl) return;
+  /* 長押しと右クリックが両方起きたときなど、同じ確認を二重に開かない */
+  if (!modalEl.classList.contains("hidden") && modalEl.querySelector("[data-friend-delete-confirm]")?.dataset.friendDeleteConfirm === friend.friendshipId) return;
+  const modal = openChatModal(`
+    <h3>友達を削除</h3>
+    <p class="group-modal-note">${escapeHTML(friend.friend)}との友達関係を解除しますか？<br>これまでの1対1のメッセージは消えません。</p>
+    <div class="modal-buttons">
+      <button class="modal-secondary" type="button" data-modal-close>キャンセル</button>
+      <button class="modal-danger" type="button" data-friend-delete-confirm="${escapeHTML(friend.friendshipId)}">友達を削除</button>
+    </div>`);
+  if (!modal) return;
+  const confirmButton = modal.querySelector("[data-friend-delete-confirm]");
+  confirmButton?.addEventListener("click", async () => {
+    confirmButton.disabled = true;
+    const done = await deleteFriend(friend);
+    if (done) closeChatModal(); else confirmButton.disabled = false;
+  });
 }
 
 /* =========================================================
@@ -1809,6 +1882,16 @@ function renderChatHeaderForFriend(friend) {
 
   info.append(name);
   wrap.append(avatar, info);
+
+  const menu = document.createElement("button");
+  menu.type = "button";
+  menu.className = "group-manage-button friend-menu-button";
+  menu.title = "友達のメニュー";
+  menu.setAttribute("aria-label", `${friend.friend}のメニュー`);
+  menu.textContent = "⋯";
+  menu.addEventListener("click", () => openFriendMenu(friend));
+  wrap.appendChild(menu);
+
   chatHeader.appendChild(wrap);
 }
 
@@ -8703,13 +8786,9 @@ function renderEconomyView() {
 
   const cardsHtml = STOCK_COMPANIES.map((c) => {
     const info = market.companies?.[c.code] || {};
-    const price = getStockPrice(market, c.code);
-    const holding = stocks[c.code];
-    const qty = stockTradeQty[c.code] || 1;
+    const { price, holding, qty, canBuy, canSell } = getStockTradeState(c.code, stocks, market, assets);
     const value = holding ? holding.qty * price : 0;
     const profit = holding ? value - holding.cost : 0;
-    const canBuy = assets.coins >= price * qty;
-    const canSell = holding && holding.qty >= qty;
     return `
       <article class="stock-card" data-code="${c.code}">
         <div class="stock-head">
@@ -8752,17 +8831,50 @@ function renderEconomyView() {
       ${holdingsHtml}
     </section>`;
 
-  /* 入力中の値・フォーカスを、描き直しても保つ */
+  /* 入力中の値・フォーカス・スクロール位置を、描き直しても保つ
+     （中身を丸ごと入れ替えるので、Safari などでは新しい入力欄への focus やスクロール領域の作り直しで位置が動くことがある） */
   const active = document.activeElement;
   const activeKey = active && economyContent.contains(active)
     ? (active.id || (active.closest(".stock-card")?.dataset.code || "") + (active.matches("[data-qty-input]") ? ":qty" : ""))
     : null;
+  const scrollTop = economyView?.scrollTop ?? 0;
   economyContent.innerHTML = `${summaryHtml}<div class="econ-columns">${bankHtml}${stocksHtml}</div>`;
   if (activeKey) {
     const target = activeKey === "econBankAmount" ? document.getElementById("econBankAmount")
       : activeKey.endsWith(":qty") ? economyContent.querySelector(`.stock-card[data-code="${activeKey.split(":")[0]}"] [data-qty-input]`) : null;
-    if (target) { target.focus(); const v = target.value; target.value = ""; target.value = v; }
+    if (target) { target.focus({ preventScroll: true }); const v = target.value; target.value = ""; target.value = v; }
   }
+  if (economyView && economyView.scrollTop !== scrollTop) economyView.scrollTop = scrollTop;
+}
+
+/* 株を売買するときの値（カードの表示・ボタンの有効／無効に使う） */
+function getStockTradeState(code, stocks, market, assets) {
+  const price = getStockPrice(market, code);
+  const holding = stocks[code];
+  const qty = stockTradeQty[code] || 1;
+  return { price, holding, qty, canBuy: assets.coins >= price * qty, canSell: Boolean(holding && holding.qty >= qty) };
+}
+
+/* 株数（＋／−・入力）を変えたときは、そのカードの株数・合計・ボタンだけを書き換える
+   （画面全体を描き直さないので、スクロール位置もフォーカスもそのまま）。カードが無ければ false */
+function updateStockCardControls(code) {
+  const card = economyContent?.querySelector(`.stock-card[data-code="${code}"]`);
+  if (!card || !currentUser || !username) return false;
+  const data = myLatestUserData && myLatestUserData.docId === username ? myLatestUserData : { coins: myCoins };
+  const market = marketCache?.data || createInitialMarketData();
+  const stocks = normalizeStocksData(data.stocks);
+  const { price, qty, canBuy, canSell } = getStockTradeState(code, stocks, market, computeMyAssets(data, market));
+
+  const input = card.querySelector("[data-qty-input]");
+  const total = card.querySelector(".stock-total b");
+  const buy = card.querySelector('[data-trade="buy"]');
+  const sell = card.querySelector('[data-trade="sell"]');
+  if (!input || !total || !buy || !sell) return false;
+  if (input.value !== String(qty)) input.value = String(qty);
+  total.textContent = formatCoins(price * qty);
+  buy.disabled = economyBusy || !canBuy;
+  sell.disabled = economyBusy || !canSell;
+  return true;
 }
 
 economyContent?.addEventListener("input", (event) => {
@@ -8776,7 +8888,9 @@ economyContent?.addEventListener("input", (event) => {
 });
 
 economyContent?.addEventListener("change", (event) => {
-  if (event.target.matches("[data-qty-input]")) renderEconomyView();
+  if (!event.target.matches("[data-qty-input]")) return;
+  const code = event.target.closest(".stock-card")?.dataset.code;
+  if (!code || !updateStockCardControls(code)) renderEconomyView();
 });
 
 economyContent?.addEventListener("click", (event) => {
@@ -8797,7 +8911,7 @@ economyContent?.addEventListener("click", (event) => {
     const code = button.closest(".stock-card")?.dataset.code;
     if (!code) return;
     stockTradeQty[code] = Math.min(ECONOMY_MAX_TRADE_QTY, Math.max(1, (stockTradeQty[code] || 1) + Number(button.dataset.qtyStep)));
-    renderEconomyView();
+    if (!updateStockCardControls(code)) renderEconomyView();
     return;
   }
 
