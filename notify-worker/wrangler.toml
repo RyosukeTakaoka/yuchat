@@ -1,11 +1,19 @@
 # ゆうChat 通知サーバー（Cloudflare Workers）
-# コマンドで公開する場合：npx wrangler deploy
-# 鍵の登録：npx wrangler secret put FIREBASE_SERVICE_ACCOUNT（JSON の中身を貼り付け）
-# 管理画面に worker.js を貼り付けて使う場合、このファイルは不要。
+# 公開は GitHub Actions（.github/workflows/notify-worker.yml）が main へのマージで自動で行う
+#   （手で公開する場合：npx wrangler deploy）
+# 鍵（FIREBASE_SERVICE_ACCOUNT）は Cloudflare の Secret に登録済み。wrangler deploy は Secret を変更しない
+#   （登録し直す場合：npx wrangler secret put FIREBASE_SERVICE_ACCOUNT）
 
 name = "yuuchat-notify"
 main = "worker.js"
 compatibility_date = "2026-10-01"
+
+# worker.js は外部ライブラリを使わない1ファイルなので、まとめ直さずにそのまま公開する
+# （公開中のコードとリポジトリの worker.js を、そのまま比べられるようにするため）
+no_bundle = true
+
+# Cloudflare の管理画面で設定した変数（Text）を、公開のときに消さない
+keep_vars = true
 
 [vars]
 FIREBASE_PROJECT_ID = "yuuchat-be666"
