@@ -29,9 +29,10 @@ export function parseAnnouncement(body) {
   const lines = String(body || "").replace(/\r\n?/g, "\n").replace(/<!--[\s\S]*?-->/g, "").split("\n");
   const start = lines.findIndex((line) => /^##\s*📢\s*お知らせ文\s*$/.test(line.trim()));
   if (start < 0) return { reason: "no_section" };
+  /* 欄の終わり：次の大きな見出し（# / ##）・区切り線（---）・PR の末尾に付く「🤖 Generated with …」 */
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
-    if (/^#{1,2}\s/.test(lines[i])) { end = i; break; }
+    if (/^#{1,2}\s/.test(lines[i]) || /^\s*([-*_])(\s*\1){2,}\s*$/.test(lines[i]) || /^\s*🤖\s*Generated with/i.test(lines[i])) { end = i; break; }
   }
   const section = lines.slice(start + 1, end);
 
