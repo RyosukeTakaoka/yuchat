@@ -579,6 +579,21 @@
             </span>
         </button>
 
+
+        <!-- 管理者だけに表示（👤 ユーザー管理） -->
+        <button
+            id="userManageTabButton"
+            class="hidden"
+            data-view="usermanage"
+            type="button"
+            aria-label="ユーザー管理"
+        >
+            👤
+            <span>
+                <span class="tab-label-long">ユーザー管理</span><span class="tab-label-short">管理</span>
+            </span>
+        </button>
+
     </nav>
 
 
@@ -1263,6 +1278,59 @@
                         id="announcementsList"
                         class="announcements-list"
                     ></div>
+
+                </div>
+
+            </section>
+
+
+
+            <!-- ==================================================
+                 👤 ユーザー管理（管理者だけ。一覧・詳細は script.js が描く）
+            ================================================== -->
+
+            <section
+                id="userManageView"
+                class="view hidden"
+            >
+
+                <div class="panel">
+
+                    <div class="panel-head">
+                        <div>
+                            <h2>
+                                👤 ユーザー管理
+                            </h2>
+                            <p>
+                                管理者だけが使えます（ユーザーをタップすると詳細・パスワード設定・停止・削除）
+                            </p>
+                        </div>
+                        <button id="userManageRefreshButton" type="button">更新</button>
+                    </div>
+
+                    <div class="um-toolbar">
+                        <input id="userManageSearchInput" type="search" placeholder="名前・uid で探す" autocomplete="off">
+                        <select id="userManageSortSelect" aria-label="並べ替え">
+                            <option value="created">作成が新しい順</option>
+                            <option value="login">最終ログイン順</option>
+                            <option value="name">名前順</option>
+                        </select>
+                    </div>
+
+                    <p id="userManageStatus" class="um-status"></p>
+
+                    <div id="userManagePending" class="um-section hidden"></div>
+
+                    <div
+                        id="userManageList"
+                        class="um-list"
+                    ></div>
+
+                    <details id="userManageAuthOnly" class="um-section um-auth-only hidden">
+                        <summary id="userManageAuthOnlySummary">ログイン情報だけのアカウント</summary>
+                        <p class="um-note">名前を決める前にやめたゲストなど、Firestore にデータが無いログイン情報です。データが1件も無いことを確かめてから削除できます。</p>
+                        <div id="userManageAuthOnlyList" class="um-list"></div>
+                    </details>
 
                 </div>
 

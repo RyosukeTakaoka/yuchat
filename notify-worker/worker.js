@@ -14,16 +14,25 @@
 
    外部ライブラリを使わない1ファイルなので、Cloudflare の管理画面にそのまま貼り付けて使える。
 
+   管理者専用（👤 ユーザー管理）：
+     POST /admin    Authorization: Bearer <管理者の ID トークン>
+                    { "action": "listUsers" | "inspectUser" | "setPassword" | "suspend" | "unsuspend" | "deleteUser" | "deleteAuthOnly", ... }
+   ID トークンの uid が ADMIN_UID のときだけ実行する（それ以外は 403）。パスワードはどこにも保存・記録しない。
+
    設定（Cloudflare の Worker → Settings → Variables and Secrets）：
      FIREBASE_SERVICE_ACCOUNT  （Secret）Firebase のサービスアカウントの鍵 JSON
      FIREBASE_PROJECT_ID       （Text）  yuuchat-be666
      ALLOWED_ORIGINS           （Text）  https://yuchin0809.github.io
+     ADMIN_UID                 （Text）  g51wzTvJFsZiYEfre5aDuDckJXY2（省略時もこの値）
 ========================================================= */
 
 const DEFAULT_PROJECT_ID = "yuuchat-be666";
 const DEFAULT_ALLOWED_ORIGINS = "https://yuchin0809.github.io";
 const GOOGLE_JWKS_URL = "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
-const OAUTH_SCOPES = "https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/firebase.messaging";
+/* identitytoolkit：👤 ユーザー管理（パスワード設定・停止・削除）で Firebase Authentication を操作するため */
+const OAUTH_SCOPES = "https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/firebase.messaging https://www.googleapis.com/auth/identitytoolkit";
+/* 管理者（firestore.rules・script.js の ADMIN_UID と同じ）。環境変数 ADMIN_UID で上書きできる */
+const DEFAULT_ADMIN_UID = "g51wzTvJFsZiYEfre5aDuDckJXY2";
 
 /* 送信から時間がたったメッセージの通知は送らない */
 const MAX_MESSAGE_AGE_MS = 10 * 60 * 1000;
@@ -69,6 +78,12 @@ export async function handleRequest(request, env = {}, deps = createDefaultDeps(
     } catch (error) {
       return jsonResponse({ error: "invalid_json" }, 400, cors);
     }
+    /* 管理者専用（👤 ユーザー管理）：管理者の uid 以外はすべて拒否する */
+    if (new URL(request.url).pathname.replace(/\/+$/, "") === "/admin") {
+      const result = await handleAdminAction(deps, uid, body);
+      return jsonResponse(result, result.status || 200, cors);
+    }
+
     const messageId = typeof body?.messageId === "string" ? body.messageId : "";
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(messageId)) return jsonResponse({ error: "invalid_message_id" }, 400, cors);
 
@@ -226,6 +241,524 @@ function truncate(text, max) {
 }
 
 /* =========================================================
+   👤 ユーザー管理（管理者専用）
+   ・呼び出し元の ID トークンの uid が ADMIN_UID のときだけ実行する
+   ・パスワード：Authentication の「その uid のユーザー」に内部用メールアドレスとパスワードを設定する
+     （ユーザーを作り直さない・uid は変わらない・パスワードはどこにも保存・記録しない）
+   ・停止：Authentication で無効にし、ログイン状態を取り消す（アプリを開き直すとログアウトされる。開いたままの端末は最大1時間ほど）
+     停止の理由などは suspendedUsers/{uid} に記録する（管理者だけが読める）
+   ・完全削除：関連データを確かめ、未精算の馬券があれば断る。userDeletions/{uid} に進み具合を記録し、
+     Authentication を停止 → Firestore の関連データ → users/{名前} → 最後に Authentication の順に消す
+     （途中で失敗しても「Authentication だけ消えて Firestore が残る」ことはない。同じ操作でやり直せる）
+   ・操作の記録は adminAuditLogs（パスワードは記録しない）
+========================================================= */
+
+const UID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const ADMIN_PASSWORD_MIN_LENGTH = 8;
+const ADMIN_PASSWORD_MAX_LENGTH = 128;
+const COMMIT_LIMIT = 400;
+const USER_LIST_FIELDS = ["uid", "name", "coins", "createdAt", "updatedAt", "lastSeen", "lastLoginBonusDate", "totalBetAmount", "nameChangedFrom"];
+
+export function internalAuthEmail(uid) {
+  return `u-${uid}@yuuchat.local`;
+}
+
+/* Authentication はメールアドレスを小文字にして保存するので、大文字小文字を区別せずに比べる */
+function sameEmail(a, b) {
+  return Boolean(a) && Boolean(b) && String(a).toLowerCase() === String(b).toLowerCase();
+}
+
+function toMillis(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+export function summarizeAuthUser(user) {
+  if (!user) return null;
+  const infos = user.providerUserInfo || [];
+  const providers = infos.map((p) => p.providerId);
+  const google = infos.find((p) => p.providerId === "google.com");
+  return {
+    providers,
+    anonymous: providers.length === 0,
+    hasPassword: providers.includes("password"),
+    internalEmail: sameEmail(user.email, internalAuthEmail(user.localId)),
+    googleEmail: google?.email || "",
+    googleName: google?.displayName || "",
+    disabled: Boolean(user.disabled),
+    createdAt: toMillis(user.createdAt),
+    lastLoginAt: toMillis(user.lastLoginAt),
+    lastRefreshAt: user.lastRefreshAt ? (Date.parse(user.lastRefreshAt) || null) : null
+  };
+}
+
+export async function handleAdminAction(deps, callerUid, body) {
+  if (!callerUid || callerUid !== deps.adminUid) return { status: 403, error: "not_admin" };
+
+  const action = typeof body?.action === "string" ? body.action : "";
+  const uid = typeof body?.uid === "string" ? body.uid : "";
+  if (action !== "listUsers" && !UID_PATTERN.test(uid)) return { status: 400, error: "invalid_uid" };
+
+  try {
+    switch (action) {
+      case "listUsers": return await adminListUsers(deps);
+      case "inspectUser": return await adminInspectUser(deps, uid);
+      case "setPassword": return await adminSetPassword(deps, callerUid, uid, body.password);
+      case "suspend": return await adminSuspend(deps, callerUid, uid, body.reason);
+      case "unsuspend": return await adminUnsuspend(deps, callerUid, uid);
+      case "deleteUser": return await adminDeleteUser(deps, callerUid, uid, body.confirmName);
+      case "deleteAuthOnly": return await adminDeleteAuthOnly(deps, callerUid, uid);
+      default: return { status: 400, error: "unknown_action" };
+    }
+  } catch (error) {
+    /* エラーの文にはパスワードを含めない（Authentication の呼び出しはエラーコードだけを返す） */
+    console.error("admin error", action, String(error?.message || error).slice(0, 300));
+    return { status: 500, error: error?.authCode ? `auth_${error.authCode}` : "internal_error" };
+  }
+}
+
+async function findUserDocsByUid(fs, uid) {
+  return fs.query("users", [["uid", "EQUAL", uid]], { select: ["uid"] });
+}
+
+async function writeAuditLog(deps, entry) {
+  try {
+    await deps.firestore.add("adminAuditLogs", { ...entry, at: new Date(deps.now()) });
+  } catch (error) {
+    console.warn("audit log failed", String(error?.message || error).slice(0, 200));
+  }
+}
+
+/* ----- 一覧 ----- */
+
+async function adminListUsers(deps) {
+  const fs = deps.firestore;
+  const [userDocs, authUsers, suspended, deletions] = await Promise.all([
+    fs.query("users", [], { select: USER_LIST_FIELDS }),
+    deps.authAdmin.listAll(),
+    fs.query("suspendedUsers", []),
+    fs.query("userDeletions", [])
+  ]);
+
+  const authByUid = new Map(authUsers.map((u) => [u.localId, u]));
+  const suspendedUids = new Set(suspended.map((d) => d.id));
+  const deletionByUid = new Map(deletions.map((d) => [d.id, d.data]));
+  const docCountByUid = new Map();
+  userDocs.forEach((d) => { if (d.data.uid) docCountByUid.set(d.data.uid, (docCountByUid.get(d.data.uid) || 0) + 1); });
+
+  const users = userDocs.map((d) => {
+    const uid = typeof d.data.uid === "string" ? d.data.uid : "";
+    return {
+      name: d.id,
+      uid,
+      coins: typeof d.data.coins === "number" ? d.data.coins : null,
+      createdAt: d.data.createdAt || null,
+      updatedAt: d.data.updatedAt || null,
+      lastSeen: d.data.lastSeen || null,
+      totalBetAmount: typeof d.data.totalBetAmount === "number" ? d.data.totalBetAmount : null,
+      nameChangedFrom: d.data.nameChangedFrom || "",
+      sameUidCount: uid ? docCountByUid.get(uid) : 0,
+      auth: summarizeAuthUser(authByUid.get(uid)),
+      suspended: suspendedUids.has(uid),
+      deletion: deletionByUid.get(uid)?.status || null,
+      isAdmin: uid === deps.adminUid
+    };
+  });
+
+  const authOnly = authUsers.filter((u) => !docCountByUid.has(u.localId)).map((u) => ({
+    uid: u.localId,
+    auth: summarizeAuthUser(u),
+    suspended: suspendedUids.has(u.localId),
+    deletion: deletionByUid.get(u.localId)?.status || null,
+    deletionName: deletionByUid.get(u.localId)?.name || "",
+    isAdmin: u.localId === deps.adminUid
+  }));
+
+  const pendingDeletions = deletions
+    .filter((d) => d.data.status !== "completed")
+    .map((d) => ({ uid: d.id, name: d.data.name || "", status: d.data.status || "", failedStep: d.data.failedStep || "", authExists: authByUid.has(d.id) }));
+
+  return { users, authOnly, pendingDeletions };
+}
+
+/* ----- 詳細（削除したときに消えるもの・変わるものの確認を含む。何も変更しない） ----- */
+
+async function adminInspectUser(deps, uid) {
+  const fs = deps.firestore;
+  const [docs, authUser, suspended, record] = await Promise.all([
+    findUserDocsByUid(fs, uid),
+    deps.authAdmin.lookup(uid),
+    fs.get(`suspendedUsers/${uid}`),
+    fs.get(`userDeletions/${uid}`)
+  ]);
+  const name = docs.length === 1 ? docs[0].id : "";
+  const plan = await buildDeletionPlan(deps, uid, name);
+  const userData = name ? await fs.get(`users/${name}`) : null;
+
+  return {
+    uid,
+    name: name || record?.name || "",
+    userDocNames: docs.map((d) => d.id),
+    user: userData ? {
+      coins: typeof userData.coins === "number" ? userData.coins : null,
+      createdAt: userData.createdAt || null,
+      lastSeen: userData.lastSeen || null,
+      totalBetAmount: typeof userData.totalBetAmount === "number" ? userData.totalBetAmount : null,
+      nameChangedFrom: userData.nameChangedFrom || ""
+    } : null,
+    auth: summarizeAuthUser(authUser),
+    suspended: suspended ? { reason: suspended.reason || "", suspendedAt: suspended.suspendedAt || null } : null,
+    deletion: record ? { status: record.status || "", failedStep: record.failedStep || "" } : null,
+    isAdmin: uid === deps.adminUid,
+    plan: { counts: plan.counts, blockers: plan.blockers, groups: plan.groups.map((g) => ({ name: g.groupName, action: g.action, nextOwner: g.nextOwner || "" })) }
+  };
+}
+
+/* ----- パスワード設定・再設定（uid はそのまま。ユーザーを作り直さない） ----- */
+
+async function adminSetPassword(deps, callerUid, uid, password) {
+  if (typeof password !== "string" || password.length < ADMIN_PASSWORD_MIN_LENGTH || password.length > ADMIN_PASSWORD_MAX_LENGTH) {
+    return { status: 400, error: "invalid_password" };
+  }
+  const fs = deps.firestore;
+  const docs = await findUserDocsByUid(fs, uid);
+  if (docs.length !== 1) return { status: 409, error: docs.length === 0 ? "user_not_found" : "multiple_user_docs" };
+  const record = await fs.get(`userDeletions/${uid}`);
+  if (record && record.status !== "completed") return { status: 409, error: "deletion_in_progress" };
+
+  const authUser = await deps.authAdmin.lookup(uid);
+  if (!authUser) return { status: 404, error: "auth_user_not_found" };
+
+  /* Google のアカウントのメールアドレス以外の、知らないメールアドレスが設定されていたら上書きしない */
+  const email = internalAuthEmail(uid);
+  const googleEmails = (authUser.providerUserInfo || []).filter((p) => p.providerId === "google.com").map((p) => p.email);
+  if (authUser.email && !sameEmail(authUser.email, email) && !googleEmails.some((e) => sameEmail(e, authUser.email))) {
+    return { status: 409, error: "other_email" };
+  }
+
+  await deps.authAdmin.update(uid, { email, password });
+
+  const after = summarizeAuthUser(await deps.authAdmin.lookup(uid));
+  if (!after?.hasPassword || !after.internalEmail) return { status: 500, error: "verify_failed" };
+
+  await writeAuditLog(deps, { action: "setPassword", targetUid: uid, targetName: docs[0].id, byUid: callerUid, result: "ok" });
+  return { ok: true, name: docs[0].id, auth: after };
+}
+
+/* ----- 停止・停止の解除 ----- */
+
+async function adminSuspend(deps, callerUid, uid, reason) {
+  if (uid === deps.adminUid) return { status: 400, error: "cannot_target_admin" };
+  const fs = deps.firestore;
+  const authUser = await deps.authAdmin.lookup(uid);
+  if (!authUser) return { status: 404, error: "auth_user_not_found" };
+  const docs = await findUserDocsByUid(fs, uid);
+  const name = docs.length === 1 ? docs[0].id : "";
+  const text = typeof reason === "string" ? reason.trim().slice(0, 200) : "";
+
+  await deps.authAdmin.update(uid, { disableUser: true, validSince: String(Math.floor(deps.now() / 1000)) });
+  await fs.set(`suspendedUsers/${uid}`, { uid, name, reason: text, suspendedAt: new Date(deps.now()), byUid: callerUid });
+
+  await writeAuditLog(deps, { action: "suspend", targetUid: uid, targetName: name, byUid: callerUid, result: "ok" });
+  return { ok: true, name };
+}
+
+async function adminUnsuspend(deps, callerUid, uid) {
+  if (uid === deps.adminUid) return { status: 400, error: "cannot_target_admin" };
+  const fs = deps.firestore;
+  const record = await fs.get(`userDeletions/${uid}`);
+  if (record && record.status !== "completed") return { status: 409, error: "deletion_in_progress" };
+  const authUser = await deps.authAdmin.lookup(uid);
+  if (!authUser) return { status: 404, error: "auth_user_not_found" };
+  const docs = await findUserDocsByUid(fs, uid);
+  const name = docs.length === 1 ? docs[0].id : "";
+
+  await deps.authAdmin.update(uid, { disableUser: false });
+  await fs.delete(`suspendedUsers/${uid}`);
+
+  await writeAuditLog(deps, { action: "unsuspend", targetUid: uid, targetName: name, byUid: callerUid, result: "ok" });
+  return { ok: true, name };
+}
+
+/* ----- 完全削除 ----- */
+
+/* 削除したときに消すもの・変えるものを調べる（何も変更しない）
+   name が空のとき（users が無い・すでに消えた）は uid で探せるものだけを調べる
+   ・1対1のメッセージ・フレンド関係：削除
+   ・グループ：メンバーから外す（管理者なら次のメンバーに引き継ぐ。誰もいなくなるならグループとそのメッセージを削除）
+     グループで送ったメッセージは残す
+   ・ゆうダービーの馬券：未精算が1件でもあれば削除しない（blockers）。精算済みは削除
+   ・ゲームルーム：自分が作ったルームは削除、参加中のルームからは退出。招待・ルーム作成の記録は削除
+   ・通知の端末登録・名前変更の記録・総資産ランキングの行・users/{名前}（とその下）：削除 */
+export async function buildDeletionPlan(deps, uid, name) {
+  const fs = deps.firestore;
+  const q = (collection, field, op, value) => fs.query(collection, [[field, op, value]]);
+  const byName = Boolean(name);
+  const none = Promise.resolve([]);
+
+  const [friends1, friends2, sent, received, groupsByMember, groupsByOwner, bets, tokens,
+    roomsByUid, roomsByOwner, roomsByName, invitesFrom, invitesTo, roomOwners, nameChanges, ranking] = await Promise.all([
+    byName ? q("friends", "user1", "EQUAL", name) : none,
+    byName ? q("friends", "user2", "EQUAL", name) : none,
+    byName ? q("messages", "sender", "EQUAL", name) : none,
+    byName ? q("messages", "receiver", "EQUAL", name) : none,
+    byName ? q("groups", "members", "ARRAY_CONTAINS", name) : none,
+    q("groups", "ownerUid", "EQUAL", uid),
+    q("raceBets", "uid", "EQUAL", uid),
+    q("fcmTokens", "uid", "EQUAL", uid),
+    q("gameRooms", "memberUids", "ARRAY_CONTAINS", uid),
+    q("gameRooms", "ownerUid", "EQUAL", uid),
+    byName ? q("gameRooms", "members", "ARRAY_CONTAINS", name) : none,
+    q("gameInvites", "fromUid", "EQUAL", uid),
+    q("gameInvites", "toUid", "EQUAL", uid),
+    q("gameRoomOwners", "uid", "EQUAL", uid),
+    q("adminNameChanges", "uid", "EQUAL", uid),
+    byName ? fs.getRaw("rankings/assets") : Promise.resolve(null)
+  ]);
+
+  const unique = (lists) => [...new Map(lists.flat().map((d) => [d.path, d])).values()];
+  const isFriendMessage = (m) => m.data.type !== "group" && !m.data.groupId;
+
+  /* 1対1：フレンド関係と、そのメッセージ */
+  const friendships = unique([friends1, friends2]);
+  const byFriendship = await Promise.all(friendships.map((f) => q("messages", "friendshipId", "EQUAL", f.id)));
+  const friendMessages = unique([byFriendship.flat(), sent.filter(isFriendMessage), received.filter(isFriendMessage)]).filter(isFriendMessage);
+  const groupMessagesKept = sent.filter((m) => !isFriendMessage(m)).length;
+
+  /* グループ */
+  const groups = [];
+  for (const g of unique([groupsByMember, groupsByOwner])) {
+    const members = Array.isArray(g.data.members) ? g.data.members : [];
+    const remaining = members.filter((m) => m !== name || !byName);
+    const isOwner = g.data.ownerUid ? g.data.ownerUid === uid : (byName && g.data.owner === name);
+    const isMember = byName && members.includes(name);
+    if (!isOwner && !isMember) continue;
+    const base = { path: g.path, id: g.id, groupName: g.data.name || "グループ", updateTime: g.updateTime, remaining };
+    if (remaining.length === 0) groups.push({ ...base, action: "delete" });
+    else if (isOwner) groups.push({ ...base, action: "transfer", nextOwner: remaining[0] });
+    else groups.push({ ...base, action: "leave" });
+  }
+  const deletedGroupMessages = await Promise.all(groups.filter((g) => g.action === "delete").map((g) => q("messages", "groupId", "EQUAL", g.id)));
+
+  /* ゲームルーム */
+  const rooms = [];
+  for (const r of unique([roomsByUid, roomsByOwner, roomsByName])) {
+    const isOwner = r.data.ownerUid ? r.data.ownerUid === uid : (byName && r.data.owner === name);
+    const members = (Array.isArray(r.data.members) ? r.data.members : []).filter((m) => !(byName && m === name));
+    const memberUids = (Array.isArray(r.data.memberUids) ? r.data.memberUids : []).filter((id) => id !== uid);
+    const base = { path: r.path, id: r.id, updateTime: r.updateTime, members, memberUids };
+    rooms.push({ ...base, action: isOwner || members.length === 0 ? "delete" : "leave" });
+  }
+
+  /* 馬券：未精算があれば削除しない */
+  const unsettledBets = bets.filter((b) => b.data.settled !== true);
+  const settledBets = bets.filter((b) => b.data.settled === true);
+
+  const rankingUsers = ranking?.fields?.users?.arrayValue?.values || [];
+  const rankingHasUser = byName && rankingUsers.some((v) => v?.mapValue?.fields?.name?.stringValue === name);
+
+  const subtree = byName ? await collectSubtree(fs, `users/${name}`) : [];
+
+  const deletes = {
+    friendMessages: friendMessages.map((m) => m.path),
+    friends: friendships.map((f) => f.path),
+    raceBets: settledBets.map((b) => b.path),
+    fcmTokens: tokens.map((t) => t.path),
+    gameInvites: unique([invitesFrom, invitesTo]).map((d) => d.path),
+    gameRoomOwners: roomOwners.map((d) => d.path),
+    adminNameChanges: nameChanges.map((d) => d.path)
+  };
+
+  const blockers = [];
+  if (uid === deps.adminUid) blockers.push("admin");
+  if (unsettledBets.length > 0) blockers.push("unsettled_bets");
+
+  const counts = {
+    friends: friendships.length,
+    friendMessages: friendMessages.length,
+    groupMessagesKept,
+    groupsLeave: groups.filter((g) => g.action === "leave").length,
+    groupsTransfer: groups.filter((g) => g.action === "transfer").length,
+    groupsDelete: groups.filter((g) => g.action === "delete").length,
+    deletedGroupMessages: deletedGroupMessages.flat().length,
+    raceBetsSettled: settledBets.length,
+    raceBetsUnsettled: unsettledBets.length,
+    fcmTokens: tokens.length,
+    gameRoomsDelete: rooms.filter((r) => r.action === "delete").length,
+    gameRoomsLeave: rooms.filter((r) => r.action === "leave").length,
+    gameInvites: deletes.gameInvites.length,
+    gameRoomOwners: roomOwners.length,
+    adminNameChanges: nameChanges.length,
+    rankingEntry: rankingHasUser ? 1 : 0,
+    userDoc: byName ? 1 : 0,
+    userSubDocs: subtree.length
+  };
+
+  return { uid, name, deletes, groups, rooms, rankingHasUser, subtree, blockers, counts };
+}
+
+/* users/{名前} の下のサブコレクションのドキュメント（深い方から） */
+async function collectSubtree(fs, docPath) {
+  const out = [];
+  for (const collectionId of await fs.listCollectionIds(docPath)) {
+    for (const child of await fs.listDocuments(`${docPath}/${collectionId}`)) {
+      out.push(...await collectSubtree(fs, child), child);
+    }
+  }
+  return out;
+}
+
+function fieldPathSegment(key) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? key : `\`${key.replace(/\\/g, "\\\\").replace(/`/g, "\\`")}\``;
+}
+
+async function executeDeletionPlan(deps, plan, setStep) {
+  const fs = deps.firestore;
+  const del = (path) => ({ delete: fs.docName(path) });
+  const commitAll = async (writes) => {
+    for (let i = 0; i < writes.length; i += COMMIT_LIMIT) await fs.commit(writes.slice(i, i + COMMIT_LIMIT));
+  };
+  const updatedNow = [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }];
+
+  setStep("friends");
+  await commitAll([...plan.deletes.friendMessages, ...plan.deletes.friends].map(del));
+
+  setStep("groups");
+  for (const g of plan.groups) {
+    if (g.action === "delete") {
+      const messages = await fs.query("messages", [["groupId", "EQUAL", g.id]], { select: ["groupId"] });
+      await commitAll(messages.map((m) => del(m.path)));
+      await fs.commit([{ delete: fs.docName(g.path), currentDocument: { updateTime: g.updateTime } }]);
+      continue;
+    }
+    const fields = { members: g.remaining };
+    const fieldPaths = ["members", `lastReadAt.${fieldPathSegment(plan.uid)}`];
+    if (g.action === "transfer") {
+      const next = await fs.get(`users/${g.nextOwner}`);
+      fields.owner = g.nextOwner;
+      fields.ownerUid = next?.uid || "";
+      fieldPaths.push("owner", "ownerUid");
+    }
+    await fs.commit([{
+      update: { name: fs.docName(g.path), fields: encodeFields(fields) },
+      updateMask: { fieldPaths },
+      updateTransforms: updatedNow,
+      currentDocument: { updateTime: g.updateTime }
+    }]);
+  }
+
+  setStep("gameRooms");
+  for (const r of plan.rooms) {
+    if (r.action === "delete") {
+      const invites = await fs.query("gameInvites", [["roomId", "EQUAL", r.id]], { select: ["roomId"] });
+      await commitAll(invites.map((d) => del(d.path)));
+      await fs.commit([{ delete: fs.docName(r.path), currentDocument: { updateTime: r.updateTime } }]);
+      continue;
+    }
+    await fs.commit([{
+      update: { name: fs.docName(r.path), fields: encodeFields({ members: r.members, memberUids: r.memberUids, status: "waiting" }) },
+      updateMask: { fieldPaths: ["members", "memberUids", "status"] },
+      updateTransforms: updatedNow,
+      currentDocument: { updateTime: r.updateTime }
+    }]);
+  }
+
+  setStep("records");
+  const { raceBets, fcmTokens, gameInvites, gameRoomOwners, adminNameChanges } = plan.deletes;
+  await commitAll([...raceBets, ...fcmTokens, ...gameInvites, ...gameRoomOwners, ...adminNameChanges].map(del));
+
+  if (plan.rankingHasUser) {
+    setStep("ranking");
+    const ranking = await fs.getRaw("rankings/assets");
+    const values = ranking?.fields?.users?.arrayValue?.values || [];
+    const kept = values.filter((v) => v?.mapValue?.fields?.name?.stringValue !== plan.name);
+    if (ranking && kept.length !== values.length) {
+      await fs.commit([{
+        update: { name: fs.docName("rankings/assets"), fields: { users: { arrayValue: { values: kept } } } },
+        updateMask: { fieldPaths: ["users"] },
+        currentDocument: { updateTime: ranking.updateTime }
+      }]);
+    }
+  }
+
+  if (plan.name) {
+    setStep("userDoc");
+    await commitAll(plan.subtree.map(del));
+    /* 名前はすぐ再利用できるので、消す直前にもう一度「この uid のドキュメント」か確かめる */
+    const userDoc = await fs.getRaw(`users/${plan.name}`);
+    if (userDoc && userDoc.fields?.uid?.stringValue === plan.uid) {
+      await fs.commit([{ delete: fs.docName(`users/${plan.name}`), currentDocument: { updateTime: userDoc.updateTime } }]);
+    }
+  }
+}
+
+async function adminDeleteUser(deps, callerUid, uid, confirmName) {
+  if (uid === deps.adminUid) return { status: 400, error: "cannot_target_admin" };
+  const fs = deps.firestore;
+  const [docs, record] = await Promise.all([findUserDocsByUid(fs, uid), fs.get(`userDeletions/${uid}`)]);
+  if (docs.length > 1) return { status: 409, error: "multiple_user_docs" };
+
+  /* users が残っていれば、その名前で関連データを探す。
+     users がすでに消えている（前回の削除の途中で止まった）ときは、名前で探すものは終わっているので uid で探せるものだけ */
+  const name = docs.length === 1 ? docs[0].id : "";
+  const resuming = Boolean(record && record.status !== "completed");
+  const displayName = name || (resuming ? record.name || "" : "");
+  if (!name && !resuming) return { status: 404, error: "user_not_found" };
+  if (typeof confirmName !== "string" || !displayName || confirmName !== displayName) return { status: 400, error: "confirm_mismatch" };
+
+  const plan = await buildDeletionPlan(deps, uid, name);
+  if (plan.blockers.length > 0) return { status: 409, error: "blocked", blockers: plan.blockers, counts: plan.counts };
+
+  const recordPath = `userDeletions/${uid}`;
+  const startedAt = resuming && record.startedAt ? new Date(record.startedAt) : new Date(deps.now());
+  const baseRecord = { uid, name: displayName, byUid: callerUid, startedAt, counts: plan.counts };
+  await fs.set(recordPath, { ...baseRecord, status: "in_progress", updatedAt: new Date(deps.now()) });
+
+  let step = "auth_disable";
+  try {
+    const authUser = await deps.authAdmin.lookup(uid);
+    if (authUser && !authUser.disabled) {
+      await deps.authAdmin.update(uid, { disableUser: true, validSince: String(Math.floor(deps.now() / 1000)) });
+    }
+
+    await executeDeletionPlan(deps, plan, (s) => { step = s; });
+
+    step = "auth_delete";
+    await deps.authAdmin.delete(uid);
+    step = "suspended_record";
+    await fs.delete(`suspendedUsers/${uid}`);
+
+    await fs.set(recordPath, { ...baseRecord, status: "completed", updatedAt: new Date(deps.now()), completedAt: new Date(deps.now()) });
+    await writeAuditLog(deps, { action: "deleteUser", targetUid: uid, targetName: displayName, byUid: callerUid, result: "ok", counts: plan.counts });
+    return { ok: true, name: displayName, counts: plan.counts };
+  } catch (error) {
+    console.error("delete user failed", step, String(error?.message || error).slice(0, 300));
+    await fs.set(recordPath, { ...baseRecord, status: "failed", failedStep: step, updatedAt: new Date(deps.now()) }).catch(() => {});
+    await writeAuditLog(deps, { action: "deleteUser", targetUid: uid, targetName: displayName, byUid: callerUid, result: "failed", failedStep: step });
+    return { status: 500, error: "delete_failed", step };
+  }
+}
+
+/* Firestore にデータが1件もない Authentication のユーザー（名前を決める前にやめたゲストなど）だけを消す */
+async function adminDeleteAuthOnly(deps, callerUid, uid) {
+  if (uid === deps.adminUid) return { status: 400, error: "cannot_target_admin" };
+  const fs = deps.firestore;
+  const [docs, record, authUser] = await Promise.all([findUserDocsByUid(fs, uid), fs.get(`userDeletions/${uid}`), deps.authAdmin.lookup(uid)]);
+  if (docs.length > 0) return { status: 409, error: "has_user_doc" };
+  if (record && record.status !== "completed") return { status: 409, error: "deletion_in_progress" };
+  if (!authUser) return { status: 404, error: "auth_user_not_found" };
+
+  const plan = await buildDeletionPlan(deps, uid, "");
+  const total = Object.values(plan.counts).reduce((sum, n) => sum + n, 0);
+  if (total > 0) return { status: 409, error: "has_data", counts: plan.counts };
+
+  await deps.authAdmin.delete(uid);
+  await fs.delete(`suspendedUsers/${uid}`);
+  await writeAuditLog(deps, { action: "deleteAuthOnly", targetUid: uid, targetName: "", byUid: callerUid, result: "ok" });
+  return { ok: true };
+}
+
+/* =========================================================
    HTTP まわり
 ========================================================= */
 
@@ -262,10 +795,14 @@ export function createDefaultDeps(env, fetchImpl = (...args) => fetch(...args)) 
     ? async () => env.ACCESS_TOKEN_OVERRIDE
     : () => getServiceAccountAccessToken(env.FIREBASE_SERVICE_ACCOUNT, fetchImpl);
 
+  const authAdminBase = env.AUTH_ADMIN_BASE_URL || "https://identitytoolkit.googleapis.com/v1";
+
   return {
     now: () => Date.now(),
+    adminUid: env.ADMIN_UID || DEFAULT_ADMIN_UID,
     verifyIdToken: (token) => verifyFirebaseIdToken(token, projectId, fetchImpl),
     firestore: createFirestoreClient({ base: firestoreBase, projectId, getAccessToken, fetchImpl }),
+    authAdmin: createAuthAdminClient({ base: authAdminBase, projectId, getAccessToken, fetchImpl }),
     sendFcm: (token, data) => sendFcmMessage({ base: fcmBase, projectId, getAccessToken, fetchImpl }, token, data)
   };
 }
@@ -410,8 +947,86 @@ function createFirestoreClient({ base, projectId, getAccessToken, fetchImpl }) {
       });
       if (!response.ok) throw new Error(`firestore query ${response.status} ${await response.text()}`);
       return (await response.json()).filter((r) => r.document).map((r) => ({ id: r.document.name.split("/").pop(), ...decodeDocument(r.document) }));
+    },
+
+    /* ----- 👤 ユーザー管理用 ----- */
+
+    /* filters: [[項目, "EQUAL" | "ARRAY_CONTAINS", 値], ...]（複数は AND）。select を渡すとその項目だけ読む
+       戻り値：{ id, path, updateTime, data } の配列 */
+    async query(collectionId, filters = [], { select } = {}) {
+      const fieldFilters = filters.map(([field, op, value]) => ({ fieldFilter: { field: { fieldPath: field }, op, value: encodeValue(value) } }));
+      const structuredQuery = { from: [{ collectionId }] };
+      if (fieldFilters.length === 1) structuredQuery.where = fieldFilters[0];
+      if (fieldFilters.length > 1) structuredQuery.where = { compositeFilter: { op: "AND", filters: fieldFilters } };
+      if (select) structuredQuery.select = { fields: select.map((fieldPath) => ({ fieldPath })) };
+      const response = await call(`${base}/${root}:runQuery`, { method: "POST", body: JSON.stringify({ structuredQuery }) });
+      if (!response.ok) throw new Error(`firestore query ${collectionId} ${response.status} ${await response.text()}`);
+      return (await response.json()).filter((r) => r.document).map((r) => toListedDocument(r.document));
+    },
+
+    /* 型をそのまま保つための読み取り（fields は Firestore REST の形のまま） */
+    async getRaw(path) {
+      const response = await call(docUrl(path));
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error(`firestore get ${path} ${response.status} ${await response.text()}`);
+      const document = await response.json();
+      return { fields: document.fields || {}, updateTime: document.updateTime };
+    },
+
+    /* 自動 ID で作る */
+    async add(collectionId, data) {
+      const response = await call(`${base}/${root}/${encodeURIComponent(collectionId)}`, { method: "POST", body: JSON.stringify({ fields: encodeFields(data) }) });
+      if (!response.ok) throw new Error(`firestore add ${collectionId} ${response.status} ${await response.text()}`);
+    },
+
+    async set(path, data) {
+      const response = await call(docUrl(path), { method: "PATCH", body: JSON.stringify({ fields: encodeFields(data) }) });
+      if (!response.ok) throw new Error(`firestore set ${path} ${response.status} ${await response.text()}`);
+    },
+
+    /* まとめて書く（1回 500 件まで。すべて成功するか、すべて失敗する） */
+    async commit(writes) {
+      if (writes.length === 0) return;
+      const response = await call(`${base}/${root}:commit`, { method: "POST", body: JSON.stringify({ writes }) });
+      if (!response.ok) throw new Error(`firestore commit ${response.status} ${await response.text()}`);
+    },
+
+    docName: (path) => `${root}/${path}`,
+
+    async listCollectionIds(path) {
+      const ids = [];
+      let pageToken;
+      do {
+        const response = await call(`${docUrl(path)}:listCollectionIds`, { method: "POST", body: JSON.stringify({ pageSize: 100, ...(pageToken ? { pageToken } : {}) }) });
+        if (!response.ok) throw new Error(`firestore listCollectionIds ${response.status} ${await response.text()}`);
+        const json = await response.json();
+        ids.push(...(json.collectionIds || []));
+        pageToken = json.nextPageToken;
+      } while (pageToken);
+      return ids;
+    },
+
+    /* サブコレクションの中身（存在しない親の下にあるものも含めて） */
+    async listDocuments(collectionPath) {
+      const docs = [];
+      let pageToken;
+      do {
+        const params = new URLSearchParams({ pageSize: "300", showMissing: "true", "mask.fieldPaths": "__name__" });
+        if (pageToken) params.set("pageToken", pageToken);
+        const response = await call(`${docUrl(collectionPath)}?${params}`);
+        if (!response.ok) throw new Error(`firestore list ${response.status} ${await response.text()}`);
+        const json = await response.json();
+        (json.documents || []).forEach((d) => docs.push(d.name.slice(d.name.indexOf("/documents/") + "/documents/".length).split("/").map(decodeURIComponent).join("/")));
+        pageToken = json.nextPageToken;
+      } while (pageToken);
+      return docs;
     }
   };
+}
+
+function toListedDocument(document) {
+  const path = document.name.slice(document.name.indexOf("/documents/") + "/documents/".length);
+  return { id: decodeURIComponent(path.split("/").pop()), path: path.split("/").map(decodeURIComponent).join("/"), updateTime: document.updateTime, data: decodeDocument(document) };
 }
 
 function decodeValue(v) {
@@ -451,6 +1066,56 @@ function encodeFields(data) {
   const out = {};
   Object.entries(data).forEach(([k, v]) => { out[k] = encodeValue(v); });
   return out;
+}
+
+/* ----- Firebase Authentication（管理用 REST：Identity Toolkit） -----
+   エラーには要求の中身（パスワードなど）を入れない */
+
+function createAuthAdminClient({ base, projectId, getAccessToken, fetchImpl }) {
+  const url = (method) => `${base}/projects/${projectId}/${method}`;
+  const call = async (method, init) => {
+    const token = await getAccessToken();
+    const response = await fetchImpl(url(method), { ...init, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } });
+    const json = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const code = String(json?.error?.message || `HTTP_${response.status}`).split(/[\s:]/)[0];
+      throw Object.assign(new Error(`auth ${method.split(":").pop()} ${code}`), { authCode: code });
+    }
+    return json;
+  };
+
+  return {
+    async lookup(uid) {
+      const json = await call("accounts:lookup", { method: "POST", body: JSON.stringify({ localId: [uid] }) });
+      return (json.users || [])[0] || null;
+    },
+
+    async listAll() {
+      const users = [];
+      let nextPageToken;
+      do {
+        const params = new URLSearchParams({ maxResults: "1000" });
+        if (nextPageToken) params.set("nextPageToken", nextPageToken);
+        const json = await call(`accounts:batchGet?${params}`, { method: "GET" });
+        users.push(...(json.users || []));
+        nextPageToken = json.nextPageToken;
+      } while (nextPageToken);
+      return users;
+    },
+
+    /* uid はそのまま（作り直さない）。fields：email / password / disableUser / validSince */
+    async update(uid, fields) {
+      await call("accounts:update", { method: "POST", body: JSON.stringify({ localId: uid, ...fields }) });
+    },
+
+    async delete(uid) {
+      try {
+        await call("accounts:delete", { method: "POST", body: JSON.stringify({ localId: uid }) });
+      } catch (error) {
+        if (error.authCode !== "USER_NOT_FOUND") throw error;
+      }
+    }
+  };
 }
 
 /* ----- FCM HTTP v1 ----- */

@@ -5164,3 +5164,316 @@ button.secondary {
     font-weight: 700;
     white-space: nowrap;
 }
+
+
+/* ==================================================
+   👤 ユーザー管理（管理者だけ）
+================================================== */
+
+.tab-label-short {
+    display: none;
+}
+
+@media (max-width: 480px) {
+    .tab-label-long {
+        display: none;
+    }
+
+    .tab-label-short {
+        display: inline;
+    }
+}
+
+#userManageRefreshButton {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.um-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+
+    margin: 4px 0 8px;
+}
+
+.um-toolbar input,
+.um-toolbar select {
+    min-width: 0;
+    min-height: 40px;
+
+    padding: 8px 10px;
+
+    border: 1px solid #ddd;
+    border-radius: 10px;
+
+    font-size: 16px;
+
+    background: #fff;
+}
+
+.um-toolbar input {
+    flex: 1 1 180px;
+}
+
+.um-toolbar select {
+    flex: 1 1 120px;
+}
+
+.um-status,
+.um-note {
+    margin: 4px 0 8px;
+
+    color: #666;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.um-section {
+    margin: 12px 0;
+}
+
+.um-section h3 {
+    margin: 0 0 6px;
+    font-size: 14px;
+}
+
+.um-auth-only summary {
+    cursor: pointer;
+
+    padding: 8px 0;
+
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.um-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.um-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+
+    width: 100%;
+
+    padding: 10px 12px;
+
+    border: 1px solid #e1e4e8;
+    border-radius: 12px;
+
+    background: #fff;
+    color: #111;
+
+    text-align: left;
+
+    cursor: pointer;
+}
+
+.um-item-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+
+    flex: 1;
+    min-width: 0;
+}
+
+.um-item-main strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+
+    font-size: 15px;
+}
+
+.um-item-main small {
+    color: #666;
+    font-size: 11px;
+
+    overflow-wrap: anywhere;
+}
+
+.um-chevron {
+    color: #999;
+    font-size: 20px;
+}
+
+.um-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.um-badge {
+    padding: 1px 7px;
+
+    border-radius: 999px;
+
+    background: #f0f1f3;
+    color: #444;
+
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.um-badge.ok {
+    background: #e6f4ea;
+    color: #1e7b34;
+}
+
+.um-badge.stop {
+    background: #fdecea;
+    color: #c62828;
+}
+
+.um-badge.warn {
+    background: #fff4e0;
+    color: #a15c00;
+}
+
+.um-badge.admin {
+    background: #111;
+    color: #fff;
+}
+
+.um-detail {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 6px 12px;
+
+    margin: 0 0 12px;
+
+    font-size: 13px;
+}
+
+.um-detail dt {
+    color: #666;
+    font-weight: 700;
+}
+
+.um-detail dd {
+    margin: 0;
+    min-width: 0;
+
+    overflow-wrap: anywhere;
+}
+
+.um-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+
+    margin: 8px 0;
+}
+
+.um-actions button,
+.um-wide {
+    width: 100%;
+    min-height: 42px;
+
+    border: none;
+    border-radius: 10px;
+
+    background: #111;
+    color: #fff;
+
+    font-size: 14px;
+    font-weight: 800;
+}
+
+.um-actions button.secondary,
+.um-wide.secondary {
+    background: #fff;
+    color: #111;
+    border: 1.5px solid #111;
+}
+
+.um-modal .um-wide {
+    margin-bottom: 6px;
+}
+
+.um-actions button.um-danger,
+.modal-buttons button.um-danger {
+    background: #c62828;
+    color: #fff;
+}
+
+.modal-buttons button:disabled {
+    opacity: .45;
+}
+
+.um-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+
+    margin: 0 0 10px;
+
+    font-size: 13px;
+}
+
+.modal-card .um-check input {
+    width: auto;
+    min-height: 0;
+    margin: 0;
+}
+
+.um-done {
+    margin: 6px 0;
+    padding: 10px 12px;
+
+    border-radius: 10px;
+
+    background: #e6f4ea;
+    color: #1e5e2f;
+
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.um-warning {
+    margin: 0 0 8px;
+    padding: 8px 10px;
+
+    border-radius: 10px;
+
+    background: #fdecea;
+    color: #b71c1c;
+
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.um-plan {
+    margin: 0 0 12px;
+    padding-left: 18px;
+
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.um-plan li.keep {
+    color: #1e7b34;
+}
+
+.um-plan li.change {
+    color: #a15c00;
+}
+
+.um-plan li.block {
+    color: #c62828;
+    font-weight: 700;
+}
+
+.um-confirm-label {
+    display: block;
+
+    margin: 4px 0 6px;
+
+    font-size: 13px;
+    font-weight: 700;
+}
