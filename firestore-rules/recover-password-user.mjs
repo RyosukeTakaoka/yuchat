@@ -120,7 +120,7 @@ async function inspect(db, auth) {
   report.authProviders = authUser.providerData.map((p) => p.providerId);
   report.authIsAnonymousOnly = authUser.providerData.length === 0;
   report.authHasEmail = Boolean(authUser.email);
-  report.authEmailIsInternal = authUser.email === email;
+  report.authEmailIsInternal = sameEmail(authUser.email, email);
   report.authDisabled = authUser.disabled;
   report.authCreated = authUser.metadata.creationTime;
   report.authLastSignIn = authUser.metadata.lastSignInTime;
@@ -135,13 +135,18 @@ async function inspect(db, auth) {
 
   if (authUser.disabled) report.reasons.push("Authentication のユーザーが無効化されています");
   if (report.authProviders.includes("password")) report.reasons.push("すでにパスワードが設定されています");
-  if (authUser.email && authUser.email !== email) report.reasons.push("別のメールアドレスが設定されています");
+  if (authUser.email && !sameEmail(authUser.email, email)) report.reasons.push("別のメールアドレスが設定されています");
   if (report.internalEmailUsedByOtherUser) report.reasons.push("内部用メールアドレスが別のユーザーに使われています");
   if (report.usersDocsWithThisUid !== 1) report.reasons.push(`この uid の users ドキュメントが ${report.usersDocsWithThisUid} 件あります`);
   if (!report.userDocName) report.reasons.push("users ドキュメントの name が一致しません");
 
   report.ok = report.reasons.length === 0;
   return report;
+}
+
+/* Authentication はメールアドレスを小文字にして保存するので、大文字小文字を区別せずに比べる */
+function sameEmail(a, b) {
+  return Boolean(a) && Boolean(b) && a.toLowerCase() === b.toLowerCase();
 }
 
 function printReport(title, report) {
@@ -198,7 +203,7 @@ async function main() {
   const after = await auth.getUser(report.uid);
   const check = {
     uidKept: after.uid === report.uid,
-    internalEmailSet: after.email === report.email,
+    internalEmailSet: sameEmail(after.email, report.email),
     passwordProviderLinked: after.providerData.some((p) => p.providerId === "password"),
     disabled: after.disabled
   };
