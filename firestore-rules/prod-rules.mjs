@@ -188,6 +188,10 @@ const TEST_CASES = [
   testCase("DENY", "管理者：ブラウザから操作の記録を書き換える", admin, "update", "adminAuditLogs/l1", { data: { action: "x" }, existing: { action: "setPassword" } }),
   testCase("DENY", "一般：削除の進み具合の読み取り", userA, "get", `userDeletions/${userA.uid}`, { existing: { status: "failed" } }),
   testCase("DENY", "管理者：ブラウザから削除の進み具合を書く", admin, "create", "userDeletions/someoneElse", { data: { status: "completed" } }),
+  // 通知の送信記録（notificationLogs）は、通知サーバー（サービスアカウント）だけが書く
+  testCase("DENY", "一般：ダービーの通知記録を先に作る", userA, "create", "notificationLogs/derby-2030-01-02", { data: { kind: "derby" } }),
+  testCase("DENY", "管理者：ブラウザから通知記録を作る", admin, "create", "notificationLogs/announcement-pr-99", { data: { kind: "announcement" } }),
+  testCase("DENY", "一般：通知記録の読み取り", userA, "get", "notificationLogs/derby-2030-01-01", { existing: { kind: "derby" } }),
   // 友達関係の解除（friends の削除）は当事者だけ。作成・更新は今まで通り
   testCase("ALLOW", "friends：当事者が友達関係を解除", userA, "delete", "friends/alice_bob", { existing: { user1: "alice", user2: "bob", user1Uid: userA.uid, user2Uid: "someoneElse" } }),
   testCase("DENY", "friends：当事者でない人が友達関係を解除", userA, "delete", "friends/bob_carol", { existing: { user1: "bob", user2: "carol", user1Uid: "someoneElse", user2Uid: "anotherOne" } }),

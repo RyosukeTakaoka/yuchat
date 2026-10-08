@@ -10,6 +10,8 @@ const jst = (text) => Date.parse(`${text}+09:00`);
 
 function fakeFirestore(docs = {}) {
   const store = new Map(Object.entries(docs));
+  const versions = new Map();
+  let clock = 0;
   const stats = { queries: [], gets: 0, writes: 0 };
   const cmp = (a, op, b) => ({ EQUAL: a === b, GREATER_THAN: a > b, GREATER_THAN_OR_EQUAL: a >= b, LESS_THAN: a < b, LESS_THAN_OR_EQUAL: a <= b }[op]);
   const norm = (v) => (v instanceof Date ? v.getTime() : typeof v === "string" && /^\d{4}-\d{2}-\d{2}T/.test(v) ? Date.parse(v) : v);
@@ -23,9 +25,30 @@ function fakeFirestore(docs = {}) {
         .map(([p, d]) => ({ id: p.split("/")[1], path: p, data: { ...d, raceAt: d.raceAt instanceof Date ? d.raceAt.toISOString() : d.raceAt } }));
     },
     async get(path) { stats.gets++; return store.has(path) ? { ...store.get(path) } : null; },
-    async createIfAbsent(path, data) { if (store.has(path)) return false; stats.writes++; store.set(path, data); return true; },
-    async update(path, data) { stats.writes++; store.set(path, { ...(store.get(path) || {}), ...data }); },
-    async delete(path) { stats.writes++; store.delete(path); }
+    async createIfAbsent(path, data) { if (store.has(path)) return false; stats.writes++; store.set(path, data); versions.set(path, ++clock); return true; },
+    async update(path, data) { stats.writes++; store.set(path, { ...(store.get(path) || {}), ...data }); versions.set(path, ++clock); },
+    async delete(path) { stats.writes++; store.delete(path); },
+    /* worker.js の getRaw / commit と同じ形（文字列の項目だけ・更新時刻の条件つき） */
+    async getRaw(path) {
+      stats.gets++;
+      if (!store.has(path)) return null;
+      const fields = Object.fromEntries(Object.entries(store.get(path)).filter(([, v]) => typeof v === "string").map(([k, v]) => [k, { stringValue: v }]));
+      return { fields, updateTime: `t${versions.get(path) || 0}` };
+    },
+    docName: (path) => `docs/${path}`,
+    async commit(writes) {
+      for (const w of writes) {
+        const path = w.update.name.slice("docs/".length);
+        if (w.currentDocument?.updateTime && w.currentDocument.updateTime !== `t${versions.get(path) || 0}`) {
+          throw Object.assign(new Error("FAILED_PRECONDITION"), { status: 400 });
+        }
+      }
+      for (const w of writes) {
+        const path = w.update.name.slice("docs/".length);
+        const data = Object.fromEntries(Object.entries(w.update.fields).map(([k, v]) => [k, v.stringValue ?? v.timestampValue ?? v]));
+        stats.writes++; store.set(path, data); versions.set(path, ++clock);
+      }
+    }
   };
 }
 
@@ -63,9 +86,14 @@ test("開催スケジュール：11:30（2026-10-07 から）と 15:02。raceId 
 for (const [label, at, expected] of [
   ["15:01:00（Cron の時刻ちょうど）", "2026-10-08T15:01:00", ["2026-10-08"]],
   ["15:01:20（Cron が少し遅れた）", "2026-10-08T15:01:20", ["2026-10-08"]],
+  ["15:01:59（Cron が大きく遅れた）", "2026-10-08T15:01:59", ["2026-10-08"]],
   ["11:29:00", "2026-10-08T11:29:00", ["2026-10-08-1130"]],
+  ["11:28:00（2分前はまだ）", "2026-10-08T11:28:00", []],
+  ["11:30:00（開始したあとは送らない）", "2026-10-08T11:30:00", []],
   ["15:00:00（2分前はまだ）", "2026-10-08T15:00:00", []],
+  ["15:00:59（2分前の分）", "2026-10-08T15:00:59", []],
   ["15:02:00（開始したあとは送らない）", "2026-10-08T15:02:00", []],
+  ["2026-10-06 11:29（11:30 の回が始まる前の日）", "2026-10-06T11:29:00", []],
   ["12:00:00（レースが無い時刻）", "2026-10-08T12:00:00", []]
 ]) {
   test(`開始1分前の判定：${label} → ${expected.join("・") || "なし"}`, async () => {
@@ -89,6 +117,26 @@ test("手動レース：raceAt の1分前に通知。キャンセルされたレ
   assert.deepEqual((await notifyDerbyStartingSoon(deps, jst("2026-10-08T17:59:00"))).races.map((x) => x.raceId), ["2026-10-08-m1800"]);
   assert.deepEqual((await notifyDerbyStartingSoon(deps, jst("2026-10-08T18:04:00"))).races.map((x) => x.raceId), []);
   assert.equal(new Set(sent.map((s) => s.data.raceId)).size, 1);
+});
+
+test("1日を毎分 Cron で回すと、各レースはちょうど「開始1分前の分」に1回だけ通知（自動 11:30・15:02、手動 18:00・秒ずれ 20:00:30）", async () => {
+  const { deps, sent } = makeDeps({
+    ...TOKENS,
+    "derbyManualRaces/2026-10-08-m1800": { raceAt: new Date(jst("2026-10-08T18:00:00")), status: "scheduled" },
+    "derbyManualRaces/2026-10-08-m2000": { raceAt: new Date(jst("2026-10-08T20:00:30")), status: "scheduled" }
+  });
+  const firedAt = {};
+  for (let t = jst("2026-10-08T00:00:00"); t < jst("2026-10-09T00:00:00"); t += 60000) {
+    const r = await notifyDerbyStartingSoon(deps, t);
+    r.races.filter((x) => !x.skipped).forEach((x) => { (firedAt[x.raceId] ||= []).push(new Date(t + 9 * 3600000).toISOString().slice(11, 16)); });
+  }
+  assert.deepEqual(firedAt, {
+    "2026-10-08-1130": ["11:29"],
+    "2026-10-08": ["15:01"],
+    "2026-10-08-m1800": ["17:59"],
+    "2026-10-08-m2000": ["19:59"]
+  });
+  assert.equal(sent.length, 4 * 3, "4レース × 3台、二重送信なし");
 });
 
 test("日付をまたぐ時刻（23:59）でも動く（翌日の回も見る）", async () => {
@@ -171,4 +219,33 @@ test("お知らせの通知：ログインなしの /admin は 401（既存と�
   const { deps } = makeDeps({ ...TOKENS, ...ANN });
   const res = await handleRequest(new Request("https://w/admin", { method: "POST", headers: { Origin: "https://yuchin0809.github.io" }, body: JSON.stringify({ action: "notifyAnnouncement", announcementId: "a1" }) }), { ALLOWED_ORIGINS: "https://yuchin0809.github.io" }, deps);
   assert.equal(res.status, 401);
+});
+
+/* ===== 通知記録（notificationLogs）を先に作られても、通知は止まらない ===== */
+
+test("ブラウザなどから先に作られた（Worker の印が無い）通知記録は引き継いで送る。2回目は送らない", async () => {
+  const { deps, sent, firestore } = makeDeps({ ...TOKENS, "notificationLogs/derby-2026-10-08": { kind: "derby" } });
+  const first = await sendBroadcastNotification(deps, "derby-2026-10-08", { kind: "derby", title: "t", body: "b" });
+  assert.equal(first.tokens, 3);
+  assert.equal(sent.length, 3);
+  assert.equal(firestore.store.get("notificationLogs/derby-2026-10-08").by, "notify-worker");
+  const second = await sendBroadcastNotification(deps, "derby-2026-10-08", { kind: "derby", title: "t", body: "b" });
+  assert.deepEqual(second, { skipped: "duplicate" });
+  assert.equal(sent.length, 3, "二重に送らない");
+});
+
+test("Worker が作った通知記録があれば送らない（チャット以外の全員への通知）", async () => {
+  const { deps, sent } = makeDeps({ ...TOKENS, "notificationLogs/announcement-pr-9": { kind: "announcement", by: "notify-worker" } });
+  assert.deepEqual(await sendBroadcastNotification(deps, "announcement-pr-9", { kind: "announcement" }), { skipped: "duplicate" });
+  assert.equal(sent.length, 0);
+});
+
+test("印の無い記録を2つの実行が同時に引き継ごうとしても、送るのは1回だけ", async () => {
+  const { deps, sent } = makeDeps({ ...TOKENS, "notificationLogs/derby-2026-10-08": { kind: "derby" } });
+  const results = await Promise.all([
+    sendBroadcastNotification(deps, "derby-2026-10-08", { kind: "derby" }),
+    sendBroadcastNotification(deps, "derby-2026-10-08", { kind: "derby" })
+  ]);
+  assert.equal(results.filter((r) => r.skipped === "duplicate").length, 1);
+  assert.equal(sent.length, 3);
 });

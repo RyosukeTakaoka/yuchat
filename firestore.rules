@@ -47,14 +47,17 @@ service cloud.firestore {
 
     // 下のコレクションは管理者だけが読める
     //   adminAuditLogs：👤 ユーザー管理の操作の記録／userDeletions：完全削除の進み具合／suspendedUsers：停止中のユーザー
+    //   notificationLogs：プッシュ通知の送信記録（アプリは読まないので、専用の読み取りルールは作らない＝管理者も含めてブラウザからは読めない）
     function isAdminOnlyReadCollection(collection) {
-      return collection in ['adminNameChanges', 'adminAuditLogs', 'userDeletions', 'suspendedUsers'];
+      return collection in ['adminNameChanges', 'adminAuditLogs', 'userDeletions', 'suspendedUsers', 'notificationLogs'];
     }
 
     // 下のコレクションは自動処理（サービスアカウント）だけが書く。ブラウザからは書き込めない
     //   adminAuditLogs・userDeletions・suspendedUsers は、管理者の操作を受けた通知サーバー（Cloudflare Worker）だけが書く
+    //   notificationLogs は通知の二重送信防止の記録。Worker（と同じ処理を使う GitHub Actions）だけが書く
+    //   （ブラウザから先に作られると、ゆうダービーやお知らせの通知が止められてしまうため）
     function isServerOnlyCollection(collection) {
-      return collection in ['market', 'rankings', 'adminAuditLogs', 'userDeletions', 'suspendedUsers'];
+      return collection in ['market', 'rankings', 'adminAuditLogs', 'userDeletions', 'suspendedUsers', 'notificationLogs'];
     }
 
     // ===== もとのルール（管理者用・自動処理用・廃止したコレクション以外は今まで通り） =====

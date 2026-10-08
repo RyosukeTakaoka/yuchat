@@ -116,7 +116,12 @@ function fakeFirestore(tokens = []) {
     async get(path) { return docs.has(path) ? { ...docs.get(path) } : null; },
     async query(collection) { return [...docs.keys()].filter((k) => k.startsWith(`${collection}/`)).map((k) => ({ id: k.split("/")[1], path: k, data: docs.get(k) })); },
     async update(path, data) { docs.set(path, { ...(docs.get(path) || {}), ...data }); },
-    async delete(path) { docs.delete(path); }
+    async delete(path) { docs.delete(path); },
+    /* worker.js の getRaw と同じ形（文字列の項目だけ） */
+    async getRaw(path) {
+      if (!docs.has(path)) return null;
+      return { fields: Object.fromEntries(Object.entries(docs.get(path)).filter(([, v]) => typeof v === "string").map(([k, v]) => [k, { stringValue: v }])), updateTime: "t1" };
+    }
   };
 }
 

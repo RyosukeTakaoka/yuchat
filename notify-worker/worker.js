@@ -253,12 +253,35 @@ async function getTokensForUids(fs, uids) {
    全員への通知（🏇 ゆうダービー開始1分前・📢 新しいお知らせ）
    ・送り先は fcmTokens（通知を ON にした端末だけが登録している）。トークンが無ければ何も送らない
    ・notificationLogs/{logId} を「まだ無いときだけ」作ってから送る（何回呼ばれても、同じ通知は1回だけ）
+     ログには by: "notify-worker" を付ける。この印の無いログ（ルールで書き込みを止める前にブラウザから作られたものなど）は
+     「送った記録」として扱わず、更新時刻を条件にして1回だけ引き継いで送る（引き継げるのは1つの実行だけ）
    ・使えなくなったトークンは消す。1台への送信に失敗しても、ほかの端末への送信は続ける
 ========================================================= */
 
+const BROADCAST_LOG_BY = "notify-worker";
+
+async function claimBroadcastLog(deps, logId, kind) {
+  const fs = deps.firestore;
+  const path = `notificationLogs/${logId}`;
+  if (await fs.createIfAbsent(path, { kind, by: BROADCAST_LOG_BY, createdAt: new Date(deps.now()) })) return true;
+  const existing = await fs.getRaw(path);
+  if (!existing) return false;
+  if (existing.fields.by?.stringValue === BROADCAST_LOG_BY) return false;
+  try {
+    await fs.commit([{
+      update: { name: fs.docName(path), fields: encodeFields({ kind, by: BROADCAST_LOG_BY, createdAt: new Date(deps.now()) }) },
+      currentDocument: { updateTime: existing.updateTime }
+    }]);
+    return true;
+  } catch (error) {
+    if (error?.status === 400 || error?.status === 409) return false; // ほかの実行が先に引き継いだ
+    throw error;
+  }
+}
+
 export async function sendBroadcastNotification(deps, logId, data) {
   const fs = deps.firestore;
-  const claimed = await fs.createIfAbsent(`notificationLogs/${logId}`, { kind: data.kind || "", createdAt: new Date(deps.now()) });
+  const claimed = await claimBroadcastLog(deps, logId, data.kind || "");
   if (!claimed) return { skipped: "duplicate" };
 
   const tokens = (await fs.query("fcmTokens", [], { select: ["uid"] })).map((d) => d.id);
@@ -283,10 +306,11 @@ export async function sendBroadcastNotification(deps, logId, data) {
      ・毎日 15:02（raceId「YYYY-MM-DD」）
      ・毎日 11:30（raceId「YYYY-MM-DD-1130」。DERBY_TWICE_DAILY_FROM の日から）
      ・管理者が作る手動レース（derbyManualRaces/{raceId} の raceAt。キャンセルされたものは除く）
-   毎分の Cron で「開始まで 0 秒より後〜95 秒以内」のレースを探す（15:02 の回なら 15:01 の Cron で通知）。
+   毎分の Cron で「開始の1分前（開始 − 60 秒）がこの分に入る」レースを探す（15:02 の回は 15:01、11:30 の回は 11:29 の Cron で通知）。
+   Cron の時刻は分の頭（scheduledTime）。少し遅れて動いても、分単位に切り捨ててから判定するので結果は同じ。
    自動開催の回は計算だけで決まるので Firestore は読まない。手動レースだけ、その時間帯を1回問い合わせる */
 
-const DERBY_NOTICE_WINDOW_MS = 95 * 1000;
+const MINUTE_MS = 60 * 1000;
 const DERBY_DAILY_RACES = [
   { hour: 11, minute: 30, suffix: "-1130", from: "2026-10-07" },
   { hour: 15, minute: 2, suffix: "", from: "" }
@@ -317,14 +341,16 @@ export function derbyNotificationData(raceId) {
 }
 
 export async function notifyDerbyStartingSoon(deps, now = deps.now()) {
-  const from = now, to = now + DERBY_NOTICE_WINDOW_MS;
+  /* この分（M）に通知するのは、開始時刻が [M + 1分, M + 2分) のレース（開始 − 60 秒が M〜M + 59 秒） */
+  const minute = Math.floor(now / MINUTE_MS) * MINUTE_MS;
+  const from = minute + MINUTE_MS, to = minute + 2 * MINUTE_MS;
   /* 日付をまたぐ時間帯（23:59 など）も考えて、今日と明日の回を見る */
   const days = [...new Set([jstDateText(from), jstDateText(to)])];
-  const due = days.flatMap(dailyDerbyRaces).filter((r) => r.raceAt > from && r.raceAt <= to);
+  const due = days.flatMap(dailyDerbyRaces).filter((r) => r.raceAt >= from && r.raceAt < to);
 
   const manual = await deps.firestore.query("derbyManualRaces", [
-    ["raceAt", "GREATER_THAN", new Date(from)],
-    ["raceAt", "LESS_THAN_OR_EQUAL", new Date(to)]
+    ["raceAt", "GREATER_THAN_OR_EQUAL", new Date(from)],
+    ["raceAt", "LESS_THAN", new Date(to)]
   ], { select: ["raceAt", "status"] });
   manual.filter((r) => r.data.status !== "cancelled").forEach((r) => due.push({ raceId: r.id, raceAt: Date.parse(r.data.raceAt) }));
 
