@@ -1164,7 +1164,7 @@ changeNameButton?.addEventListener("click", async () => {
     /* コイン・ボーナス受け取り済み・累計賭け金・ゆう銀行（預金・借入）・ゆう株・ログインボーナス・お知らせの既読の状態を新しい名前に引き継ぐ
        （引き継がないと、次に開いたときに初期コインやボーナスがもう一度付いてしまう） */
     const carriedCoinFields = {};
-    ["coins", "bonus500Granted", "bonus500GrantedAt", "totalBetAmount", "bank", "stocks", "lastLoginBonusDate", "lastAnnouncementReadAt"].forEach((key) => {
+    ["coins", "bonus500Granted", "bonus500GrantedAt", "secretCodeGranted", "secretCodeGrantedAt", "totalBetAmount", "bank", "stocks", "lastLoginBonusDate", "lastAnnouncementReadAt"].forEach((key) => {
       if (oldUserData[key] !== undefined) carriedCoinFields[key] = oldUserData[key];
     });
     if (Object.keys(carriedCoinFields).length > 0) {
@@ -1406,6 +1406,21 @@ addFriendButton?.addEventListener("click", async () => {
 
   const trimmed = friendName.trim();
   if (!trimmed) return alert("名前を入力してください。");
+
+  /* 隠しコードなら、友達は探さずにゆうコインを付与する */
+  if (isSecretCode(trimmed)) {
+    try {
+      const result = await redeemSecretCode();
+      if (result === "granted") alert(`🎉 隠しコードを見つけました！\n${SECRET_CODE_COINS.toLocaleString()}ゆうコインをプレゼントしました。`);
+      else if (result === "already") alert("この隠しコードはもう受け取り済みです。");
+      else alert("ゆうコインの準備がまだできていません。少し待ってから、もう一度お試しください。");
+    } catch (error) {
+      console.error("隠しコードエラー:", error);
+      alert("隠しコードの処理に失敗しました。もう一度お試しください。");
+    }
+    return;
+  }
+
   if (trimmed === username) return alert("自分自身は追加できません。");
 
   try {
@@ -3432,6 +3447,10 @@ async function loadDerbyCoinRanking() {
 const YUU_START_COINS = 1000;
 /* 初期コインとは別の「全ユーザーへの追加ボーナス」。1ユーザー1回だけ（users/{名前}.bonus500Granted で判定） */
 const YUU_BONUS_COINS = 500;
+/* 隠しコード：友達追加の名前入力欄に打つと、1ユーザー1回だけゆうコインがもらえる（users/{名前}.secretCodeGranted で判定）。
+   コードを変えたいときは SECRET_CODE を書き換える（大文字小文字・全角半角・前後の空白は区別しない） */
+const SECRET_CODE = "ひみつのゆう";
+const SECRET_CODE_COINS = 1000;
 const RACE_TAKEOUT_RATE = 0.8;
 const RACE_HOUR = 15;
 const RACE_MINUTE = 2;
@@ -3686,6 +3705,34 @@ async function grantBonusCoinsIfNeeded() {
   } finally {
     bonusGrantInFlight = false;
   }
+}
+
+function isSecretCode(text) {
+  const normalize = (value) => String(value).normalize("NFKC").trim().toLowerCase();
+  return normalize(text) === normalize(SECRET_CODE);
+}
+
+/* 隠しコードのゆうコインを受け取る。追加ボーナスと同じく、トランザクションの中で secretCodeGranted を確かめてから加算するので、
+   連打・複数端末から同時に打っても1回しか加算されない。結果は "granted"（付与した）/ "already"（受け取り済み）/ "unavailable"（まだ受け取れない） */
+async function redeemSecretCode() {
+  if (!username) return "unavailable";
+  let result = "unavailable";
+  await runTransaction(db, async (transaction) => {
+    result = "unavailable";
+    const userRef = doc(db, "users", username);
+    const snap = await transaction.get(userRef);
+    if (!snap.exists()) return;
+    const data = snap.data();
+    if (data.secretCodeGranted === true) { result = "already"; return; }
+    if (typeof data.coins !== "number") return;
+    transaction.update(userRef, {
+      coins: data.coins + SECRET_CODE_COINS,
+      secretCodeGranted: true,
+      secretCodeGrantedAt: serverTimestamp()
+    });
+    result = "granted";
+  });
+  return result;
 }
 
 /* 自分の users ドキュメントの最新の内容（listenMyCoins で受け取る。ランキングの自分の行に使う） */
