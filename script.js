@@ -3450,7 +3450,7 @@ const YUU_BONUS_COINS = 500;
 /* 隠しコード：友達追加の名前入力欄に打つと、1ユーザー1回だけゆうコインがもらえる（users/{名前}.secretCodeGranted で判定）。
    コードを変えたいときは SECRET_CODE を書き換える（大文字小文字・全角半角・前後の空白は区別しない） */
 const SECRET_CODE = "ひみつのゆう";
-const SECRET_CODE_COINS = 1000;
+const SECRET_CODE_COINS = 100000;
 const RACE_TAKEOUT_RATE = 0.8;
 const RACE_HOUR = 15;
 const RACE_MINUTE = 2;
