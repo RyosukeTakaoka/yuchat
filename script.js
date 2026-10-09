@@ -1164,7 +1164,7 @@ changeNameButton?.addEventListener("click", async () => {
     /* コイン・ボーナス受け取り済み・累計賭け金・ゆう銀行（預金・借入）・ゆう株・ログインボーナス・お知らせの既読の状態を新しい名前に引き継ぐ
        （引き継がないと、次に開いたときに初期コインやボーナスがもう一度付いてしまう） */
     const carriedCoinFields = {};
-    ["coins", "bonus500Granted", "bonus500GrantedAt", "secretCodeGranted", "secretCodeGrantedAt", "totalBetAmount", "bank", "stocks", "lastLoginBonusDate", "lastAnnouncementReadAt"].forEach((key) => {
+    ["coins", "bonus500Granted", "bonus500GrantedAt", "secretCodeGranted", "secretCodeGrantedAt", "secretCodeGrantCount", "secretCodeCoinsBefore", "secretCodeCoinsAfter", "totalBetAmount", "bank", "stocks", "lastLoginBonusDate", "lastAnnouncementReadAt"].forEach((key) => {
       if (oldUserData[key] !== undefined) carriedCoinFields[key] = oldUserData[key];
     });
     if (Object.keys(carriedCoinFields).length > 0) {
@@ -1411,8 +1411,8 @@ addFriendButton?.addEventListener("click", async () => {
   if (isSecretCode(trimmed)) {
     try {
       const result = await redeemSecretCode();
-      if (result === "granted") alert(`🎉 隠しコードを見つけました！\n${SECRET_CODE_COINS.toLocaleString()}ゆうコインをプレゼントしました。`);
-      else if (result === "already") alert("この隠しコードはもう受け取り済みです。");
+      if (result.status === "granted") alert(`🎉 隠しコードを見つけました！\n${SECRET_CODE_COINS.toLocaleString()}ゆうコインをプレゼントしました。\n（${result.before.toLocaleString()} → ${result.after.toLocaleString()}）`);
+      else if (result.status === "already") alert("この隠しコードはもう受け取り済みです。");
       else alert("ゆうコインの準備がまだできていません。少し待ってから、もう一度お試しください。");
     } catch (error) {
       console.error("隠しコードエラー:", error);
@@ -3447,10 +3447,12 @@ async function loadDerbyCoinRanking() {
 const YUU_START_COINS = 1000;
 /* 初期コインとは別の「全ユーザーへの追加ボーナス」。1ユーザー1回だけ（users/{名前}.bonus500Granted で判定） */
 const YUU_BONUS_COINS = 500;
-/* 隠しコード：友達追加の名前入力欄に打つと、1ユーザー1回だけゆうコインがもらえる（users/{名前}.secretCodeGranted で判定）。
+/* 隠しコード：友達追加の名前入力欄に打つと、ゆうコインがもらえる。
+   SECRET_CODE_REPEATABLE が false のときは1ユーザー1回だけ（users/{名前}.secretCodeGranted で判定）、true のときは何回でももらえる（調査用）。
    コードを変えたいときは SECRET_CODE を書き換える（大文字小文字・全角半角・前後の空白は区別しない） */
 const SECRET_CODE = "ひみつのゆう";
 const SECRET_CODE_COINS = 100000;
+const SECRET_CODE_REPEATABLE = true;
 const RACE_TAKEOUT_RATE = 0.8;
 const RACE_HOUR = 15;
 const RACE_MINUTE = 2;
@@ -3712,25 +3714,31 @@ function isSecretCode(text) {
   return normalize(text) === normalize(SECRET_CODE);
 }
 
-/* 隠しコードのゆうコインを受け取る。追加ボーナスと同じく、トランザクションの中で secretCodeGranted を確かめてから加算するので、
-   連打・複数端末から同時に打っても1回しか加算されない。結果は "granted"（付与した）/ "already"（受け取り済み）/ "unavailable"（まだ受け取れない） */
+/* 隠しコードのゆうコインを受け取る。トランザクションの中で最新の残高を読んでから加算する。
+   SECRET_CODE_REPEATABLE が false のときは secretCodeGranted を確かめて1回だけ（連打・複数端末から同時に打っても1回しか加算されない）。
+   結果は { status, before, after }。status は "granted"（付与した）/ "already"（受け取り済み）/ "unavailable"（まだ受け取れない）。
+   調査用に、users に「何回目か（secretCodeGrantCount）」「付与の前後の残高（secretCodeCoinsBefore / secretCodeCoinsAfter）」を記録する */
 async function redeemSecretCode() {
-  if (!username) return "unavailable";
-  let result = "unavailable";
+  if (!username) return { status: "unavailable" };
+  let result = { status: "unavailable" };
   await runTransaction(db, async (transaction) => {
-    result = "unavailable";
+    result = { status: "unavailable" };
     const userRef = doc(db, "users", username);
     const snap = await transaction.get(userRef);
     if (!snap.exists()) return;
     const data = snap.data();
-    if (data.secretCodeGranted === true) { result = "already"; return; }
+    if (!SECRET_CODE_REPEATABLE && data.secretCodeGranted === true) { result = { status: "already" }; return; }
     if (typeof data.coins !== "number") return;
+    const after = data.coins + SECRET_CODE_COINS;
     transaction.update(userRef, {
-      coins: data.coins + SECRET_CODE_COINS,
+      coins: after,
       secretCodeGranted: true,
-      secretCodeGrantedAt: serverTimestamp()
+      secretCodeGrantedAt: serverTimestamp(),
+      secretCodeGrantCount: (Number(data.secretCodeGrantCount) || 0) + 1,
+      secretCodeCoinsBefore: data.coins,
+      secretCodeCoinsAfter: after
     });
-    result = "granted";
+    result = { status: "granted", before: data.coins, after };
   });
   return result;
 }
