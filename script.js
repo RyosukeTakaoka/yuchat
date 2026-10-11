@@ -961,12 +961,31 @@ function isInterruptedBySignOut(session) {
   return session !== appSessionSeq || !currentUser;
 }
 
+/* チャット・グループの本人確認用に、ログイン中のユーザー名をトークンのカスタムクレーム name に入れる。
+   Firestore Rules は token.name で「1対1・グループの当事者」を判定するので、購読を始める前に同期する。
+   すでにトークンの name が今の名前と同じなら、通信せず何もしない（ログインのたびの無駄な通信を避ける）。 */
+async function ensureNameClaim() {
+  if (!currentUser || !username) return;
+  try {
+    const result = await currentUser.getIdTokenResult();
+    if (result?.claims?.name === username) return;
+    await callEconomyApi("syncNameClaim");
+    await currentUser.getIdToken(true); /* 新しい name クレームをトークンに反映してから購読を始める */
+  } catch (error) {
+    console.error("名前の確認情報の同期に失敗しました（チャットが表示されないときは、一度ログインし直してください）:", error);
+  }
+}
+
 async function startApp() {
   if (!currentUser || !username) return;
 
   const session = ++appSessionSeq;
   const startedUid = currentUser.uid;
   await waitForFirestoreAuth();
+  if (session !== appSessionSeq || !currentUser || currentUser.uid !== startedUid || !username) return;
+
+  /* チャット・グループの読み取りは token.name で本人確認するので、購読の前に名前クレームを同期する */
+  await ensureNameClaim();
   if (session !== appSessionSeq || !currentUser || currentUser.uid !== startedUid || !username) return;
 
   try {
@@ -1191,7 +1210,9 @@ changeNameButton?.addEventListener("click", async () => {
     username = trimmed;
     localStorage.setItem("yuuchat_username", username);
 
-    await migrateUsername(oldName, username);
+    /* メッセージ・グループ・友達関係の名前の書き換えと名前クレームの更新は renameCarry（サーバー）が行う。
+       新しい名前クレームをトークンに反映してから購読をやり直す（チャットの本人確認に使う） */
+    try { await currentUser.getIdToken(true); } catch (error) { console.error("トークン更新エラー:", error); }
 
     if (myName) myName.textContent = username;
     updateFcmTokenUsername();
@@ -1206,31 +1227,9 @@ changeNameButton?.addEventListener("click", async () => {
   }
 });
 
-/* =========================================================
-   名前変更時のデータ移行
-========================================================= */
-
-async function migrateUsername(oldName, newName) {
-  if (!oldName || !newName || oldName === newName) return;
-
-  try {
-    /* 古い名前が入っている友達・グループ・メッセージだけを読んで書き換える
-       （以前は friends・groups・messages を全件読んでいた。管理者の名前変更と同じ migrateRenamedUserData を使う） */
-    await migrateRenamedUserData(oldName, newName);
-
-    /* メンバーには入っていないが作成者（owner）が古い名前のグループも、以前と同じように書き換える */
-    const ownedSnap = await getDocs(query(collection(db, "groups"), where("owner", "==", oldName)));
-    const owned = ownedSnap.docs.filter((d) => !(Array.isArray(d.data().members) ? d.data().members : []).includes(oldName));
-    for (let i = 0; i < owned.length; i += 400) {
-      const batch = writeBatch(db);
-      owned.slice(i, i + 400).forEach((d) => batch.update(d.ref, { owner: newName, updatedAt: serverTimestamp() }));
-      await batch.commit();
-    }
-  } catch (error) {
-    console.error("名前変更データ移行エラー:", error);
-    throw error;
-  }
-}
+/* 名前変更のときの、名前が入ったメッセージ・グループ・友達関係の書き換えは、
+   通知サーバー（Cloudflare Worker）がサービスアカウントで行う（ブラウザは他人のメッセージ等を書き換えられない）。
+   本人の名前変更は renameCarry、管理者の強制変更は admin の renameUserRefs で引き継ぐ。 */
 
 /* =========================================================
    友達一覧
@@ -1758,7 +1757,8 @@ async function leaveGroup(groupId) {
       if (!snap.exists()) return;
       const data = snap.data();
       const remaining = (Array.isArray(data.members) ? data.members : []).filter((name) => name !== username);
-      if (remaining.length === 0) { deleteAfter = true; transaction.delete(ref); return; }
+      /* 最後の1人のときは、グループがまだある間にメッセージを消してからグループを消す（トランザクションの外で行う） */
+      if (remaining.length === 0) { deleteAfter = true; return; }
 
       const update = { members: remaining, [`lastReadAt.${currentUser.uid}`]: deleteField(), updatedAt: serverTimestamp() };
       const iAmAdmin = data.ownerUid ? data.ownerUid === currentUser.uid : data.owner === username;
@@ -1774,7 +1774,10 @@ async function leaveGroup(groupId) {
   closeChatModal();
   if (selectedChatType === "group" && selectedChat === groupId) resetChat();
   showAppToast("👥 グループ", `「${group.name || "グループ"}」から退出しました`);
-  if (deleteAfter) await deleteGroupMessages(groupId);
+  if (deleteAfter) {
+    await deleteGroupMessages(groupId);
+    try { await deleteDoc(doc(db, "groups", groupId)); } catch (error) { console.error("空グループの削除エラー:", error); }
+  }
 }
 
 async function deleteGroup(groupId) {
@@ -1782,12 +1785,13 @@ async function deleteGroup(groupId) {
   if (!isGroupAdmin(group)) throw new Error("NOT_ADMIN");
   if (!confirm(`「${group.name || "グループ"}」を削除しますか？\nメンバー全員のグループとメッセージが消え、元に戻せません。`)) return;
   await withGroupAction(async () => {
+    /* グループがまだある間にメッセージを消す（ルールは「グループの管理者か」をグループを見て確かめるため、先に消す） */
+    await deleteGroupMessages(groupId);
     await deleteDoc(doc(db, "groups", groupId));
   });
   closeChatModal();
   if (selectedChatType === "group" && selectedChat === groupId) resetChat();
   showAppToast("👥 グループ", `「${group.name || "グループ"}」を削除しました`);
-  await deleteGroupMessages(groupId);
 }
 
 /* 削除したグループのメッセージを消す（グループを削除したときだけ。500件ずつ） */
@@ -5672,49 +5676,10 @@ async function adminRenameUser(oldName, newName) {
   });
 
   rankingCache = null;
-  const migrated = await migrateRenamedUserData(oldName, newName);
+  /* 名前が入ったメッセージ・グループ・友達関係の書き換えは通知サーバー（サービスアカウント）が行う
+     （ロックダウン後はブラウザから他人のメッセージ等を書き換えられないため） */
+  const migrated = await callAdminApi("renameUserRefs", { from: oldName, to: newName });
   return { targetUid, migrated };
-}
-
-/* 友達・グループ・メッセージのうち、古い名前が入っているものだけを書き換える（通常の名前変更と同じ項目） */
-async function migrateRenamedUserData(oldName, newName) {
-  const updates = new Map();
-  const add = (ref, data) => updates.set(ref.path, { ref, data: { ...(updates.get(ref.path)?.data || {}), ...data } });
-
-  const [asUser1, asUser2, groupsSnap, sent, received] = await Promise.all([
-    getDocs(query(collection(db, "friends"), where("user1", "==", oldName))),
-    getDocs(query(collection(db, "friends"), where("user2", "==", oldName))),
-    getDocs(query(collection(db, "groups"), where("members", "array-contains", oldName))),
-    getDocs(query(collection(db, "messages"), where("sender", "==", oldName))),
-    getDocs(query(collection(db, "messages"), where("receiver", "==", oldName)))
-  ]);
-
-  [...asUser1.docs, ...asUser2.docs].forEach((d) => {
-    const data = d.data();
-    const change = {};
-    if (data.user1 === oldName) change.user1 = newName;
-    if (data.user2 === oldName) change.user2 = newName;
-    if (data.requestedBy === oldName) change.requestedBy = newName;
-    if (data.acceptedBy === oldName) change.acceptedBy = newName;
-    if (Object.keys(change).length) add(d.ref, { ...change, updatedAt: serverTimestamp() });
-  });
-  groupsSnap.docs.forEach((d) => {
-    const data = d.data();
-    const change = { members: (Array.isArray(data.members) ? data.members : []).map((m) => (m === oldName ? newName : m)) };
-    if (data.owner === oldName) change.owner = newName;
-    add(d.ref, { ...change, updatedAt: serverTimestamp() });
-  });
-  sent.docs.forEach((d) => add(d.ref, { sender: newName }));
-  received.docs.forEach((d) => add(d.ref, { receiver: newName }));
-
-  /* 1回の書き込みは500件まで */
-  const list = [...updates.values()];
-  for (let i = 0; i < list.length; i += 400) {
-    const batch = writeBatch(db);
-    list.slice(i, i + 400).forEach(({ ref, data }) => batch.update(ref, data));
-    await batch.commit();
-  }
-  return { friends: asUser1.size + asUser2.size, groups: groupsSnap.size, messages: sent.size + received.size };
 }
 
 async function promptAdminRename(oldName) {

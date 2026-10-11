@@ -23,6 +23,14 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // ログイン中のユーザーのユーザー名。通知サーバー（Cloudflare Worker）がログイン時にトークンの
+    // カスタムクレーム name に本人のユーザー名を入れる（users/{名前}.uid == 本人 を確かめたうえで）。
+    // チャットやグループは「名前」で相手を特定しているので、トークンの名前と突き合わせて本人確認する。
+    // クレームが無い（まだ同期していない）ときは '' を返す。
+    function myName() {
+      return signedIn() ? request.auth.token.get('name', '') : '';
+    }
+
     // 管理者は Firebase Authentication の UID だけで判定する（メールアドレスやユーザー名は使わない）
     function isAdmin() {
       return signedIn() && request.auth.uid == 'g51wzTvJFsZiYEfre5aDuDckJXY2';
@@ -40,9 +48,20 @@ service cloud.firestore {
 
     // 下のコレクションは、このあとの専用のルールで書き込みを判定する（今までの「ログイン済みなら書ける」をもとに、一部だけ絞る）
     //   users：自分のデータだけ（管理者による名前の強制変更を除く）／adminNameChanges：管理者の名前変更の記録
-    //   raceBets：固定オッズ方式のレースの精算の条件／friends：友達関係の解除（削除）は当事者だけ
+    //   friends：友達関係の解除（削除）は当事者だけ
+    //   第2段階（チャット・通知）：messages（本人だけ）／groups（メンバーだけ）／fcmTokens（本人の UID だけ）
+    //   第3段階（ゲーム・ユーザー作成）：gameRooms・gameInvites・gameRoomOwners（参加者・当事者だけ）
     function hasDedicatedWriteRules(collection) {
-      return collection in ['users', 'adminNameChanges', 'friends'];
+      return collection in ['users', 'adminNameChanges', 'friends',
+        'messages', 'groups', 'fcmTokens', 'gameRooms', 'gameInvites', 'gameRoomOwners'];
+    }
+
+    // 下のコレクションは、読み取りも専用のルールで判定する（もとの「ログイン済みなら誰でも読める」から外す）。
+    //   messages・groups：当事者／メンバーだけ（他人のチャットを読めないように）
+    //   gameInvites：送った人・送られた人だけ／fcmTokens：アプリからは読まない（通知サーバーだけが読む）
+    //   gameRooms・gameRoomOwners：専用のルールで判定（gameRooms はロビー表示のため読み取りは今まで通り許可）
+    function hasDedicatedReadRules(collection) {
+      return collection in ['messages', 'groups', 'fcmTokens', 'gameInvites', 'gameRooms', 'gameRoomOwners'];
     }
 
     // 下のコレクションは管理者だけが読める
@@ -62,9 +81,9 @@ service cloud.firestore {
         'races', 'raceLogs', 'raceBets'];
     }
 
-    // ===== もとのルール（管理者用・自動処理用・廃止したコレクション以外は今まで通り） =====
+    // ===== もとのルール（管理者用・自動処理用・廃止したコレクション・専用ルールのあるコレクション以外は今まで通り） =====
     match /{collection}/{document=**} {
-      allow read: if signedIn() && !isRetiredCollection(collection) && !isAdminOnlyReadCollection(collection);
+      allow read: if signedIn() && !isRetiredCollection(collection) && !isAdminOnlyReadCollection(collection) && !hasDedicatedReadRules(collection);
       allow write: if signedIn() && !isAdminManagedCollection(collection) && !isServerOnlyCollection(collection) && !isRetiredCollection(collection) && !hasDedicatedWriteRules(collection);
     }
 
@@ -127,9 +146,15 @@ service cloud.firestore {
       allow read: if signedIn();
       // 作成：自分の uid のデータだけ（管理者の名前強制変更を除く）。経済項目（コイン・銀行・株など）はブラウザから入れられない
       //   （初期コインは Worker が付ける。経済項目を入れた新規作成は拒否する）
+      //   さらに name 項目はドキュメントID（ユーザー名）と一致していなければならない（他人の名前の横取り・なりすましを防ぐ）。
+      //   登録直後はまだトークンのクレームが無いので、作成では名前クレームの一致は求めない（クレームは作成後に Worker が付ける）。
       allow create: if signedIn()
-        && ((request.resource.data.get('uid', '') == request.auth.uid && !hasEconomyFields(request.resource.data)) || isAdminRenameCreate());
-      // 更新：自分のデータだけ。経済項目は1つも変えられない（コイン・銀行・株・累計賭け金・ボーナス・ログインボーナスは Worker だけが変える）
+        && ((request.resource.data.get('uid', '') == request.auth.uid
+              && request.resource.data.get('name', userName) == userName
+              && !hasEconomyFields(request.resource.data))
+            || isAdminRenameCreate());
+      // 更新：自分のデータ（uid が自分）だけ。他人の users は書き換えられない（isOwnUserDoc で所有を確認）。
+      //   経済項目は1つも変えられない（コイン・銀行・株・累計賭け金・ボーナス・ログインボーナスは Worker だけが変える）。
       allow update: if signedIn() && isOwnUserDoc() && request.resource.data.get('uid', '') == request.auth.uid
         && !economyFieldsChanged();
       // 削除：自分のデータだけ（名前変更の引き継ぎは Worker が消す。管理者の名前強制変更は別の条件）
@@ -245,6 +270,189 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['users'])
         && request.resource.data.users is list
         && request.resource.data.users.size() == resource.data.users.size();
+    }
+
+    // ============================================================
+    // 第2段階：チャット・通知
+    // ============================================================
+
+    // ===== グループ（groups/{groupId}） =====
+    // 読み取り：そのグループのメンバーだけ（members にユーザー名が入っている人）。他人のグループは読めない
+    // 作成：作成者が自分（ownerUid が自分・members に自分が入っている）
+    // 更新：管理者（ownerUid）は何でも。メンバーは「最新メッセージ・既読などの更新」か「自分だけの退出」だけ
+    // 削除：管理者、または最後の1人（自分だけがメンバー）のとき
+    match /groups/{groupId} {
+      allow read: if signedIn() && myName() != '' && myName() in resource.data.get('members', []);
+
+      allow create: if signedIn()
+        && request.resource.data.get('ownerUid', '') == request.auth.uid
+        && myName() != '' && myName() in request.resource.data.get('members', []);
+
+      allow update: if signedIn() && (
+        isGroupOwner(resource.data)
+        || (isGroupMember(resource.data) && (memberChatFieldsOnly() || memberSelfLeave()))
+      );
+
+      allow delete: if signedIn() && (
+        isGroupOwner(resource.data)
+        || (myName() != '' && resource.data.get('members', []).hasOnly([myName()]))
+      );
+
+      function isGroupOwner(g) {
+        return g.get('ownerUid', '') == request.auth.uid
+          || (g.get('ownerUid', '') == '' && myName() != '' && g.get('owner', '') == myName());
+      }
+      function isGroupMember(g) {
+        return myName() != '' && myName() in g.get('members', []);
+      }
+      // メンバーが変えてよいのは、チャットの活動まわりの項目だけ（メンバー構成・名前・管理者は変えない）
+      function memberChatFieldsOnly() {
+        return request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['lastMessage', 'lastMessageAt', 'lastMessageSenderUid', 'lastReadAt', 'updatedAt']);
+      }
+      // 自分だけを members から外す（他の人は増やさない・減らさない）。既読の記録も一緒に消す
+      function memberSelfLeave() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'lastReadAt', 'updatedAt'])
+          && myName() in resource.data.get('members', [])
+          && !(myName() in request.resource.data.get('members', []))
+          && request.resource.data.get('members', []).size() == resource.data.get('members', []).size() - 1
+          && resource.data.get('members', []).hasAll(request.resource.data.get('members', []));
+      }
+    }
+
+    // ===== メッセージ（messages/{messageId}） =====
+    // 読み取り：1対1は当事者（sender か receiver が自分の名前）だけ。グループはそのグループのメンバーだけ
+    // 作成：送信者が自分（senderUid が自分・sender が自分の名前）。グループはメンバーのときだけ
+    // 更新：リアクションは当事者・メンバー、送信取り消し（soft delete）は送信者だけ
+    // 削除（完全削除）：グループの管理者だけ（グループ削除のときにメッセージも消す）
+    match /messages/{messageId} {
+      allow read: if signedIn() && isMessageParticipant(resource.data);
+
+      allow create: if signedIn()
+        && request.resource.data.get('senderUid', '') == request.auth.uid
+        && myName() != '' && request.resource.data.get('sender', '') == myName()
+        && (
+          request.resource.data.get('groupId', '') == ''
+          || (myName() in groupMembers(request.resource.data.get('groupId', '')))
+        );
+
+      allow update: if signedIn() && (
+        (isOwnMessage(resource.data) && deletedFieldsOnly())
+        || (isMessageParticipant(resource.data) && reactionsFieldsOnly())
+      );
+
+      allow delete: if signedIn()
+        && resource.data.get('groupId', '') != ''
+        && (isGroupOwnerOf(resource.data.get('groupId', '')) || isSoleGroupMemberOf(resource.data.get('groupId', '')));
+
+      function isOwnMessage(m) {
+        return m.get('senderUid', '') == request.auth.uid
+          || (m.get('senderUid', '') == '' && myName() != '' && m.get('sender', '') == myName());
+      }
+      function isMessageParticipant(m) {
+        return (myName() != '' && (m.get('sender', '') == myName() || m.get('receiver', '') == myName()))
+          || (m.get('groupId', '') != '' && myName() != '' && myName() in groupMembers(m.get('groupId', '')));
+      }
+      function deletedFieldsOnly() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deleted', 'deletedAt', 'image']);
+      }
+      function reactionsFieldsOnly() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions']);
+      }
+      function groupPath(gid) {
+        return /databases/$(database)/documents/groups/$(gid);
+      }
+      function groupMembers(gid) {
+        return gid != '' && exists(groupPath(gid)) ? get(groupPath(gid)).data.get('members', []) : [];
+      }
+      function isGroupOwnerOf(gid) {
+        return gid != '' && exists(groupPath(gid)) && (
+          get(groupPath(gid)).data.get('ownerUid', '') == request.auth.uid
+          || (get(groupPath(gid)).data.get('ownerUid', '') == '' && myName() != '' && get(groupPath(gid)).data.get('owner', '') == myName())
+        );
+      }
+      // 最後の1人（自分だけがメンバー）のグループのメッセージは、グループを閉じるときに消せる
+      function isSoleGroupMemberOf(gid) {
+        return gid != '' && myName() != '' && exists(groupPath(gid)) && get(groupPath(gid)).data.get('members', []).hasOnly([myName()]);
+      }
+    }
+
+    // ===== 通知トークン（fcmTokens/{token}） =====
+    // アプリからは読まない（通知サーバー・GitHub Actions がサービスアカウントで読む）。
+    // 作成・更新：自分の UID のトークンだけ（他人の UID で登録できない）。削除：自分の UID のトークンだけ
+    match /fcmTokens/{token} {
+      allow read: if false;
+      allow create, update: if signedIn() && request.resource.data.get('uid', '') == request.auth.uid;
+      allow delete: if signedIn() && resource.data.get('uid', '') == request.auth.uid;
+    }
+
+    // ============================================================
+    // 第3段階：ゲーム・ユーザー作成
+    // ============================================================
+
+    // ===== ゲームルーム（gameRooms/{roomId}） =====
+    // 読み取り：ログイン済みなら誰でも（ロビー表示・観戦）
+    // 作成：作成者が自分（ownerUid が自分・memberUids が自分だけ）
+    // 更新：参加者（memberUids に自分）／新しく参加する人（自分を memberUids に加える）／
+    //       招待された人が invitedUsers から自分だけを外す（辞退・参加の後始末）
+    // 削除：作成者、または最後の1人（memberUids が自分だけ）のとき
+    match /gameRooms/{roomId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.get('ownerUid', '') == request.auth.uid
+        && request.resource.data.get('memberUids', []).hasOnly([request.auth.uid]);
+
+      allow update: if signedIn() && (
+        (request.auth.uid in resource.data.get('memberUids', []))
+        || isJoiningGameRoom()
+        || invitedSelfRemoveOnly()
+      );
+
+      allow delete: if signedIn() && (
+        isGameRoomOwner(resource.data)
+        || resource.data.get('memberUids', []).hasOnly([request.auth.uid])
+      );
+
+      function isGameRoomOwner(r) {
+        return r.get('ownerUid', '') == request.auth.uid
+          || (r.get('ownerUid', '') == '' && myName() != '' && r.get('owner', '') == myName());
+      }
+      // 新しく参加する人：自分を memberUids に加えるだけ（他の参加者は名前・UID とも減らさない）
+      function isJoiningGameRoom() {
+        return request.auth.uid in request.resource.data.get('memberUids', [])
+          && !(request.auth.uid in resource.data.get('memberUids', []))
+          && request.resource.data.get('memberUids', []).hasAll(resource.data.get('memberUids', []))
+          && request.resource.data.get('members', []).hasAll(resource.data.get('members', []));
+      }
+      // 招待された人：invitedUsers から自分の名前だけを外す（参加者の構成やゲームの状態は変えない）
+      function invitedSelfRemoveOnly() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['invitedUsers', 'updatedAt'])
+          && myName() != '' && myName() in resource.data.get('invitedUsers', [])
+          && !(myName() in request.resource.data.get('invitedUsers', []))
+          && resource.data.get('invitedUsers', []).hasAll(request.resource.data.get('invitedUsers', []));
+      }
+    }
+
+    // ===== ゲームルーム作成の記録（gameRoomOwners/{uid}_{ゲーム}） =====
+    // 「同じゲームのルームは1人1個まで」を守るための記録。自分の UID の記録だけ読み書きできる
+    match /gameRoomOwners/{lockId} {
+      allow read: if signedIn() && (resource == null || resource.data.get('uid', '') == request.auth.uid);
+      allow create, update: if signedIn() && request.resource.data.get('uid', '') == request.auth.uid;
+      allow delete: if signedIn() && resource.data.get('uid', '') == request.auth.uid;
+    }
+
+    // ===== ゲームの招待（gameInvites/{roomId}_{招待相手のuid}） =====
+    // 読み取り：送った人（fromUid）か送られた人（toUid）だけ
+    // 作成：送り主が自分（fromUid が自分）で、はじめは pending
+    // 更新・削除：当事者（fromUid か toUid が自分）だけ
+    match /gameInvites/{inviteId} {
+      allow read: if signedIn() && (resource.data.get('toUid', '') == request.auth.uid || resource.data.get('fromUid', '') == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.get('fromUid', '') == request.auth.uid
+        && request.resource.data.get('status', '') == 'pending';
+      allow update, delete: if signedIn()
+        && (resource.data.get('toUid', '') == request.auth.uid || resource.data.get('fromUid', '') == request.auth.uid);
     }
   }
 }

@@ -450,7 +450,8 @@ export async function handleAdminAction(deps, callerUid, body) {
 
   const action = typeof body?.action === "string" ? body.action : "";
   const uid = typeof body?.uid === "string" ? body.uid : "";
-  if (action !== "listUsers" && action !== "notifyAnnouncement" && !UID_PATTERN.test(uid)) return { status: 400, error: "invalid_uid" };
+  const noUidActions = ["listUsers", "notifyAnnouncement", "renameUserRefs"];
+  if (!noUidActions.includes(action) && !UID_PATTERN.test(uid)) return { status: 400, error: "invalid_uid" };
 
   try {
     switch (action) {
@@ -465,6 +466,7 @@ export async function handleAdminAction(deps, callerUid, body) {
       case "previewAssets": return await adminPreviewAssets(deps, uid, body);
       case "adjustAssets": return await adminAdjustAssets(deps, callerUid, uid, body);
       case "notifyAnnouncement": return await adminNotifyAnnouncement(deps, body);
+      case "renameUserRefs": return await adminRenameUserRefs(deps, body);
       default: return { status: 400, error: "unknown_action" };
     }
   } catch (error) {
@@ -904,6 +906,16 @@ async function adminNotifyAnnouncement(deps, body) {
   return result.status ? result : { ok: true, ...result };
 }
 
+/* 管理者による名前の強制変更のあと、名前が入っているチャット・グループ・友達関係を新しい名前に書き換える。
+   ブラウザからは他人のメッセージ等を書き換えられないので、管理者の操作を受けてサーバーが行う。 */
+async function adminRenameUserRefs(deps, body) {
+  const from = body?.from, to = body?.to;
+  const bad = (v) => typeof v !== "string" || !v || v.length > 100 || v.includes("/");
+  if (bad(from) || bad(to) || from === to) return { status: 400, error: "invalid_rename" };
+  const count = await rewriteNameRefs(deps.firestore, from, to);
+  return { ok: true, count };
+}
+
 /* ----- ゆうコインの増減（管理者） -----
    ・users/{名前} の coins だけを書き換える（銀行・株・馬券などには触れない）
    ・読んだときの更新時刻を条件にして書く（その間にアプリや自動処理がコインを変えていたら、読み直してやり直す）
@@ -1284,7 +1296,7 @@ const DERBY_SERVER_GENERATORS = ["github-actions", "worker"];
    null のあいだは確かめない（Firestore Rules でブラウザからの書き込みを止めるときに日付を入れる） */
 const DERBY_SERVER_RESULTS_FROM = null;
 
-const ECONOMY_ACTIONS = ["bankDeposit", "bankWithdraw", "bankBorrow", "bankRepay", "stockTrade", "loginBonus", "bonus500", "placeBet", "ensureRaceResult", "settleMyBets", "startingCoins", "renameCarry"];
+const ECONOMY_ACTIONS = ["bankDeposit", "bankWithdraw", "bankBorrow", "bankRepay", "stockTrade", "loginBonus", "bonus500", "placeBet", "ensureRaceResult", "settleMyBets", "startingCoins", "renameCarry", "syncNameClaim"];
 const ECON_CARRY_FIELDS = ["coins", "bonus500Granted", "bonus500GrantedAt", "totalBetAmount", "bank", "stocks", "lastLoginBonusDate", "lastAnnouncementReadAt"];
 
 export function jstDateString(ms) {
@@ -1672,12 +1684,35 @@ export async function handleEconomyAction(deps, uid, body) {
       case "settleMyBets": return await econSettleMyBets(deps, uid, name, body?.raceId);
       case "startingCoins": return await econStartingCoins(deps, uid, name);
       case "renameCarry": return await econRenameCarry(deps, uid, body);
+      case "syncNameClaim": return await econSyncNameClaim(deps, uid, name);
       default: return econError(400, "unknown_action");
     }
   } catch (error) {
     console.error("economy error", action, String(error?.message || error).slice(0, 300));
     return econError(500, "internal_error");
   }
+}
+
+/* 名前クレームの同期：ログイン中のユーザーのユーザー名（本人が所有する users/{名前}）を
+   Firebase Authentication のカスタムクレーム name に入れる。Firestore Rules はこの name で
+   「チャット・グループの当事者」を判定する。ほかのカスタムクレームは消さずに残す。
+   すでに同じ名前なら何もしない（トークンの作り直しを無駄に促さない）。 */
+async function setNameClaim(deps, uid, name) {
+  const existing = await deps.authAdmin.lookup(uid);
+  let claims = {};
+  try { claims = existing?.customAttributes ? JSON.parse(existing.customAttributes) : {}; } catch { claims = {}; }
+  if (claims.name === name) return false;
+  claims.name = name;
+  await deps.authAdmin.update(uid, { customAttributes: JSON.stringify(claims) });
+  return true;
+}
+
+async function econSyncNameClaim(deps, uid, name) {
+  const me = await loadMyUser(deps.firestore, uid, name);
+  if (me.error) return me.error;
+  const changed = await setNameClaim(deps, uid, me.name);
+  // changed が true のとき、アプリ側はトークンを再取得（getIdToken(true)）してから購読を始める
+  return { ok: true, name: me.name, changed };
 }
 
 /* 初期コイン（1000）：コインがまだ無いときだけ付ける（アプリが users を作った直後に呼ぶ） */
@@ -1712,7 +1747,8 @@ async function econRenameCarry(deps, uid, body) {
   for (let attempt = 1; attempt <= ECON_RETRY; attempt++) {
     const [fromRaw, toRaw] = await Promise.all([fs.getRaw(`users/${from}`), fs.getRaw(`users/${to}`)]);
     if (!toRaw || toRaw.fields?.uid?.stringValue !== uid) return econError(409, "rename_to_not_mine");
-    if (!fromRaw) return { ok: true, carried: false };
+    // 名前が変わったので、トークンの名前クレームも新しい名前（to）に合わせる（チャットの本人確認用）
+    if (!fromRaw) { await setNameClaim(deps, uid, to); return { ok: true, carried: false }; }
     if (fromRaw.fields?.uid?.stringValue !== uid) return econError(409, "rename_from_not_mine");
     const carry = {};
     ECON_CARRY_FIELDS.forEach((f) => { if (f in fromRaw.fields) carry[f] = structuredClone(fromRaw.fields[f]); });
@@ -1721,13 +1757,46 @@ async function econRenameCarry(deps, uid, body) {
         { update: { name: fs.docName(`users/${to}`), fields: carry }, updateMask: { fieldPaths: ECON_CARRY_FIELDS }, currentDocument: { updateTime: toRaw.updateTime } },
         { delete: fs.docName(`users/${from}`), currentDocument: { updateTime: fromRaw.updateTime } }
       ]);
-      return { ok: true, carried: true };
+      await setNameClaim(deps, uid, to);
+      // 名前が入っているチャット・グループ・友達関係を新しい名前に書き換える（from は本人であることを上で確認済み）。
+      // ブラウザは他人のメッセージ等を書き換えられないので、この引き継ぎはサーバーが行う。失敗しても引き継ぎ自体は成功扱いにする
+      let refs = 0;
+      try { refs = await rewriteNameRefs(fs, from, to); } catch (error) { console.error("rename refs rewrite failed", String(error?.message || error).slice(0, 200)); }
+      return { ok: true, carried: true, refs };
     } catch (error) {
       if (!isRetryableCommitError(error)) throw error;
       await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 60 * attempt));
     }
   }
   return econError(409, "busy");
+}
+
+/* 名前（ユーザー名）が入っているデータを古い名前から新しい名前に一括で書き換える（サービスアカウント）。
+   対象：messages（sender・receiver）／groups（owner・members 配列）／friends（user1・user2・requestedBy・acceptedBy）。
+   呼び出し元で「from が本人（または管理者）」であることを必ず確かめてから使うこと。1回の書き込みは 400 件ずつ。 */
+async function rewriteNameRefs(fs, from, to) {
+  const byPath = new Map(); // path -> { fields, mask:Set }
+  const stage = (path, field, value) => {
+    const e = byPath.get(path) || { fields: {}, mask: new Set() };
+    e.fields[field] = value; e.mask.add(field); byPath.set(path, e);
+  };
+  for (const field of ["sender", "receiver"]) {
+    for (const d of await fs.query("messages", [[field, "EQUAL", from]], { select: [field] })) stage(`messages/${d.id}`, field, to);
+  }
+  for (const d of await fs.query("groups", [["owner", "EQUAL", from]], { select: ["owner"] })) stage(`groups/${d.id}`, "owner", to);
+  for (const d of await fs.query("groups", [["members", "ARRAY_CONTAINS", from]], { select: ["members"] })) {
+    const members = (Array.isArray(d.data?.members) ? d.data.members : []).map((m) => (m === from ? to : m));
+    stage(`groups/${d.id}`, "members", members);
+  }
+  for (const field of ["user1", "user2", "requestedBy", "acceptedBy"]) {
+    for (const d of await fs.query("friends", [[field, "EQUAL", from]], { select: [field] })) stage(`friends/${d.id}`, field, to);
+  }
+  const writes = [...byPath.entries()].map(([path, e]) => ({
+    update: { name: fs.docName(path), fields: encodeFields(e.fields) },
+    updateMask: { fieldPaths: [...e.mask] }
+  }));
+  for (let i = 0; i < writes.length; i += 400) await fs.commit(writes.slice(i, i + 400));
+  return writes.length;
 }
 
 async function econBankDeposit(deps, uid, name, amountIn) {

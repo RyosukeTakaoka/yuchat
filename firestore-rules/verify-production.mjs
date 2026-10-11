@@ -90,7 +90,9 @@ async function main() {
     closedRace: "2000-01-01-m0000",
     createRace: "2000-01-02-m0000",
     retiredEvent: `rules-verify-retired-${stamp}`,
-    scratch: `rulesVerify/${TEST_UID}-${stamp}`
+    scratch: `rulesVerify/${TEST_UID}-${stamp}`,
+    fcmOwn: `fcmverify-own-${stamp}`,
+    fcmEvil: `fcmverify-evil-${stamp}`
   };
   const cleanupRefs = [
     db.doc(`derbyManualRaces/${ids.closedRace}`),
@@ -98,7 +100,9 @@ async function main() {
     /* 拒否されるはずだが、万一書き込めてしまったときのために片付ける（存在しない ID なので過去のデータは消さない） */
     db.doc(`events/${ids.retiredEvent}`),
     db.doc(`eventParticipants/${ids.retiredEvent}_${TEST_UID}`),
-    db.doc(ids.scratch)
+    db.doc(ids.scratch),
+    db.doc(`fcmTokens/${ids.fcmOwn}`),
+    db.doc(`fcmTokens/${ids.fcmEvil}`)
   ];
 
   const results = [];
@@ -159,7 +163,15 @@ async function main() {
     await checkDeniedAfterPropagation("イベント参加記録の読み取り（廃止）", () => get(`eventParticipants/${ids.retiredEvent}_${TEST_UID}`));
     await checkDeniedAfterPropagation("イベント参加記録の作成（廃止）", () => create("eventParticipants", `${ids.retiredEvent}_${TEST_UID}`, { eventId: ids.retiredEvent, uid: TEST_UID, username: "自動テスト", joinedAt: new Date() }), () => retiredEntryRef.delete());
 
-    /* ③ 読み取りと、管理用以外のデータ（今まで通りのルール） */
+    /* ③ 第2・第3段階：チャット・通知・ゲーム・ユーザー作成の不正操作（名前クレームに依存しない項目だけ本番で確認する） */
+    await check("通知トークンを他人の UID で登録", "DENY", create("fcmTokens", ids.fcmEvil, { uid: "someoneElse", username: "x" }));
+    await check("通知トークンを自分の UID で登録（今まで通り可）", "ALLOW", create("fcmTokens", ids.fcmOwn, { uid: TEST_UID, username: "自動テスト" }));
+    await check("通知トークンの読み取り（アプリからは不可）", "DENY", get(`fcmTokens/${ids.fcmOwn}`));
+    await check("メッセージを他人の senderUid で送る", "DENY", create("messages", `msgverify-${stamp}`, { sender: "x", senderUid: "someoneElse", receiver: "y", type: "friend", text: "x" }));
+    await check("ゲームルームを他人の ownerUid で作る", "DENY", create("gameRooms", `roomverify-${stamp}`, { gameType: "othello", ownerUid: "someoneElse", members: ["x"], memberUids: ["someoneElse"], status: "waiting" }));
+    await check("ユーザー作成で name とドキュメントIDが食い違う（なりすまし）", "DENY", create("users", `uverify-mismatch-${stamp}`, { uid: TEST_UID, name: "別の名前" }));
+
+    /* ④ 読み取りと、管理用以外のデータ（今まで通りのルール） */
     await check("手動レースの読み取り", "ALLOW", get(`derbyManualRaces/${ids.closedRace}`));
     await check("管理用以外のデータへの書き込み（今まで通り可）", "ALLOW", create("rulesVerify", ids.scratch.split("/")[1], { uid: TEST_UID, at: new Date() }));
     await check("管理用以外のデータの削除（今まで通り可）", "ALLOW", remove(ids.scratch));

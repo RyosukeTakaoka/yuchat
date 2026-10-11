@@ -41,10 +41,11 @@ function fakeFirestore(initial, clock) {
   const tick = () => new Promise((r) => setTimeout(r, Math.random() * 2));
   const fs = {
     docs, commits: 0, put,
-    async query(collection, filters) {
+    async query(collection, filters, _opts) {
       await tick();
+      const match = (fieldVal, op, v) => op === "ARRAY_CONTAINS" ? (Array.isArray(fieldVal) && fieldVal.includes(v)) : fieldVal === v;
       return [...docs.entries()].filter(([p]) => p.startsWith(`${collection}/`) && p.split("/").length === 2)
-        .filter(([, d]) => filters.every(([f, , v]) => decF(d.fields)[f] === v))
+        .filter(([, d]) => filters.every(([f, op, v]) => match(decF(d.fields)[f], op, v)))
         .map(([p, d]) => ({ id: p.split("/")[1], path: p, updateTime: d.updateTime, data: decF(d.fields) }));
     },
     async get(path) { await tick(); const d = docs.get(path); return d ? decF(d.fields) : null; },
@@ -86,8 +87,14 @@ function setup({ coins = 1000, bank = { deposit: 0, interestBase: 0, loan: 0 }, 
     "market/current": { date: "2026-10-19", companies: { YGM: { price: 200 }, YEN: { price: 300 } } },
     ...docs
   }, () => clock);
-  const deps = { firestore, now: () => clock, random: (() => { let i = 0; return () => ((i++ * 0.6180339) % 1); })() };
-  return { firestore, deps, setNow: (ms) => { clock = ms; } };
+  const claims = new Map(); // uid -> customAttributes（JSON 文字列）。名前クレームの同期を確かめるための偽 Auth
+  const authAdmin = {
+    async lookup(uid) { return claims.has(uid) ? { localId: uid, customAttributes: claims.get(uid) } : { localId: uid }; },
+    async update(uid, fields) { if ("customAttributes" in fields) claims.set(uid, fields.customAttributes); }
+  };
+  const deps = { firestore, authAdmin, now: () => clock, random: (() => { let i = 0; return () => ((i++ * 0.6180339) % 1); })() };
+  const claimName = (uid) => { try { return JSON.parse(claims.get(uid) || "{}").name; } catch { return undefined; } };
+  return { firestore, deps, authAdmin, claims, claimName, setNow: (ms) => { clock = ms; } };
 }
 const me = (fs) => decF(fs.docs.get("users/たろう").fields);
 const call = (deps, body, uid = "uT") => handleEconomyAction(deps, uid, { username: "たろう", ...body });
@@ -382,13 +389,27 @@ test("初期コイン：コインがまだ無いときだけ 1000 を付ける�
 });
 
 test("名前変更の引き継ぎ：from・to がどちらも自分なら、経済項目をコピーして from を消す。どちらかが他人なら拒否", async () => {
-  const { firestore, deps } = setup({ coins: 1234, bank: { deposit: 500, interestBase: 500, loan: 0 }, stocks: { YEN: { qty: 2, cost: 600 } }, extra: { totalBetAmount: 42, bonus500Granted: true, lastLoginBonusDate: "2026-10-20" } });
+  const { firestore, deps, claimName } = setup({ coins: 1234, bank: { deposit: 500, interestBase: 500, loan: 0 }, stocks: { YEN: { qty: 2, cost: 600 } }, extra: { totalBetAmount: 42, bonus500Granted: true, lastLoginBonusDate: "2026-10-20" } });
   firestore.put("users/たろう2", encF({ uid: "uT", name: "たろう2", profileImage: "x" }));
+  /* 古い名前が入ったチャット・グループ・友達関係（引き継ぎで新しい名前に書き換わるはず） */
+  firestore.put("messages/m1", encF({ sender: "たろう", receiver: "はなこ", text: "a" }));
+  firestore.put("messages/m2", encF({ sender: "はなこ", receiver: "たろう", text: "b" }));
+  firestore.put("messages/m3", encF({ sender: "ほかの人", receiver: "はなこ", text: "c" }));
+  firestore.put("groups/g1", encF({ owner: "たろう", members: ["たろう", "はなこ"] }));
+  firestore.put("friends/f1", encF({ user1: "たろう", user2: "はなこ", user1Uid: "uT", user2Uid: "uH" }));
   const r = await handleEconomyAction(deps, "uT", { action: "renameCarry", from: "たろう", to: "たろう2" });
   assert.equal(r.carried, true);
   const to = decF(firestore.docs.get("users/たろう2").fields);
   assert.deepEqual([to.coins, to.bank.deposit, to.stocks.YEN.qty, to.totalBetAmount, to.bonus500Granted, to.lastLoginBonusDate, to.profileImage], [1234, 500, 2, 42, true, "2026-10-20", "x"]);
   assert.equal(firestore.docs.has("users/たろう"), false, "古い名前は消える");
+  assert.equal(claimName("uT"), "たろう2", "名前クレームも新しい名前に更新される");
+  /* チャット・グループ・友達関係の名前も書き換わる（本人のものだけ） */
+  assert.equal(decF(firestore.docs.get("messages/m1").fields).sender, "たろう2");
+  assert.equal(decF(firestore.docs.get("messages/m2").fields).receiver, "たろう2");
+  assert.equal(decF(firestore.docs.get("messages/m3").fields).sender, "ほかの人", "他人のメッセージは変えない");
+  assert.deepEqual(decF(firestore.docs.get("groups/g1").fields).members, ["たろう2", "はなこ"]);
+  assert.equal(decF(firestore.docs.get("groups/g1").fields).owner, "たろう2");
+  assert.equal(decF(firestore.docs.get("friends/f1").fields).user1, "たろう2");
   /* to が他人 */
   firestore.put("users/たろう", encF({ uid: "uT", name: "たろう", coins: 5 }));
   firestore.put("users/はなこ2", encF({ uid: "uH", name: "はなこ2" }));
@@ -401,6 +422,31 @@ test("名前変更の引き継ぎ：from・to がどちらも自分なら、経�
   assert.deepEqual(await handleEconomyAction(deps, "uT", { action: "renameCarry", from: "いない", to: "たろう3" }), { ok: true, carried: false });
   /* 不正な名前 */
   assert.equal((await handleEconomyAction(deps, "uT", { action: "renameCarry", from: "a/b", to: "たろう3" })).error, "invalid_rename");
+});
+
+test("名前クレームの同期（syncNameClaim）：本人の users/{名前} を確かめてトークンの name に入れる。他人の名前は拒否", async () => {
+  const { deps, claimName } = setup();
+  /* はじめはクレーム無し → 本人のユーザー名を入れる（changed=true） */
+  const r1 = await handleEconomyAction(deps, "uT", { action: "syncNameClaim", username: "たろう" });
+  assert.deepEqual(r1, { ok: true, name: "たろう", changed: true });
+  assert.equal(claimName("uT"), "たろう");
+  /* すでに同じ名前なら何もしない（changed=false。トークン再取得を無駄に促さない） */
+  const r2 = await handleEconomyAction(deps, "uT", { action: "syncNameClaim", username: "たろう" });
+  assert.deepEqual(r2, { ok: true, name: "たろう", changed: false });
+  /* 他人の名前（uid が一致しない users）を指定しても、本人の実際の名前に直す */
+  const r3 = await handleEconomyAction(deps, "uT", { action: "syncNameClaim", username: "はなこ" });
+  assert.equal(r3.name, "たろう");
+  assert.equal(claimName("uT"), "たろう");
+  /* users が無い uid は NO_USER */
+  assert.equal((await handleEconomyAction(deps, "nobody", { action: "syncNameClaim", username: "だれか" })).error, "NO_USER");
+});
+
+test("名前クレームの同期：既存の他のカスタムクレームは消さない", async () => {
+  const { deps, claims, claimName } = setup();
+  claims.set("uT", JSON.stringify({ someOther: 1 }));
+  await handleEconomyAction(deps, "uT", { action: "syncNameClaim", username: "たろう" });
+  assert.equal(claimName("uT"), "たろう");
+  assert.equal(JSON.parse(claims.get("uT")).someOther, 1, "ほかのクレームは残る");
 });
 
 test("HTTP：/economy はログインが必要（ID トークンなしは 401）。不明な操作は 400", async () => {
