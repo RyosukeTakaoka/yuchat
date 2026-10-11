@@ -105,6 +105,9 @@ const DOCS = "/databases/(default)/documents";
 const admin = { uid: ADMIN_UID, token: {} };
 const userA = { uid: "rulesTestUserA", token: {} };
 const fakeAdmin = { uid: "rulesTestFakeAdmin", token: { email: "admin@example.com", name: "admin" } };
+// 第2・第3段階：チャット・ゲームは名前クレーム（通知サーバーがログイン時にトークンへ入れる）で本人確認する
+const userAlice = { uid: "rulesTestUserA", token: { name: "alice" } }; // userA と同じ UID＋名前クレーム alice
+const userCarol = { uid: "rulesTestUserC", token: { name: "carol" } };
 
 const manualRace = { raceId: "2030-01-01-m1200", dayId: "2030-01-01", status: "scheduled", betCount: 0, createdByUid: ADMIN_UID };
 const announcementDoc = { title: "お知らせ", body: "本文", createdByUid: ADMIN_UID, createdByName: "admin" };
@@ -169,12 +172,35 @@ const TEST_CASES = [
   testCase("ALLOW", "users：自分の名前で新規登録（経済項目なし）", userA, "create", "users/alice2", { data: { uid: userA.uid, name: "alice2" } }),
   testCase("DENY", "users：新規登録で経済項目（コイン）を入れる", userA, "create", "users/alice3", { data: { uid: userA.uid, name: "alice3", coins: 1000000 } }),
   testCase("ALLOW", "friends：友達追加", userA, "create", "friends/alice_bob", { data: { user1: "alice", user2: "bob" } }),
-  testCase("ALLOW", "groups：グループ作成", userA, "create", "groups/g1", { data: { name: "g", members: ["alice"] } }),
-  testCase("ALLOW", "messages：メッセージ送信", userA, "create", "messages/m1", { data: { sender: "alice", text: "hi" } }),
-  testCase("ALLOW", "messages：既読", userA, "update", "messages/m1", { data: { sender: "bob", readBy: ["alice"] }, existing: { sender: "bob", readBy: [] } }),
-  testCase("ALLOW", "gameRooms：部屋作成", userA, "create", "gameRooms/r1", { data: { host: "alice" } }),
-  testCase("ALLOW", "gameInvites：招待", userA, "create", "gameInvites/i1", { data: { from: "alice", to: "bob" } }),
-  testCase("ALLOW", "fcmTokens：通知トークン保存", userA, "create", "fcmTokens/t1", { data: { uid: userA.uid } }),
+  // ===== 第2段階：チャット・通知（名前クレームで本人確認） =====
+  testCase("ALLOW", "groups：メンバーが自分のグループを読む", userAlice, "get", "groups/g1", { existing: { name: "g", owner: "alice", ownerUid: userAlice.uid, members: ["alice", "bob"] } }),
+  testCase("DENY", "groups：非メンバーが他人のグループを覗く", userCarol, "get", "groups/g1", { existing: { name: "g", owner: "alice", ownerUid: userAlice.uid, members: ["alice", "bob"] } }),
+  testCase("ALLOW", "groups：作成者が自分でグループを作る", userAlice, "create", "groups/g2", { data: { name: "g", owner: "alice", ownerUid: userAlice.uid, members: ["alice"] } }),
+  testCase("DENY", "groups：自分を入れずにグループを作る", userAlice, "create", "groups/g3", { data: { name: "g", owner: "alice", ownerUid: userAlice.uid, members: ["bob"] } }),
+  testCase("DENY", "groups：非メンバーがグループを書き換える", userCarol, "update", "groups/g1", { data: { name: "x", owner: "alice", ownerUid: userAlice.uid, members: ["alice", "bob"] }, existing: { name: "g", owner: "alice", ownerUid: userAlice.uid, members: ["alice", "bob"] } }),
+  testCase("ALLOW", "messages：自分の1対1メッセージを送る", userAlice, "create", "messages/m1", { data: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("DENY", "messages：他人になりすまして送る（sender 偽装）", userAlice, "create", "messages/m2", { data: { sender: "bob", senderUid: userAlice.uid, receiver: "carol", type: "friend", text: "x" } }),
+  testCase("DENY", "messages：senderUid を他人にして送る", userAlice, "create", "messages/m3", { data: { sender: "alice", senderUid: "someoneElse", receiver: "bob", type: "friend", text: "x" } }),
+  testCase("ALLOW", "messages：当事者が自分あての1対1を読む", userAlice, "get", "messages/m1", { existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("DENY", "messages：第三者が他人の1対1を覗く", userCarol, "get", "messages/m1", { existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("DENY", "messages：名前クレーム無しが他人の1対1を覗く", userA, "get", "messages/m1", { existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("ALLOW", "messages：送信者が自分のメッセージを送信取り消し", userAlice, "update", "messages/m1", { data: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi", deleted: true }, existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("DENY", "messages：自分のメッセージでも本文は編集できない", userAlice, "update", "messages/m1", { data: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "編集" }, existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("DENY", "messages：第三者がリアクションを付ける", userCarol, "update", "messages/m1", { data: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi", reactions: { x: ["carol"] } }, existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("ALLOW", "fcmTokens：自分の UID でトークン保存", userAlice, "create", "fcmTokens/t1", { data: { uid: userAlice.uid, username: "alice" } }),
+  testCase("DENY", "fcmTokens：他人の UID でトークン保存", userAlice, "create", "fcmTokens/t2", { data: { uid: "someoneElse", username: "bob" } }),
+  testCase("DENY", "fcmTokens：トークンの読み取り（アプリからは不可）", userAlice, "get", "fcmTokens/t1", { existing: { uid: userAlice.uid } }),
+  // ===== 第3段階：ゲーム・ユーザー作成 =====
+  testCase("ALLOW", "gameRooms：作成者が自分で部屋を作る", userAlice, "create", "gameRooms/r1", { data: { gameType: "othello", owner: "alice", ownerUid: userAlice.uid, members: ["alice"], memberUids: [userAlice.uid], status: "waiting" } }),
+  testCase("DENY", "gameRooms：ownerUid を他人にして部屋を作る", userAlice, "create", "gameRooms/r2", { data: { gameType: "othello", ownerUid: "someoneElse", members: ["x"], memberUids: ["someoneElse"], status: "waiting" } }),
+  testCase("ALLOW", "gameRooms：ロビーの読み取り（ログイン済み）", userAlice, "get", "gameRooms/r1", { existing: { gameType: "othello", ownerUid: userAlice.uid, members: ["alice"], memberUids: [userAlice.uid] } }),
+  testCase("DENY", "gameRooms：非参加者が盤面を書き換える", userCarol, "update", "gameRooms/r1", { data: { gameType: "othello", ownerUid: userAlice.uid, members: ["alice"], memberUids: [userAlice.uid], gameState: { x: 1 } }, existing: { gameType: "othello", ownerUid: userAlice.uid, members: ["alice"], memberUids: [userAlice.uid] } }),
+  testCase("ALLOW", "gameInvites：送り主が自分で招待を作る", userAlice, "create", "gameInvites/r1_b", { data: { roomId: "r1", fromUid: userAlice.uid, from: "alice", toUid: "uidBob", to: "bob", status: "pending" } }),
+  testCase("DENY", "gameInvites：送り主を偽装して招待を作る", userAlice, "create", "gameInvites/r1_c", { data: { roomId: "r1", fromUid: "someoneElse", toUid: "uidCarol", status: "pending" } }),
+  testCase("DENY", "gameInvites：当事者でない人が招待を覗く", userCarol, "get", "gameInvites/r1_b", { existing: { roomId: "r1", fromUid: userAlice.uid, toUid: "uidBob", status: "pending" } }),
+  testCase("DENY", "users：name とドキュメントIDが食い違う作成（なりすまし）", userAlice, "create", "users/mismatch", { data: { uid: userAlice.uid, name: "別の名前" } }),
+  testCase("DENY", "users：他人の既存ユーザー名を乗っ取る（上書き）", userCarol, "update", "users/alice", { data: { uid: userCarol.uid, name: "alice" }, existing: { uid: userAlice.uid, name: "alice" } }),
+  testCase("ALLOW", "fcmTokens：通知トークン保存（名前クレーム無しでも自分の UID なら可）", userA, "create", "fcmTokens/t3", { data: { uid: userA.uid } }),
   testCase("DENY", "races：ブラウザからレース結果を作る（結果の改ざん防止）", userA, "create", "races/2030-01-02", { data: { raceId: "2030-01-02", status: "finished", generatedBy: "github-actions" } }),
   testCase("DENY", "races：終わったレースの結果を書き換える", userA, "update", "races/2030-01-02", { data: { raceId: "2030-01-02", resultOrder: [9,1,2,3,4,5,6,7,8,10] }, existing: { raceId: "2030-01-02", resultOrder: [1,2,3,4,5,6,7,8,9,10] } }),
   testCase("DENY", "raceBets：ブラウザから投票（馬券作成）", userA, "create", "raceBets/b1", { data: { raceId: "2030-01-02", uid: userA.uid, amount: 100 } }),
