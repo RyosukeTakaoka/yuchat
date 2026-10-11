@@ -19,6 +19,7 @@
 ========================================================= */
 
 import fs from "fs";
+import { pathToFileURL } from "node:url";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
@@ -40,16 +41,18 @@ function readWebApiKey() {
 }
 
 /* ----- Firestore REST の値の形 ----- */
-function encode(value) {
-  if (value === null) return { nullValue: null };
+export function encode(value) {
+  if (value === null || value === undefined) return { nullValue: null };
   if (value instanceof Date) return { timestampValue: value.toISOString() };
   if (typeof value === "string") return { stringValue: value };
   if (typeof value === "boolean") return { booleanValue: value };
   if (Number.isInteger(value)) return { integerValue: String(value) };
   if (typeof value === "number") return { doubleValue: value };
+  if (Array.isArray(value)) return { arrayValue: { values: value.map(encode) } };
+  if (typeof value === "object") return { mapValue: { fields: fields(value) } };
   throw new Error(`未対応の値: ${value}`);
 }
-const fields = (obj) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, encode(v)]));
+export const fields = (obj) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, encode(v)]));
 
 /* ----- 公開直後のルールの反映待ち -----
    ルールを公開してから本番全体に行き渡るまで、最大1分ほどかかる。そのあいだは古いルールで判定されて
@@ -92,7 +95,10 @@ async function main() {
     retiredEvent: `rules-verify-retired-${stamp}`,
     scratch: `rulesVerify/${TEST_UID}-${stamp}`,
     fcmOwn: `fcmverify-own-${stamp}`,
-    fcmEvil: `fcmverify-evil-${stamp}`
+    fcmEvil: `fcmverify-evil-${stamp}`,
+    msgEvil: `msgverify-${stamp}`,
+    roomEvil: `roomverify-${stamp}`,
+    userMismatch: `uverify-mismatch-${stamp}`
   };
   const cleanupRefs = [
     db.doc(`derbyManualRaces/${ids.closedRace}`),
@@ -102,7 +108,11 @@ async function main() {
     db.doc(`eventParticipants/${ids.retiredEvent}_${TEST_UID}`),
     db.doc(ids.scratch),
     db.doc(`fcmTokens/${ids.fcmOwn}`),
-    db.doc(`fcmTokens/${ids.fcmEvil}`)
+    db.doc(`fcmTokens/${ids.fcmEvil}`),
+    /* 下は拒否されるはずの書き込み。万一通っても後片付けできるように専用 ID で消す */
+    db.doc(`messages/${ids.msgEvil}`),
+    db.doc(`gameRooms/${ids.roomEvil}`),
+    db.doc(`users/${ids.userMismatch}`)
   ];
 
   const results = [];
@@ -167,9 +177,9 @@ async function main() {
     await check("通知トークンを他人の UID で登録", "DENY", create("fcmTokens", ids.fcmEvil, { uid: "someoneElse", username: "x" }));
     await check("通知トークンを自分の UID で登録（今まで通り可）", "ALLOW", create("fcmTokens", ids.fcmOwn, { uid: TEST_UID, username: "自動テスト" }));
     await check("通知トークンの読み取り（アプリからは不可）", "DENY", get(`fcmTokens/${ids.fcmOwn}`));
-    await check("メッセージを他人の senderUid で送る", "DENY", create("messages", `msgverify-${stamp}`, { sender: "x", senderUid: "someoneElse", receiver: "y", type: "friend", text: "x" }));
-    await check("ゲームルームを他人の ownerUid で作る", "DENY", create("gameRooms", `roomverify-${stamp}`, { gameType: "othello", ownerUid: "someoneElse", members: ["x"], memberUids: ["someoneElse"], status: "waiting" }));
-    await check("ユーザー作成で name とドキュメントIDが食い違う（なりすまし）", "DENY", create("users", `uverify-mismatch-${stamp}`, { uid: TEST_UID, name: "別の名前" }));
+    await check("メッセージを他人の senderUid で送る", "DENY", create("messages", ids.msgEvil, { sender: "x", senderUid: "someoneElse", receiver: "y", type: "friend", text: "x" }));
+    await check("ゲームルームを他人の ownerUid で作る", "DENY", create("gameRooms", ids.roomEvil, { gameType: "othello", ownerUid: "someoneElse", members: ["x"], memberUids: ["someoneElse"], status: "waiting" }));
+    await check("ユーザー作成で name とドキュメントIDが食い違う（なりすまし）", "DENY", create("users", ids.userMismatch, { uid: TEST_UID, name: "別の名前" }));
 
     /* ④ 読み取りと、管理用以外のデータ（今まで通りのルール） */
     await check("手動レースの読み取り", "ALLOW", get(`derbyManualRaces/${ids.closedRace}`));
@@ -196,13 +206,17 @@ async function main() {
   return passed === results.length;
 }
 
-try {
-  const ok = await main();
-  writeSummary();
-  process.exit(ok ? 0 : 1);
-} catch (error) {
-  out(`- **エラー**：${error.message}`);
-  writeSummary();
-  console.error(error);
-  process.exit(1);
+/* 直接実行されたときだけ本番確認を走らせる（テストから import しても main() は動かない） */
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  try {
+    const ok = await main();
+    writeSummary();
+    process.exit(ok ? 0 : 1);
+  } catch (error) {
+    out(`- **エラー**：${error.message}`);
+    writeSummary();
+    console.error(error);
+    process.exit(1);
+  }
 }
