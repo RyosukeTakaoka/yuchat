@@ -2,7 +2,7 @@
    台別に多数のスピンを回し、確率合計・実測還元率（RTP）・各種カウントを報告する。
    実行：node notify-worker/yuslot-sim.mjs [1スピンあたり試行回数] [FEVER中のスピン数の想定]
    FEVER は時間（20秒）で終わるため、クライアントのスピン速度に依存する。ここでは想定スピン数で近似する。 */
-import { SLOT_MACHINES, SLOT_RULES, slotDrawOutcome } from "./worker.js";
+import { SLOT_MACHINES, SLOT_RULES, slotDrawOutcome, slotRates } from "./worker.js";
 
 const PAID = Number(process.argv[2] || 500000);     // 台ごとの有料スピン数
 const FEVER_SPINS = Number(process.argv[3] || 15);  // FEVER中に回ると想定するスピン数
@@ -14,8 +14,8 @@ function makeRng(seed) {
 }
 
 function checkProbabilitySum(machineId) {
-  const m = SLOT_MACHINES[machineId], R = SLOT_RULES;
-  const sum = R.cherry + R.bell + R.watermelon + R.replay + R.star + R.treasure + m.specialRate;
+  const r = slotRates(machineId);
+  const sum = r.cherry + r.bell + r.watermelon + r.replay + r.star + r.treasure + r.special;
   const lose = 1 - sum;
   return { sum, lose };
 }
