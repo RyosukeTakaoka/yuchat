@@ -1,0 +1,56 @@
+# 🎰 ゆうスロ オープン（2026-10-16 11:05 JST 予定）
+#
+# ・予定時刻に自動で：ゆうスロを公開／お知らせ（お詫び＋オープン＋1000コインプレゼント）を投稿／
+#   その時点の全ユーザーに ゆうコイン +1000／お知らせのプッシュ通知を送る。
+# ・cron は UTC。11:05 JST = 02:05 UTC。GitHub の都合で数分前後することがある。
+# ・冪等：何度実行しても、コイン配布は全体で1回だけ・お知らせは1件だけ・公開は安全に入れ直すだけ
+#   （.github/notify-worker/yuslot-open.mjs のマーカーとユーザーごとのフラグで保証）。
+#   そのため、必要なら手動実行（Run workflow）で確実に開店させることもできる。
+# ・鍵：FIREBASE_SERVICE_ACCOUNT（ゆうダービー・Firestore ルール・お知らせ自動作成と同じもの）。未登録なら何もしない。
+# ・テストは .github/notify-worker/** を変更する PR で通知サーバーの CI が実行する（ここでは回さない）。
+
+name: 🎰 ゆうスロ オープン
+
+on:
+  schedule:
+    - cron: "5 2 16 10 *" # 2026-10-16 02:05 UTC = 11:05 JST
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yuslot-open
+  cancel-in-progress: false
+
+jobs:
+  open:
+    name: ゆうスロ オープン
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 鍵が登録されているか確認
+        id: secret
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "::warning::FIREBASE_SERVICE_ACCOUNT が使えないため、ゆうスロのオープンをスキップしました"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.secret.outputs.ready == 'true'
+        with:
+          node-version: 22
+
+      - name: 開店（公開・お知らせ・1000コイン配布・プッシュ通知）
+        if: steps.secret.outputs.ready == 'true'
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node .github/notify-worker/yuslot-open.mjs
