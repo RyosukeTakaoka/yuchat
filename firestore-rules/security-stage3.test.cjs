@@ -17,6 +17,7 @@ async function ng(n, p) { try { await assertFails(p); pass++; logs.push("PASS �
   const bob = env.authenticatedContext("uidB", { name: "bob" }).firestore();
   const carol = env.authenticatedContext("uidC", { name: "carol" }).firestore();
   const noname = env.authenticatedContext("uidX").firestore(); // 名前クレームが無い（匿名ゲスト相当・同期前）
+  const admin = env.authenticatedContext("g51wzTvJFsZiYEfre5aDuDckJXY2", { name: "admin" }).firestore(); // 最上位のゆうChat管理者
   const anon = env.unauthenticatedContext().firestore();
 
   await env.withSecurityRulesDisabled(async (ctx) => {
@@ -37,6 +38,9 @@ async function ng(n, p) { try { await assertFails(p); pass++; logs.push("PASS �
     // 招待
     await setDoc(doc(d, "gameInvites/room1_uidC"), { roomId: "room1", gameType: "othello", from: "alice", fromUid: "uidA", to: "carol", toUid: "uidC", status: "pending" });
     await setDoc(doc(d, "gameInvites/roomInvite_uidC"), { roomId: "roomInvite", gameType: "othello", from: "alice", fromUid: "uidA", to: "carol", toUid: "uidC", status: "pending" });
+    // 🎰 ゆうワールド：公開設定（worldConfig/yuslot）と着席（yuslotSeats/{台ID}）。どちらも Worker（サービスアカウント）だけが書く
+    await setDoc(doc(d, "worldConfig/yuslot"), { yuslotPublished: false });
+    await setDoc(doc(d, "yuslotSeats/yubasic"), { uid: "uidA", name: "alice", nonce: "n1", delta: 0, flushedTotal: 0 });
   });
 
   logs.push("--- ① ゲームルーム：読み取りはロビー公開、作成は作成者が自分");
@@ -93,6 +97,21 @@ async function ng(n, p) { try { await assertFails(p); pass++; logs.push("PASS �
   await ok("名前クレームありのユーザーが、自分の名前のドキュメントを更新できる", updateDoc(doc(alice, "users/alice"), { online: true, updatedAt: serverTimestamp() }));
   await ng("名前クレームありのユーザーが、別の名前のドキュメントを更新できない（なりすまし）", updateDoc(doc(alice, "users/bob"), { online: true }));
   await ok("名前クレームがまだ無いユーザーは、自分の UID のドキュメントを更新できる（同期前）", updateDoc(doc(noname, "users/xname"), { online: true, updatedAt: serverTimestamp() }));
+
+  logs.push("--- ⑦ ゆうワールド：公開設定（worldConfig）と着席（yuslotSeats）はサーバー（Worker）だけ");
+  // worldConfig：公開/非公開はブラウザからは書けない（最上位管理者でも、Worker 経由でしか変えられない）。読み取りはログイン済みなら可
+  await ok("ログイン済みユーザーが公開設定（worldConfig/yuslot）を読む", getDoc(doc(alice, "worldConfig/yuslot")));
+  await ng("一般ユーザーが公開設定を勝手に公開に書き換える", setDoc(doc(alice, "worldConfig/yuslot"), { yuslotPublished: true }));
+  await ng("一般ユーザーが公開設定を更新する", updateDoc(doc(alice, "worldConfig/yuslot"), { yuslotPublished: true }));
+  await ng("最上位管理者でもブラウザから直接は公開設定を書き換えられない（Worker 経由だけ）", setDoc(doc(admin, "worldConfig/yuslot"), { yuslotPublished: true }));
+  await ng("未ログインが公開設定を書き換える", setDoc(doc(anon, "worldConfig/yuslot"), { yuslotPublished: true }));
+  // yuslotSeats：着席の予約・解放・更新は Worker だけ。ブラウザからは読み取りも書き込みもできない
+  await ng("一般ユーザーが着席状況（yuslotSeats）を直接読む", getDoc(doc(alice, "yuslotSeats/yubasic")));
+  await ng("最上位管理者でも着席状況を直接読めない（Worker 経由だけ）", getDoc(doc(admin, "yuslotSeats/yubasic")));
+  await ng("一般ユーザーが勝手に着席する（yuslotSeats を作る）", setDoc(doc(bob, "yuslotSeats/yurush"), { uid: "uidB", name: "bob", nonce: "x", delta: 0, flushedTotal: 0 }));
+  await ng("一般ユーザーが他人の着席を書き換えて不正にコインを増やす", updateDoc(doc(bob, "yuslotSeats/yubasic"), { delta: 1000000 }));
+  await ng("一般ユーザーが他人の着席を解放（削除）する", deleteDoc(doc(bob, "yuslotSeats/yubasic")));
+  await ng("最上位管理者でもブラウザから直接は着席を書き換えられない", updateDoc(doc(admin, "yuslotSeats/yubasic"), { delta: 1000000 }));
 
   await env.cleanup();
   console.log(logs.join("\n"));

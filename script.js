@@ -31,6 +31,11 @@ import {
   FIXED_PAYOUT_RULE
 } from "./derby-odds.js?v=20261013-fixed-odds";
 
+/* 🎡 ゆうワールド（ゆうスロなどのお店）。残高・抽選・公開・営業時間の判定はすべて Worker 任せ（Firebase には触らない） */
+import {
+  initYuWorld, openYuWorldView, stopYuWorldView
+} from "./yuworld.js?v=20261015-yuworld";
+
 import {
   getFirestore, collection, addDoc, getDocs, getDoc, doc, setDoc,
   updateDoc, deleteDoc, query, where, onSnapshot, orderBy, limit, arrayUnion, arrayRemove, deleteField,
@@ -219,6 +224,7 @@ const announcementsView = document.getElementById("announcementsView");
 const userManageView = document.getElementById("userManageView");
 const economyView = document.getElementById("economyView");
 const economyContent = document.getElementById("economyContent");
+const yuworldView = document.getElementById("yuworldView");
 
 const derbyCountdown = document.getElementById("derbyCountdown");
 const raceTrack = document.getElementById("raceTrack");
@@ -3614,7 +3620,7 @@ tabButtons.forEach((button) => {
 function switchView(view) {
   /* 👤 ユーザー管理は管理者だけ（タブも管理者にだけ表示） */
   if (view === "usermanage" && !isAdminUser()) view = "chat";
-  const views = { chat: chatView, derby: derbyView, economy: economyView, games: gamesView, announcements: announcementsView, mypage: mypageView, usermanage: userManageView };
+  const views = { chat: chatView, derby: derbyView, economy: economyView, games: gamesView, yuworld: yuworldView, announcements: announcementsView, mypage: mypageView, usermanage: userManageView };
 
   Object.entries(views).forEach(([name, element]) => {
     if (!element) return;
@@ -3634,10 +3640,21 @@ function switchView(view) {
   if (view === "games") loadGameRooms();
   else stopGameRoomsSubscription();
   if (view === "economy") openEconomyView();
+  if (view === "yuworld") openYuWorldView();
+  else stopYuWorldView();
   if (view === "announcements") openAnnouncementsView();
   else stopAnnouncementsSubscription();
   if (view === "usermanage") openUserManageView();
 }
+
+/* 🎡 ゆうワールド（ゆうスロ）を初期化する。トークン・ユーザー名・最上位管理者かどうかは呼ばれた時点の状態を使う */
+initYuWorld({
+  endpoint: NOTIFY_ENDPOINT.replace(/\/notify$/, "/yuslot"),
+  getToken: () => currentUser.getIdToken(),
+  getUsername: () => username,
+  isTopAdmin: () => isAdminUser(),
+  onSettled: () => { /* 精算後は既存の coins リスナーが users の残高を拾って各画面を更新する */ }
+});
 
 /* =========================================================
    ログアウト

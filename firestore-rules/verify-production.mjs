@@ -98,7 +98,9 @@ async function main() {
     fcmEvil: `fcmverify-evil-${stamp}`,
     msgEvil: `msgverify-${stamp}`,
     roomEvil: `roomverify-${stamp}`,
-    userMismatch: `uverify-mismatch-${stamp}`
+    userMismatch: `uverify-mismatch-${stamp}`,
+    worldCfgEvil: `worldcfgverify-${stamp}`,
+    seatEvil: `seatverify-${stamp}`
   };
   const cleanupRefs = [
     db.doc(`derbyManualRaces/${ids.closedRace}`),
@@ -112,7 +114,9 @@ async function main() {
     /* 下は拒否されるはずの書き込み。万一通っても後片付けできるように専用 ID で消す */
     db.doc(`messages/${ids.msgEvil}`),
     db.doc(`gameRooms/${ids.roomEvil}`),
-    db.doc(`users/${ids.userMismatch}`)
+    db.doc(`users/${ids.userMismatch}`),
+    db.doc(`worldConfig/${ids.worldCfgEvil}`),
+    db.doc(`yuslotSeats/${ids.seatEvil}`)
   ];
 
   const results = [];
@@ -180,6 +184,11 @@ async function main() {
     await check("メッセージを他人の senderUid で送る", "DENY", create("messages", ids.msgEvil, { sender: "x", senderUid: "someoneElse", receiver: "y", type: "friend", text: "x" }));
     await check("ゲームルームを他人の ownerUid で作る", "DENY", create("gameRooms", ids.roomEvil, { gameType: "othello", ownerUid: "someoneElse", members: ["x"], memberUids: ["someoneElse"], status: "waiting" }));
     await check("ユーザー作成で name とドキュメントIDが食い違う（なりすまし）", "DENY", create("users", ids.userMismatch, { uid: TEST_UID, name: "別の名前" }));
+
+    /* 🎰 ゆうワールド：公開設定と着席はサーバー（通知 Worker）だけ。ブラウザからは書けず、着席は読めない */
+    await check("ゆうスロの公開設定をブラウザから書き換える", "DENY", create("worldConfig", ids.worldCfgEvil, { yuslotPublished: true }));
+    await check("ゆうスロの着席をブラウザから直接読む", "DENY", get(`yuslotSeats/${ids.seatEvil}`));
+    await check("ゆうスロにブラウザから勝手に着席する", "DENY", create("yuslotSeats", ids.seatEvil, { uid: TEST_UID, nonce: "x", delta: 1000000, flushedTotal: 0 }));
 
     /* ④ 読み取りと、管理用以外のデータ（今まで通りのルール） */
     await check("手動レースの読み取り", "ALLOW", get(`derbyManualRaces/${ids.closedRace}`));

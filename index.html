@@ -548,6 +548,17 @@
 
 
         <button
+            data-view="yuworld"
+            type="button"
+        >
+            🎡
+            <span>
+                ゆうワールド
+            </span>
+        </button>
+
+
+        <button
             data-view="economy"
             type="button"
         >
@@ -1113,6 +1124,17 @@
 
 
 
+            <!-- 🎡 ゆうワールド（ゆうスロなどのお店）。中身は yuworld.js が描く -->
+
+            <section
+                id="yuworldView"
+                class="view hidden"
+            >
+                <div id="yuworldRoot" class="yuworld-root"></div>
+            </section>
+
+
+
             <!-- 💰 ゆう経済（ゆう銀行・ゆう株・総資産）。中身は script.js の renderEconomyView が描く -->
 
             <section
@@ -1527,7 +1549,7 @@
      OFF のとき（とテスト環境）は、data-app-src のアプリ本体を読み込む -->
 <script
     src="./maintenance.js?v=20261009-maint-quota"
-    data-app-src="./script.js?v=20261011-security-s23"
+    data-app-src="./script.js?v=20261015-yuworld"
 ></script>
 
 
