@@ -2132,18 +2132,35 @@ function jsonResponse(data, status, cors) {
    ========================================================= */
 
 export const SLOT_MACHINES = {
-  yubasic:    { price: 1, special: "orig",    specialRate: 1 / 400 },
-  yurush:     { price: 2, special: "orig",    specialRate: 1 / 450 },
-  yuchance:   { price: 3, special: "triple7", specialRate: 1 / 500 },
-  yutreasure: { price: 5, special: "triple7", specialRate: 1 / 600 },
-  yurainbow:  { price: 7, special: "triple7", specialRate: 1 / 700 },
-  yujackpot:  { price: 9, special: "triple7", specialRate: 1 / 800 }
+  // rates：台ごとの小当たり（さくらんぼ/ベル/スイカ）の確率。料金が高い台ほど還元率が下がるように調整してある。
+  //   当たりやすさ（還元率）の目標：Basic95 / Rush92 / Chance90 / Treasure88 / Rainbow85 / Jackpot82（%）。
+  //   確率・配当はここだけで管理し、演出では一切変えない。実測はシミュレーション（yuslot-sim.mjs）で検証する。
+  yubasic:    { price: 1, special: "orig",    specialRate: 1 / 400, rates: { cherry: 0.0809, bell: 0.0674, watermelon: 0.0540 } },
+  yurush:     { price: 2, special: "orig",    specialRate: 1 / 450, rates: { cherry: 0.0836, bell: 0.0697, watermelon: 0.0557 } },
+  yuchance:   { price: 3, special: "triple7", specialRate: 1 / 500, rates: { cherry: 0.0848, bell: 0.0707, watermelon: 0.0565 } },
+  yutreasure: { price: 5, special: "triple7", specialRate: 1 / 600, rates: { cherry: 0.0877, bell: 0.0731, watermelon: 0.0585 } },
+  yurainbow:  { price: 7, special: "triple7", specialRate: 1 / 700, rates: { cherry: 0.0856, bell: 0.0714, watermelon: 0.0571 } },
+  yujackpot:  { price: 9, special: "triple7", specialRate: 1 / 800, rates: { cherry: 0.0860, bell: 0.0717, watermelon: 0.0573 } }
 };
 export const SLOT_RULES = {
-  cherry: 0.06, bell: 0.05, watermelon: 0.04, replay: 0.02, star: 0.003, treasure: 0.005,
+  // 既定値（台ごとに rates で上書きしないときに使う）。freeReplay 以下は全台共通。
+  cherry: 0.06, bell: 0.05, watermelon: 0.04, replay: 0.02, star: 0.003, treasure: 0.006,
   freeReplay: 0.01, starFreeSpins: 5, win3Mult: 3, specialMult: 80, feverMs: 20000,
   treasurePrizes: [[3, 0.40], [5, 0.30], [10, 0.20], [20, 0.08], [50, 0.02]]
 };
+/* 台ごとの実効確率（rates が無い項目は SLOT_RULES の既定値。special は specialRate） */
+export function slotRates(machineId) {
+  const m = SLOT_MACHINES[machineId], R = SLOT_RULES, o = m && m.rates ? m.rates : {};
+  return {
+    cherry: o.cherry != null ? o.cherry : R.cherry,
+    bell: o.bell != null ? o.bell : R.bell,
+    watermelon: o.watermelon != null ? o.watermelon : R.watermelon,
+    replay: o.replay != null ? o.replay : R.replay,
+    star: o.star != null ? o.star : R.star,
+    treasure: o.treasure != null ? o.treasure : R.treasure,
+    special: o.special != null ? o.special : m.specialRate
+  };
+}
 const SLOT_FRUITS = ["cherry", "bell", "watermelon"];
 const SLOT_FLUSH_INTERVAL_MS = 15000;   // クライアントがこの間隔で flush する
 const SLOT_SEAT_GRACE_MS = 90000;       // 復旧猶予（約1分）＋flush の間隔ぶんの余裕
@@ -2169,7 +2186,17 @@ function slotDisplayPool(machineId) {
 }
 function slotLoseCenter(machineId, random) {
   const pool = slotDisplayPool(machineId);
+  const sp = SLOT_MACHINES[machineId].special === "orig" ? "orig" : "triple7";
   const pick = () => pool[Math.floor(random() * pool.length) % pool.length];
+  // 期待感を高めるため、半分くらいのハズレは「リーチの形」（左2つが同じ・右だけ違う）で見せる。
+  // たまに特別絵柄（777/オリジナル）の惜しいリーチにする。あくまで表示だけで、配当は0のまま（結果は変えない）。
+  if (random() < 0.5) {
+    const pairSym = random() < 0.25 ? sp : pick();
+    let odd = pick(), guard = 0;
+    while (odd === pairSym && guard++ < 8) odd = pick();
+    if (odd === pairSym) odd = pool[(pool.indexOf(pairSym) + 1) % pool.length];
+    return [pairSym, pairSym, odd];
+  }
   let c = [pick(), pick(), pick()];
   if (c[0] === c[1] && c[1] === c[2]) c[2] = pool[(pool.indexOf(c[2]) + 1) % pool.length]; // 3つ揃いは避ける
   return c;
@@ -2180,20 +2207,21 @@ export function slotDrawOutcome(machineId, { free = false, fever = false } = {},
   const m = SLOT_MACHINES[machineId];
   const R = SLOT_RULES;
   if (!m) throw new Error("unknown_machine");
+  const rates = slotRates(machineId);
   if (fever) {
-    // FEVER中はさくらんぼ・ベル・スイカのみ（必ずどれかが揃う）。重みは 6:5:4
-    const w = [["cherry", R.cherry], ["bell", R.bell], ["watermelon", R.watermelon]];
-    const tot = R.cherry + R.bell + R.watermelon;
+    // FEVER中はさくらんぼ・ベル・スイカのみ（必ずどれかが揃う）。重みは台ごとの小当たり確率に比例
+    const w = [["cherry", rates.cherry], ["bell", rates.bell], ["watermelon", rates.watermelon]];
+    const tot = rates.cherry + rates.bell + rates.watermelon;
     let r = random() * tot, pick = "cherry";
     for (const [s, p] of w) { if (r < p) { pick = s; break; } r -= p; }
     return { result: pick, payout: m.price * R.win3Mult, freeAdd: 0, feverStart: false, prize: 0, center: [pick, pick, pick], fever: true };
   }
   const entries = [
-    ["cherry", R.cherry], ["bell", R.bell], ["watermelon", R.watermelon],
-    ["replay", free ? R.freeReplay : R.replay],
-    ["star", free ? 0 : R.star],
-    ["treasure", R.treasure],
-    ["special", m.specialRate]
+    ["cherry", rates.cherry], ["bell", rates.bell], ["watermelon", rates.watermelon],
+    ["replay", free ? R.freeReplay : rates.replay],
+    ["star", free ? 0 : rates.star],
+    ["treasure", rates.treasure],
+    ["special", rates.special]
   ];
   let r = random();
   for (const [res, p] of entries) {
@@ -2223,7 +2251,9 @@ export function slotApplySpin(session, nowMs, random = Math.random) {
   const next = { ...session };
   next.delta = session.delta + draw.payout - cost;
   next.freeSpins = (session.freeSpins || 0) - (usingFree ? 1 : 0) + draw.freeAdd;
-  if (draw.feverStart && !fever) next.feverUntil = nowMs + SLOT_RULES.feverMs;
+  // 特別役の当たりでは FEVER を自動では始めない。「開始待ち（feverPending）」にして、
+  // ユーザーが余韻を楽しんでから feverStart アクションで開始する。
+  if (draw.feverStart && !fever) next.feverPending = true;
   next.spins = (session.spins || 0) + 1;
   const coinWin = draw.payout > 0;
   if (coinWin) { next.wins = (session.wins || 0) + 1; next.streak = (session.streak || 0) + 1; }
@@ -2234,7 +2264,7 @@ export function slotApplySpin(session, nowMs, random = Math.random) {
   const balance = next.startCoins + next.delta;
   const spin = {
     result: draw.result, center: draw.center, payout: draw.payout, cost, prize: draw.prize,
-    freeAdd: draw.freeAdd, coinWin, feverStart: draw.feverStart && !fever,
+    freeAdd: draw.freeAdd, coinWin, feverStart: draw.feverStart && !fever, feverPending: next.feverPending === true,
     fever: nowMs < (next.feverUntil || 0), feverUntil: next.feverUntil || 0,
     balance, freeSpins: next.freeSpins, spins: next.spins, wins: next.wins, streak: next.streak
   };
@@ -2292,6 +2322,7 @@ export async function handleYuslotAction(deps, uid, body) {
       case "lobby": return await yuslotLobby(deps, uid);
       case "seat": return await yuslotSeat(deps, uid, body);
       case "spin": return await yuslotSpin(deps, uid, body);
+      case "feverStart": return await yuslotFeverStart(deps, uid, body);
       case "flush": return await yuslotFlush(deps, uid, body);
       case "settle": return await yuslotSettle(deps, uid, body);
       default: return { status: 400, error: "unknown_action" };
@@ -2396,6 +2427,24 @@ async function yuslotSpin(deps, uid, body) {
   if (applied.error) return { status: 409, error: applied.error };
   const signed = await slotSignSession(applied.session, deps.slotSecret);
   return { ok: true, spin: applied.spin, session: signed };
+}
+
+/* FEVER を開始する（特別役の当たりで feverPending になっている分を、ユーザー操作のタイミングで始める）。
+   Firestore には触れない。連打しても二重開始・報酬重複しない（feverPending を一度だけ消費する）。 */
+async function yuslotFeverStart(deps, uid, body) {
+  const now = deps.now();
+  const loaded = await yuslotLoadSession(deps, uid, body);
+  if (loaded.error) return loaded.error;
+  const session = loaded.session;
+  const alreadyFever = now < (session.feverUntil || 0);
+  if (!session.feverPending || alreadyFever) {
+    // 開始待ちが無い、またはすでに FEVER 中 → 何もしない（冪等）
+    const signed = await slotSignSession(session, deps.slotSecret);
+    return { ok: true, started: false, session: signed, fever: alreadyFever, feverUntil: session.feverUntil || 0, serverNowMs: now };
+  }
+  const next = { ...session, feverUntil: now + SLOT_RULES.feverMs, feverPending: false };
+  const signed = await slotSignSession(next, deps.slotSecret);
+  return { ok: true, started: true, session: signed, fever: true, feverUntil: next.feverUntil, serverNowMs: now };
 }
 
 /* 増減をまとめて Firestore に反映する（flush/settle 共通。seat の flushedTotal で冪等化） */

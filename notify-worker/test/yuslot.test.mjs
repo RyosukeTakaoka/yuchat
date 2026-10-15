@@ -3,8 +3,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  SLOT_MACHINES, SLOT_RULES, slotDrawOutcome, slotApplySpin, slotBusinessOpen, slotBusinessDay, handleYuslotAction, resetYuslotCacheForTest
+  SLOT_MACHINES, SLOT_RULES, slotRates, slotDrawOutcome, slotApplySpin, slotBusinessOpen, slotBusinessDay, handleYuslotAction, resetYuslotCacheForTest
 } from "../worker.js";
+
+/* slotDrawOutcome と同じ並び（cherry→bell→watermelon→replay→star→treasure→special）の累積帯から、
+   狙った結果が出る乱数値（帯の中央）を返す。確率を調整しても壊れないようにする */
+function bandValue(machineId, target, { free = false } = {}) {
+  const r = slotRates(machineId);
+  const entries = [
+    ["cherry", r.cherry], ["bell", r.bell], ["watermelon", r.watermelon],
+    ["replay", free ? SLOT_RULES.freeReplay : r.replay],
+    ["star", free ? 0 : r.star], ["treasure", r.treasure], ["special", r.special]
+  ];
+  let lo = 0;
+  for (const [name, p] of entries) { if (name === target) return lo + p / 2; lo += p; }
+  return Math.min(0.999999, lo + (1 - lo) / 2); // lose
+}
 
 const ROOT = "projects/p/databases/(default)/documents";
 const enc = (v) => v === null || v === undefined ? { nullValue: null } : typeof v === "boolean" ? { booleanValue: v } : typeof v === "number" ? (Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v }) : typeof v === "object" ? { mapValue: { fields: encF(v) } } : { stringValue: String(v) };
@@ -54,9 +68,9 @@ const seq = (...vals) => { let i = 0; return () => (i < vals.length ? vals[i++] 
 const coinsOf = (fs, name) => Number(fs.docs.get(`users/${name}`).fields.coins.integerValue);
 
 test("確率の合計が各台で100%になる（ハズレが負にならない）", () => {
-  for (const [id, m] of Object.entries(SLOT_MACHINES)) {
-    const R = SLOT_RULES;
-    const sum = R.cherry + R.bell + R.watermelon + R.replay + R.star + R.treasure + m.specialRate;
+  for (const id of Object.keys(SLOT_MACHINES)) {
+    const r = slotRates(id);
+    const sum = r.cherry + r.bell + r.watermelon + r.replay + r.star + r.treasure + r.special;
     assert.ok(sum < 1, `${id} 合計が1未満`);
     assert.ok(1 - sum >= 0, `${id} ハズレが負`);
   }
@@ -78,18 +92,18 @@ test("対象外の台に特別役（777・オリジナル）が絶対に出な�
 test("配当：特別役=料金×80＋FEVER開始、フルーツ=料金×3、宝箱=賞金、REPLAY=無料+1、星=無料+5", () => {
   // yubasic 通常：cherry→special の順。累積 cherry.06 bell.05 wm.04 replay.02 star.003 treasure.005 special(1/400)
   const m = SLOT_MACHINES.yubasic;
-  assert.equal(slotDrawOutcome("yubasic", {}, seq(0.0)).payout, m.price * 3);        // cherry
-  const sp = slotDrawOutcome("yubasic", {}, seq(0.1785));                            // special 帯 [.178,.1805)
+  assert.equal(slotDrawOutcome("yubasic", {}, seq(bandValue("yubasic", "cherry"))).payout, m.price * 3);        // cherry
+  const sp = slotDrawOutcome("yubasic", {}, seq(bandValue("yubasic", "special")));
   assert.equal(sp.result, "special"); assert.equal(sp.payout, m.price * 80); assert.equal(sp.feverStart, true);
   assert.deepEqual(sp.center, ["orig", "orig", "orig"]);
-  const rp = slotDrawOutcome("yubasic", {}, seq(0.16));                              // replay 帯 [.15,.17)
+  const rp = slotDrawOutcome("yubasic", {}, seq(bandValue("yubasic", "replay")));
   assert.equal(rp.result, "replay"); assert.equal(rp.freeAdd, 1); assert.equal(rp.payout, 0);
-  const stt = slotDrawOutcome("yubasic", {}, seq(0.1715));                           // star 帯 [.17,.173)
+  const stt = slotDrawOutcome("yubasic", {}, seq(bandValue("yubasic", "star")));
   assert.equal(stt.result, "star"); assert.equal(stt.freeAdd, 5);
-  const tr = slotDrawOutcome("yubasic", {}, seq(0.174, 0.0));                        // treasure 帯 [.173,.178), 1つ目賞金3
+  const tr = slotDrawOutcome("yubasic", {}, seq(bandValue("yubasic", "treasure"), 0.0));                        // 1つ目賞金3
   assert.equal(tr.result, "treasure"); assert.equal(tr.payout, 3); assert.equal(tr.prize, 3);
   // yuchance は 777
-  const sp7 = slotDrawOutcome("yuchance", {}, seq(0.179));
+  const sp7 = slotDrawOutcome("yuchance", {}, seq(bandValue("yuchance", "special")));
   assert.equal(sp7.result, "special"); assert.deepEqual(sp7.center, ["triple7", "triple7", "triple7"]);
 });
 
@@ -114,23 +128,25 @@ test("無料スピン中は星が出ない（REPLAYは1%）", () => {
 
 test("slotApplySpin：無料スピンはコイン消費なし、残高不足は no_funds、連勝/当たり数の計上", () => {
   const base = { v: 1, uid: "uT", name: "たろう", machine: "yubasic", price: 1, startCoins: 10, delta: 0, flushed: 0, freeSpins: 0, feverUntil: 0, spins: 0, wins: 0, streak: 0, day: "d", nonce: "n", seatMs: 0, lastMs: 0 };
+  const cherry = bandValue("yubasic", "cherry"), replay = bandValue("yubasic", "replay"), special = bandValue("yubasic", "special");
   // 当たり（cherry）：残高+2、当たり+1、連勝+1
-  let r = slotApplySpin(base, 1000, seq(0.0));
+  let r = slotApplySpin(base, 1000, seq(cherry));
   assert.equal(r.spin.payout, 3); assert.equal(r.spin.cost, 1); assert.equal(r.session.delta, 2); assert.equal(r.session.wins, 1); assert.equal(r.session.streak, 1);
   // ハズレ：残高-1、連勝0
   r = slotApplySpin({ ...base, streak: 3 }, 1000, seq(0.99));
   assert.equal(r.spin.result, "lose"); assert.equal(r.session.delta, -1); assert.equal(r.session.streak, 0);
   // REPLAY：無料+1、連勝維持、当たりに数えない
-  r = slotApplySpin({ ...base, streak: 2, wins: 2 }, 1000, seq(0.16));
+  r = slotApplySpin({ ...base, streak: 2, wins: 2 }, 1000, seq(replay));
   assert.equal(r.session.freeSpins, 1); assert.equal(r.session.streak, 2); assert.equal(r.session.wins, 2);
   // 無料スピンあり：コスト0、当たりでも消費しない
-  r = slotApplySpin({ ...base, freeSpins: 2, startCoins: 0 }, 1000, seq(0.0));
+  r = slotApplySpin({ ...base, freeSpins: 2, startCoins: 0 }, 1000, seq(cherry));
   assert.equal(r.spin.cost, 0); assert.equal(r.session.freeSpins, 1); assert.equal(r.session.delta, 3);
   // 残高0・無料0 → no_funds
-  assert.deepEqual(slotApplySpin({ ...base, startCoins: 0 }, 1000, seq(0.0)), { error: "no_funds" });
-  // 特別役で FEVER 開始
-  r = slotApplySpin(base, 5000, seq(0.1785));
-  assert.equal(r.spin.feverStart, true); assert.equal(r.session.feverUntil, 5000 + SLOT_RULES.feverMs);
+  assert.deepEqual(slotApplySpin({ ...base, startCoins: 0 }, 1000, seq(cherry)), { error: "no_funds" });
+  // 特別役では FEVER を自動開始せず「開始待ち（feverPending）」にする（feverUntil はまだ 0）
+  r = slotApplySpin(base, 5000, seq(special));
+  assert.equal(r.spin.feverStart, true); assert.equal(r.spin.feverPending, true);
+  assert.equal(r.session.feverPending, true); assert.equal(r.session.feverUntil || 0, 0);
 });
 
 test("営業時間（JST 07:00〜21:00）と日次（07:00境界）", () => {
@@ -205,6 +221,27 @@ test("flush：増分だけ反映し、同じ session を再送しても二重反
   for (let i = 0; i < 2; i++) { const r = await handleYuslotAction({ ...d, random: seq(0.0) }, "uT", { action: "spin", session }); session = r.session; } // +4
   const st = await handleYuslotAction(d, "uT", { action: "settle", session });
   assert.equal(st.applied, 4); assert.equal(coinsOf(fs, "たろう"), 1010);
+});
+
+test("FEVERは特別役の当たりで自動開始せず、feverStart アクションで開始（連打しても二重開始しない・Firestore 0）", async () => {
+  const { fs, deps: d } = deps({ "worldConfig/yuslot": { yuslotPublished: true } });
+  const s = await handleYuslotAction(d, "uT", { action: "seat", machine: "yubasic", username: "たろう" });
+  // 特別役を出す（yubasic の special 帯）→ feverPending、feverUntil はまだ立たない
+  const sp = await handleYuslotAction({ ...d, random: seq(bandValue("yubasic", "special")) }, "uT", { action: "spin", session: s.session });
+  assert.equal(sp.spin.result, "special"); assert.equal(sp.spin.feverPending, true); assert.equal(sp.spin.fever, false);
+  const before = { ...fs.counts };
+  // 開始：feverUntil が now+feverMs に。Firestore には触れない
+  const started = await handleYuslotAction(d, "uT", { action: "feverStart", session: sp.session });
+  assert.equal(started.started, true); assert.equal(started.fever, true);
+  assert.equal(started.feverUntil, d.now() + SLOT_RULES.feverMs);
+  assert.equal(fs.counts.get - before.get, 0); assert.equal(fs.counts.getRaw - before.getRaw, 0); assert.equal(fs.counts.commit - before.commit, 0);
+  // 連打（同じ feverPending セッション）→ 二重開始しない（feverPending は消費済み。古いセッションは pending だが alreadyFever で no-op にはならないので、開始後セッションで再送）
+  const again = await handleYuslotAction(d, "uT", { action: "feverStart", session: started.session });
+  assert.equal(again.started, false, "開始後のセッションでは二重開始しない");
+  // 開始後のセッションでスピン → FEVER中なのでフルーツのみ
+  const fspin = await handleYuslotAction({ ...d, random: seq(0.0) }, "uT", { action: "spin", session: started.session });
+  assert.ok(["cherry", "bell", "watermelon"].includes(fspin.spin.result), "FEVER中はフルーツ");
+  assert.equal(fspin.spin.fever, true);
 });
 
 test("セッション改ざんは拒否（HMAC）", async () => {
