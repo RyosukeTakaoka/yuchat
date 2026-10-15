@@ -102,6 +102,11 @@ export async function handleRequest(request, env = {}, deps = createDefaultDeps(
       const result = await handleEconomyAction(deps, uid, body);
       return jsonResponse(result, result.status || 200, cors);
     }
+    /* 🎰 ゆうワールド「ゆうスロ」：着席・スピン・精算・公開設定（残高・抽選・精算はサーバーが確定） */
+    if (new URL(request.url).pathname.replace(/\/+$/, "") === "/yuslot") {
+      const result = await handleYuslotAction(deps, uid, body);
+      return jsonResponse(result, result.status || 200, cors);
+    }
 
     const messageId = typeof body?.messageId === "string" ? body.messageId : "";
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(messageId)) return jsonResponse({ error: "invalid_message_id" }, 400, cors);
@@ -2118,6 +2123,336 @@ function jsonResponse(data, status, cors) {
    本番用の依存（Google の認証・Firestore REST・FCM HTTP v1）
 ========================================================= */
 
+/* =========================================================
+   🎰 ゆうワールド「ゆうスロ」：サーバー権威のスロット
+   ・抽選・配当・残高・着席・精算はすべてサーバーが確定する（クライアントは表示だけ）。
+   ・プレイ中（スピン）は Firebase にアクセスしない。残高は「着席時に一度読んだ値＋署名セッションが持つ増減」で管理し、
+     一定間隔の flush と退出時の settle のときだけ Firestore にまとめて反映する（増分 increment で冪等）。
+   ・公開設定は worldConfig/yuslot（最上位管理者だけが変更）。非公開中は最上位管理者以外は遊べない。
+   ========================================================= */
+
+export const SLOT_MACHINES = {
+  yubasic:    { price: 1, special: "orig",    specialRate: 1 / 400 },
+  yurush:     { price: 2, special: "orig",    specialRate: 1 / 450 },
+  yuchance:   { price: 3, special: "triple7", specialRate: 1 / 500 },
+  yutreasure: { price: 5, special: "triple7", specialRate: 1 / 600 },
+  yurainbow:  { price: 7, special: "triple7", specialRate: 1 / 700 },
+  yujackpot:  { price: 9, special: "triple7", specialRate: 1 / 800 }
+};
+export const SLOT_RULES = {
+  cherry: 0.06, bell: 0.05, watermelon: 0.04, replay: 0.02, star: 0.003, treasure: 0.005,
+  freeReplay: 0.01, starFreeSpins: 5, win3Mult: 3, specialMult: 80, feverMs: 20000,
+  treasurePrizes: [[3, 0.40], [5, 0.30], [10, 0.20], [20, 0.08], [50, 0.02]]
+};
+const SLOT_FRUITS = ["cherry", "bell", "watermelon"];
+const SLOT_FLUSH_INTERVAL_MS = 15000;   // クライアントがこの間隔で flush する
+const SLOT_SEAT_GRACE_MS = 90000;       // 復旧猶予（約1分）＋flush の間隔ぶんの余裕
+const SLOT_SESSION_MAX_MS = 24 * 3600 * 1000;
+
+/* 営業時間（日本時間 07:00〜21:00）。日次リセットは 07:00 */
+function slotJstHour(nowMs) { return new Date(nowMs + 9 * 3600000).getUTCHours(); }
+export function slotBusinessOpen(nowMs) { const h = slotJstHour(nowMs); return h >= 7 && h < 21; }
+export function slotBusinessDay(nowMs) {
+  // 07:00 JST で日付が変わるように、JST から 7 時間引いた日付を使う
+  const d = new Date(nowMs + 9 * 3600000 - 7 * 3600000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+function slotPickTreasure(random) {
+  let r = random();
+  for (const [coins, p] of SLOT_RULES.treasurePrizes) { if (r < p) return coins; r -= p; }
+  return SLOT_RULES.treasurePrizes[0][0];
+}
+function slotDisplayPool(machineId) {
+  const m = SLOT_MACHINES[machineId];
+  return [...SLOT_FRUITS, "replay", "star", "treasure", m.special === "orig" ? "orig" : "triple7"];
+}
+function slotLoseCenter(machineId, random) {
+  const pool = slotDisplayPool(machineId);
+  const pick = () => pool[Math.floor(random() * pool.length) % pool.length];
+  let c = [pick(), pick(), pick()];
+  if (c[0] === c[1] && c[1] === c[2]) c[2] = pool[(pool.indexOf(c[2]) + 1) % pool.length]; // 3つ揃いは避ける
+  return c;
+}
+
+/* 1スピンの抽選結果（純粋関数。残高には触れない）。free=無料スピン中、fever=FEVER中 */
+export function slotDrawOutcome(machineId, { free = false, fever = false } = {}, random = Math.random) {
+  const m = SLOT_MACHINES[machineId];
+  const R = SLOT_RULES;
+  if (!m) throw new Error("unknown_machine");
+  if (fever) {
+    // FEVER中はさくらんぼ・ベル・スイカのみ（必ずどれかが揃う）。重みは 6:5:4
+    const w = [["cherry", R.cherry], ["bell", R.bell], ["watermelon", R.watermelon]];
+    const tot = R.cherry + R.bell + R.watermelon;
+    let r = random() * tot, pick = "cherry";
+    for (const [s, p] of w) { if (r < p) { pick = s; break; } r -= p; }
+    return { result: pick, payout: m.price * R.win3Mult, freeAdd: 0, feverStart: false, prize: 0, center: [pick, pick, pick], fever: true };
+  }
+  const entries = [
+    ["cherry", R.cherry], ["bell", R.bell], ["watermelon", R.watermelon],
+    ["replay", free ? R.freeReplay : R.replay],
+    ["star", free ? 0 : R.star],
+    ["treasure", R.treasure],
+    ["special", m.specialRate]
+  ];
+  let r = random();
+  for (const [res, p] of entries) {
+    if (p <= 0) continue;
+    if (r < p) {
+      if (res === "cherry" || res === "bell" || res === "watermelon") return { result: res, payout: m.price * R.win3Mult, freeAdd: 0, feverStart: false, prize: 0, center: [res, res, res] };
+      if (res === "replay") return { result: "replay", payout: 0, freeAdd: 1, feverStart: false, prize: 0, center: ["replay", "replay", "replay"] };
+      if (res === "star") return { result: "star", payout: 0, freeAdd: R.starFreeSpins, feverStart: false, prize: 0, center: ["star", "star", "star"] };
+      if (res === "treasure") { const prize = slotPickTreasure(random); return { result: "treasure", payout: prize, freeAdd: 0, feverStart: false, prize, center: ["treasure", "treasure", "treasure"] }; }
+      if (res === "special") { const sym = m.special === "orig" ? "orig" : "triple7"; return { result: "special", symbol: sym, payout: m.price * R.specialMult, freeAdd: 0, feverStart: true, prize: 0, center: [sym, sym, sym] }; }
+    }
+    r -= p;
+  }
+  return { result: "lose", payout: 0, freeAdd: 0, feverStart: false, prize: 0, center: slotLoseCenter(machineId, random) };
+}
+
+/* セッションに1スピンを適用する（残高・無料スピン・FEVER・統計を更新）。Firestore には触れない */
+export function slotApplySpin(session, nowMs, random = Math.random) {
+  const price = session.price;
+  const fever = nowMs < (session.feverUntil || 0);
+  const usingFree = (session.freeSpins || 0) > 0;
+  const available = session.startCoins + session.delta;
+  if (!usingFree && available < price) return { error: "no_funds" };
+
+  const draw = slotDrawOutcome(session.machine, { free: usingFree, fever }, random);
+  const cost = usingFree ? 0 : price;
+  const next = { ...session };
+  next.delta = session.delta + draw.payout - cost;
+  next.freeSpins = (session.freeSpins || 0) - (usingFree ? 1 : 0) + draw.freeAdd;
+  if (draw.feverStart && !fever) next.feverUntil = nowMs + SLOT_RULES.feverMs;
+  next.spins = (session.spins || 0) + 1;
+  const coinWin = draw.payout > 0;
+  if (coinWin) { next.wins = (session.wins || 0) + 1; next.streak = (session.streak || 0) + 1; }
+  else if (draw.result === "lose") { next.streak = 0; }
+  else { next.wins = session.wins || 0; next.streak = session.streak || 0; }
+  next.lastMs = nowMs;
+
+  const balance = next.startCoins + next.delta;
+  const spin = {
+    result: draw.result, center: draw.center, payout: draw.payout, cost, prize: draw.prize,
+    freeAdd: draw.freeAdd, coinWin, feverStart: draw.feverStart && !fever,
+    fever: nowMs < (next.feverUntil || 0), feverUntil: next.feverUntil || 0,
+    balance, freeSpins: next.freeSpins, spins: next.spins, wins: next.wins, streak: next.streak
+  };
+  return { session: next, spin };
+}
+
+/* ----- 署名セッション（HMAC-SHA256。鍵はサービスアカウント秘密鍵などから導出） ----- */
+async function slotHmacKey(secret) {
+  const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(secret || "")));
+  return crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+}
+async function slotSignSession(session, secret) {
+  const key = await slotHmacKey(secret);
+  const body = base64UrlEncodeString(JSON.stringify(session));
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+  return `${body}.${base64UrlEncodeBytes(new Uint8Array(sig))}`;
+}
+async function slotVerifySession(token, secret) {
+  const [body, sig] = String(token || "").split(".");
+  if (!body || !sig) return null;
+  const key = await slotHmacKey(secret);
+  const ok = await crypto.subtle.verify("HMAC", key, base64UrlDecode(sig), new TextEncoder().encode(body));
+  if (!ok) return null;
+  try { return JSON.parse(base64UrlDecodeToString(body)); } catch { return null; }
+}
+function slotRandomHex(n = 16) {
+  const b = new Uint8Array(n); crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/* ----- 公開設定（worldConfig/yuslot）。短時間キャッシュしてスピン中の読み取りを避ける ----- */
+let slotConfigCache = { value: null, at: 0 };
+export function resetYuslotCacheForTest() { slotConfigCache = { value: null, at: 0 }; }
+async function slotGetPublished(deps, { maxAgeMs = 30000 } = {}) {
+  const now = deps.now();
+  if (slotConfigCache.value !== null && now - slotConfigCache.at < maxAgeMs) return slotConfigCache.value;
+  try {
+    const doc = await deps.firestore.get("worldConfig/yuslot");
+    const published = doc?.yuslotPublished === true;
+    slotConfigCache = { value: published, at: now };
+    return published;
+  } catch (error) {
+    console.warn("yuslot config read failed", String(error?.message || error).slice(0, 120));
+    return slotConfigCache.value === true ? false : false; // 取得失敗は非公開扱い
+  }
+}
+function slotIsTopAdmin(deps, uid) { return uid && uid === deps.adminUid; }
+
+export async function handleYuslotAction(deps, uid, body) {
+  const action = typeof body?.action === "string" ? body.action : "";
+  try {
+    switch (action) {
+      case "config": return await yuslotConfig(deps, uid);
+      case "setConfig": return await yuslotSetConfig(deps, uid, body);
+      case "lobby": return await yuslotLobby(deps, uid);
+      case "seat": return await yuslotSeat(deps, uid, body);
+      case "spin": return await yuslotSpin(deps, uid, body);
+      case "flush": return await yuslotFlush(deps, uid, body);
+      case "settle": return await yuslotSettle(deps, uid, body);
+      default: return { status: 400, error: "unknown_action" };
+    }
+  } catch (error) {
+    console.error("yuslot error", action, String(error?.message || error).slice(0, 300));
+    return { status: 500, error: "internal_error" };
+  }
+}
+
+async function yuslotConfig(deps, uid) {
+  const published = await slotGetPublished(deps);
+  return { ok: true, published, isTopAdmin: slotIsTopAdmin(deps, uid), open: slotBusinessOpen(deps.now()), serverNowMs: deps.now(), day: slotBusinessDay(deps.now()) };
+}
+
+async function yuslotSetConfig(deps, uid, body) {
+  if (!slotIsTopAdmin(deps, uid)) return { status: 403, error: "not_top_admin" };
+  const published = body?.published === true;
+  await deps.firestore.commit([{
+    update: { name: deps.firestore.docName("worldConfig/yuslot"), fields: { yuslotPublished: { booleanValue: published }, updatedAtMs: { integerValue: String(deps.now()) }, updatedByUid: { stringValue: uid } } },
+    updateMask: { fieldPaths: ["yuslotPublished", "updatedAtMs", "updatedByUid"] }
+  }]);
+  slotConfigCache = { value: published, at: deps.now() };
+  return { ok: true, published };
+}
+
+async function yuslotLobby(deps, uid) {
+  const published = await slotGetPublished(deps);
+  if (!published && !slotIsTopAdmin(deps, uid)) return { status: 403, error: "not_published" };
+  const now = deps.now();
+  const ids = Object.keys(SLOT_MACHINES);
+  const seats = {};
+  await Promise.all(ids.map(async (id) => {
+    const raw = await deps.firestore.getRaw(`yuslotSeats/${id}`);
+    const d = raw ? decodeFields(raw.fields) : null;
+    seats[id] = d && Number(d.graceUntilMs || 0) > now ? { name: d.name || "", occupied: true, mine: d.uid === uid } : { occupied: false };
+  }));
+  return { ok: true, seats, open: slotBusinessOpen(now), serverNowMs: now };
+}
+
+async function yuslotSeat(deps, uid, body) {
+  const machine = typeof body?.machine === "string" ? body.machine : "";
+  if (!SLOT_MACHINES[machine]) return { status: 400, error: "unknown_machine" };
+  const published = await slotGetPublished(deps);
+  if (!published && !slotIsTopAdmin(deps, uid)) return { status: 403, error: "not_published" };
+  const now = deps.now();
+  if (!slotBusinessOpen(now)) return { status: 409, error: "closed" };
+
+  const me = await loadMyUser(deps.firestore, uid, body?.username);
+  if (me.error) return me.error;
+  const startCoins = Number(decodeFields(me.raw.fields).coins || 0);
+
+  const seatPath = `yuslotSeats/${machine}`;
+  const raw = await deps.firestore.getRaw(seatPath);
+  const cur = raw ? decodeFields(raw.fields) : null;
+  if (cur && cur.uid !== uid && Number(cur.graceUntilMs || 0) > now) return { status: 409, error: "seat_taken", name: cur.name || "" };
+
+  const nonce = slotRandomHex();
+  const seatFields = {
+    uid: { stringValue: uid }, name: { stringValue: me.name }, nonce: { stringValue: nonce },
+    machine: { stringValue: machine }, seatedAtMs: { integerValue: String(now) },
+    graceUntilMs: { integerValue: String(now + SLOT_SEAT_GRACE_MS) }, flushedTotal: { integerValue: "0" }
+  };
+  const write = { update: { name: deps.firestore.docName(seatPath), fields: seatFields } };
+  if (raw) write.currentDocument = { updateTime: raw.updateTime }; else write.currentDocument = { exists: false };
+  try {
+    await deps.firestore.commit([write]);
+  } catch (error) {
+    if (isRetryableCommitError(error) || error.status === 409) return { status: 409, error: "seat_taken" };
+    throw error;
+  }
+
+  const session = {
+    v: 1, uid, name: me.name, machine, price: SLOT_MACHINES[machine].price,
+    startCoins, delta: 0, flushed: 0, freeSpins: 0, feverUntil: 0,
+    spins: 0, wins: 0, streak: 0, day: slotBusinessDay(now), nonce, seatMs: now, lastMs: now
+  };
+  const signed = await slotSignSession(session, deps.slotSecret);
+  return { ok: true, session: signed, machine, price: session.price, startCoins, name: me.name, balance: startCoins, freeSpins: 0, open: true, serverNowMs: now, day: session.day };
+}
+
+async function yuslotLoadSession(deps, uid, body) {
+  const session = await slotVerifySession(body?.session, deps.slotSecret);
+  if (!session || session.uid !== uid) return { error: { status: 401, error: "bad_session" } };
+  if (!SLOT_MACHINES[session.machine]) return { error: { status: 400, error: "unknown_machine" } };
+  return { session };
+}
+
+async function yuslotSpin(deps, uid, body) {
+  const now = deps.now();
+  const loaded = await yuslotLoadSession(deps, uid, body);
+  if (loaded.error) return loaded.error;
+  const session = loaded.session;
+  // 非公開に切り替わっていたら、一般ユーザーはスピンできない（残りは settle で安全に退出）
+  const published = await slotGetPublished(deps);
+  if (!published && !slotIsTopAdmin(deps, uid)) return { status: 403, error: "not_published", mustSettle: true };
+  if (now - session.seatMs > SLOT_SESSION_MAX_MS) return { status: 409, error: "session_expired", mustSettle: true };
+  if (session.day !== slotBusinessDay(now)) return { status: 409, error: "day_rollover", mustSettle: true };
+  if (!slotBusinessOpen(now)) return { status: 409, error: "closed", mustSettle: true };
+
+  const applied = slotApplySpin(session, now, deps.random);
+  if (applied.error) return { status: 409, error: applied.error };
+  const signed = await slotSignSession(applied.session, deps.slotSecret);
+  return { ok: true, spin: applied.spin, session: signed };
+}
+
+/* 増減をまとめて Firestore に反映する（flush/settle 共通。seat の flushedTotal で冪等化） */
+async function yuslotPersist(deps, uid, session, { release }) {
+  const now = deps.now();
+  const seatPath = `yuslotSeats/${session.machine}`;
+  const raw = await deps.firestore.getRaw(seatPath);
+  const cur = raw ? decodeFields(raw.fields) : null;
+  // 自分の着席でなく、nonce も違う＝別の人に取られた/すでに解放済み。未反映分は（安全のため）反映しない
+  if (!cur || cur.uid !== uid || cur.nonce !== session.nonce) return { ok: true, applied: 0, seatLost: !release };
+  const toApply = Math.trunc(session.delta - Number(cur.flushedTotal || 0));
+  const writes = [];
+  if (toApply !== 0) {
+    writes.push({
+      update: { name: deps.firestore.docName(`users/${session.name}`), fields: {} },
+      updateMask: { fieldPaths: [] },
+      updateTransforms: [{ fieldPath: "coins", increment: { integerValue: String(toApply) } }],
+      currentDocument: { exists: true }
+    });
+  }
+  if (release) {
+    writes.push({ delete: deps.firestore.docName(seatPath), currentDocument: { updateTime: raw.updateTime } });
+  } else {
+    writes.push({
+      update: { name: deps.firestore.docName(seatPath), fields: { flushedTotal: { integerValue: String(Math.trunc(session.delta)) }, graceUntilMs: { integerValue: String(now + SLOT_SEAT_GRACE_MS) }, lastFlushMs: { integerValue: String(now) } } },
+      updateMask: { fieldPaths: ["flushedTotal", "graceUntilMs", "lastFlushMs"] },
+      currentDocument: { updateTime: raw.updateTime }
+    });
+  }
+  await deps.firestore.commit(writes);
+  return { ok: true, applied: toApply };
+}
+
+async function yuslotFlush(deps, uid, body) {
+  const loaded = await yuslotLoadSession(deps, uid, body);
+  if (loaded.error) return loaded.error;
+  const session = loaded.session;
+  let res;
+  try { res = await yuslotPersist(deps, uid, session, { release: false }); }
+  catch (error) { if (isRetryableCommitError(error)) return { status: 409, error: "busy" }; throw error; }
+  if (res.seatLost) return { status: 409, error: "seat_lost", mustStop: true };
+  const next = { ...session, flushed: Math.trunc(session.delta) };
+  const signed = await slotSignSession(next, deps.slotSecret);
+  return { ok: true, session: signed, applied: res.applied, balance: session.startCoins + session.delta };
+}
+
+async function yuslotSettle(deps, uid, body) {
+  const loaded = await yuslotLoadSession(deps, uid, body);
+  if (loaded.error) return loaded.error;
+  const session = loaded.session;
+  let res;
+  try { res = await yuslotPersist(deps, uid, session, { release: true }); }
+  catch (error) { if (isRetryableCommitError(error)) { res = { ok: true, applied: 0 }; } else throw error; }
+  // FEVER・無料スピンは退出で破棄（セッション限りで Firestore に保存していない）
+  return { ok: true, applied: res.applied || 0, finalBalance: session.startCoins + session.delta };
+}
+
 export function createDefaultDeps(env, fetchImpl = (...args) => fetch(...args)) {
   applyDerbyTimeOverrides(env);
   const projectId = env.FIREBASE_PROJECT_ID || DEFAULT_PROJECT_ID;
@@ -2132,6 +2467,9 @@ export function createDefaultDeps(env, fetchImpl = (...args) => fetch(...args)) 
   return {
     now: () => Date.now(),
     adminUid: env.ADMIN_UID || DEFAULT_ADMIN_UID,
+    // ゆうスロの署名セッションの鍵（新しい Secret は不要。サービスアカウント秘密鍵などから導出）
+    slotSecret: env.SLOT_SESSION_SECRET || env.FIREBASE_SERVICE_ACCOUNT || DEFAULT_ADMIN_UID,
+    random: () => { const b = new Uint32Array(1); crypto.getRandomValues(b); return b[0] / 4294967296; },
     verifyIdToken: (token) => verifyFirebaseIdToken(token, projectId, fetchImpl),
     firestore: createFirestoreClient({ base: firestoreBase, projectId, getAccessToken, fetchImpl }),
     authAdmin: createAuthAdminClient({ base: authAdminBase, projectId, getAccessToken, fetchImpl }),

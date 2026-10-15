@@ -150,6 +150,16 @@ const TEST_CASES = [
   testCase("DENY", "raceBets：他人の馬券を精算", userA, "update", "raceBets/b-other", { data: { raceId: "2026-10-09", uid: "someoneElse", settled: true, win: true, payout: 600, payoutRule: "fixed-v1" }, existing: { raceId: "2026-10-09", uid: "someoneElse", settled: false } }),
   testCase("DENY", "raceBets：コインを払わず馬券を作る", userA, "create", "raceBets/b-buy", { data: { raceId: "2026-10-12", uid: userA.uid, type: "win", horses: [1], amount: 1000000, settled: false } }),
   testCase("DENY", "raceBets：馬券を削除する", userA, "delete", "raceBets/b-old", { existing: { raceId: "2026-10-09", uid: userA.uid, settled: false } }),
+  // 🎰 ゆうワールド：公開設定（worldConfig）と着席（yuslotSeats）はサーバー（通知 Worker）だけが書く
+  testCase("ALLOW", "worldConfig：公開設定の読み取り（ログイン済みなら可）", userA, "get", "worldConfig/yuslot", { existing: { yuslotPublished: false } }),
+  testCase("DENY", "worldConfig：一般がブラウザから公開に書き換える", userA, "update", "worldConfig/yuslot", { data: { yuslotPublished: true }, existing: { yuslotPublished: false } }),
+  testCase("DENY", "worldConfig：一般がブラウザから公開設定を作る", userA, "create", "worldConfig/yuslot2", { data: { yuslotPublished: true } }),
+  testCase("DENY", "worldConfig：最上位管理者でもブラウザからは書き換えられない（Worker 経由だけ）", admin, "update", "worldConfig/yuslot", { data: { yuslotPublished: true }, existing: { yuslotPublished: false } }),
+  testCase("DENY", "yuslotSeats：一般が着席状況を直接読む", userA, "get", "yuslotSeats/yubasic", { existing: { uid: userA.uid, nonce: "n1", delta: 0 } }),
+  testCase("DENY", "yuslotSeats：最上位管理者でも着席状況を直接読めない", admin, "get", "yuslotSeats/yubasic", { existing: { uid: userA.uid, nonce: "n1", delta: 0 } }),
+  testCase("DENY", "yuslotSeats：一般が勝手に着席する", userA, "create", "yuslotSeats/yurush", { data: { uid: userA.uid, nonce: "x", delta: 0, flushedTotal: 0 } }),
+  testCase("DENY", "yuslotSeats：他人の着席を書き換えてコインを増やす", userA, "update", "yuslotSeats/yubasic", { data: { uid: userA.uid, delta: 1000000 }, existing: { uid: "someoneElse", nonce: "n1", delta: 0 } }),
+  testCase("DENY", "yuslotSeats：着席を削除して解放する", userA, "delete", "yuslotSeats/yubasic", { existing: { uid: userA.uid, nonce: "n1", delta: 0 } }),
   // お知らせ（announcements）：読み取りはログイン済みなら誰でも・作成/編集/削除は管理者だけ
   testCase("ALLOW", "一般：お知らせの読み取り", userA, "get", "announcements/a1", { existing: announcementDoc }),
   testCase("ALLOW", "管理者：お知らせの削除", admin, "delete", "announcements/a1", { existing: announcementDoc }),

@@ -61,7 +61,7 @@ service cloud.firestore {
     //   gameInvites：送った人・送られた人だけ／fcmTokens：アプリからは読まない（通知サーバーだけが読む）
     //   gameRooms・gameRoomOwners：専用のルールで判定（gameRooms はロビー表示のため読み取りは今まで通り許可）
     function hasDedicatedReadRules(collection) {
-      return collection in ['messages', 'groups', 'fcmTokens', 'gameInvites', 'gameRooms', 'gameRoomOwners'];
+      return collection in ['messages', 'groups', 'fcmTokens', 'gameInvites', 'gameRooms', 'gameRoomOwners', 'yuslotSeats'];
     }
 
     // 下のコレクションは管理者だけが読める
@@ -78,7 +78,10 @@ service cloud.firestore {
     function isServerOnlyCollection(collection) {
       return collection in ['market', 'rankings', 'adminAuditLogs', 'userDeletions', 'suspendedUsers', 'notificationLogs',
         // レース結果・開催ログ・馬券は、サーバー（通知 Worker・GitHub Actions の derby-runner）だけが書く。ブラウザからは読み取りだけ
-        'races', 'raceLogs', 'raceBets'];
+        'races', 'raceLogs', 'raceBets',
+        // 🎰 ゆうワールド：公開設定と着席は通知 Worker（サービスアカウント）だけが書く。ブラウザからは書けない
+        //   worldConfig：公開/非公開（最上位管理者の操作を受けて Worker が書く）／yuslotSeats：着席の予約・解放は Worker だけ
+        'worldConfig', 'yuslotSeats'];
     }
 
     // ===== もとのルール（管理者用・自動処理用・廃止したコレクション・専用ルールのあるコレクション以外は今まで通り） =====
@@ -384,6 +387,13 @@ service cloud.firestore {
       allow read: if false;
       allow create, update: if signedIn() && request.resource.data.get('uid', '') == request.auth.uid;
       allow delete: if signedIn() && resource.data.get('uid', '') == request.auth.uid;
+    }
+
+    // ===== 🎰 ゆうスロの着席（yuslotSeats/{台ID}） =====
+    // 予約・解放・更新は通知 Worker（サービスアカウント）だけ。ブラウザからは読み書きできない
+    // （着席状況はアプリが Worker 経由で取得する。ブラウザが直接いじって不正着席・他人の解放をできないようにする）
+    match /yuslotSeats/{machineId} {
+      allow read: if false;
     }
 
     // ============================================================
