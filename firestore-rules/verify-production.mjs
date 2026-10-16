@@ -19,6 +19,7 @@
 ========================================================= */
 
 import fs from "fs";
+import { pathToFileURL } from "node:url";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
@@ -40,16 +41,18 @@ function readWebApiKey() {
 }
 
 /* ----- Firestore REST の値の形 ----- */
-function encode(value) {
-  if (value === null) return { nullValue: null };
+export function encode(value) {
+  if (value === null || value === undefined) return { nullValue: null };
   if (value instanceof Date) return { timestampValue: value.toISOString() };
   if (typeof value === "string") return { stringValue: value };
   if (typeof value === "boolean") return { booleanValue: value };
   if (Number.isInteger(value)) return { integerValue: String(value) };
   if (typeof value === "number") return { doubleValue: value };
+  if (Array.isArray(value)) return { arrayValue: { values: value.map(encode) } };
+  if (typeof value === "object") return { mapValue: { fields: fields(value) } };
   throw new Error(`未対応の値: ${value}`);
 }
-const fields = (obj) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, encode(v)]));
+export const fields = (obj) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, encode(v)]));
 
 /* ----- 公開直後のルールの反映待ち -----
    ルールを公開してから本番全体に行き渡るまで、最大1分ほどかかる。そのあいだは古いルールで判定されて
@@ -90,7 +93,14 @@ async function main() {
     closedRace: "2000-01-01-m0000",
     createRace: "2000-01-02-m0000",
     retiredEvent: `rules-verify-retired-${stamp}`,
-    scratch: `rulesVerify/${TEST_UID}-${stamp}`
+    scratch: `rulesVerify/${TEST_UID}-${stamp}`,
+    fcmOwn: `fcmverify-own-${stamp}`,
+    fcmEvil: `fcmverify-evil-${stamp}`,
+    msgEvil: `msgverify-${stamp}`,
+    roomEvil: `roomverify-${stamp}`,
+    userMismatch: `uverify-mismatch-${stamp}`,
+    worldCfgEvil: `worldcfgverify-${stamp}`,
+    seatEvil: `seatverify-${stamp}`
   };
   const cleanupRefs = [
     db.doc(`derbyManualRaces/${ids.closedRace}`),
@@ -98,7 +108,15 @@ async function main() {
     /* 拒否されるはずだが、万一書き込めてしまったときのために片付ける（存在しない ID なので過去のデータは消さない） */
     db.doc(`events/${ids.retiredEvent}`),
     db.doc(`eventParticipants/${ids.retiredEvent}_${TEST_UID}`),
-    db.doc(ids.scratch)
+    db.doc(ids.scratch),
+    db.doc(`fcmTokens/${ids.fcmOwn}`),
+    db.doc(`fcmTokens/${ids.fcmEvil}`),
+    /* 下は拒否されるはずの書き込み。万一通っても後片付けできるように専用 ID で消す */
+    db.doc(`messages/${ids.msgEvil}`),
+    db.doc(`gameRooms/${ids.roomEvil}`),
+    db.doc(`users/${ids.userMismatch}`),
+    db.doc(`worldConfig/${ids.worldCfgEvil}`),
+    db.doc(`yuslotSeats/${ids.seatEvil}`)
   ];
 
   const results = [];
@@ -159,7 +177,20 @@ async function main() {
     await checkDeniedAfterPropagation("イベント参加記録の読み取り（廃止）", () => get(`eventParticipants/${ids.retiredEvent}_${TEST_UID}`));
     await checkDeniedAfterPropagation("イベント参加記録の作成（廃止）", () => create("eventParticipants", `${ids.retiredEvent}_${TEST_UID}`, { eventId: ids.retiredEvent, uid: TEST_UID, username: "自動テスト", joinedAt: new Date() }), () => retiredEntryRef.delete());
 
-    /* ③ 読み取りと、管理用以外のデータ（今まで通りのルール） */
+    /* ③ 第2・第3段階：チャット・通知・ゲーム・ユーザー作成の不正操作（名前クレームに依存しない項目だけ本番で確認する） */
+    await check("通知トークンを他人の UID で登録", "DENY", create("fcmTokens", ids.fcmEvil, { uid: "someoneElse", username: "x" }));
+    await check("通知トークンを自分の UID で登録（今まで通り可）", "ALLOW", create("fcmTokens", ids.fcmOwn, { uid: TEST_UID, username: "自動テスト" }));
+    await check("通知トークンの読み取り（アプリからは不可）", "DENY", get(`fcmTokens/${ids.fcmOwn}`));
+    await check("メッセージを他人の senderUid で送る", "DENY", create("messages", ids.msgEvil, { sender: "x", senderUid: "someoneElse", receiver: "y", type: "friend", text: "x" }));
+    await check("ゲームルームを他人の ownerUid で作る", "DENY", create("gameRooms", ids.roomEvil, { gameType: "othello", ownerUid: "someoneElse", members: ["x"], memberUids: ["someoneElse"], status: "waiting" }));
+    await check("ユーザー作成で name とドキュメントIDが食い違う（なりすまし）", "DENY", create("users", ids.userMismatch, { uid: TEST_UID, name: "別の名前" }));
+
+    /* 🎰 ゆうワールド：公開設定と着席はサーバー（通知 Worker）だけ。ブラウザからは書けず、着席は読めない */
+    await check("ゆうスロの公開設定をブラウザから書き換える", "DENY", create("worldConfig", ids.worldCfgEvil, { yuslotPublished: true }));
+    await check("ゆうスロの着席をブラウザから直接読む", "DENY", get(`yuslotSeats/${ids.seatEvil}`));
+    await check("ゆうスロにブラウザから勝手に着席する", "DENY", create("yuslotSeats", ids.seatEvil, { uid: TEST_UID, nonce: "x", delta: 1000000, flushedTotal: 0 }));
+
+    /* ④ 読み取りと、管理用以外のデータ（今まで通りのルール） */
     await check("手動レースの読み取り", "ALLOW", get(`derbyManualRaces/${ids.closedRace}`));
     await check("管理用以外のデータへの書き込み（今まで通り可）", "ALLOW", create("rulesVerify", ids.scratch.split("/")[1], { uid: TEST_UID, at: new Date() }));
     await check("管理用以外のデータの削除（今まで通り可）", "ALLOW", remove(ids.scratch));
@@ -184,13 +215,17 @@ async function main() {
   return passed === results.length;
 }
 
-try {
-  const ok = await main();
-  writeSummary();
-  process.exit(ok ? 0 : 1);
-} catch (error) {
-  out(`- **エラー**：${error.message}`);
-  writeSummary();
-  console.error(error);
-  process.exit(1);
+/* 直接実行されたときだけ本番確認を走らせる（テストから import しても main() は動かない） */
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  try {
+    const ok = await main();
+    writeSummary();
+    process.exit(ok ? 0 : 1);
+  } catch (error) {
+    out(`- **エラー**：${error.message}`);
+    writeSummary();
+    console.error(error);
+    process.exit(1);
+  }
 }

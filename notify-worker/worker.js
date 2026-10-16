@@ -8,7 +8,7 @@
      1. ID トークンを検証して送信者の uid を確かめる（なりすまし防止）
      2. messages/{messageId} を読み、送信者本人のメッセージか確かめる
      3. 受信者を決める（友達チャット：friends の相手／グループ：送信者以外のメンバー）
-     4. notificationLogs/{messageId} を「まだ無いときだけ」作る（同じメッセージの二重送信防止）
+     4. notificationLogs/{messageId} を「まだ無いときだけ」作る（同じメッセージの二重送信防止。書き込みはこの1回だけ）
      5. 受信者の全端末（fcmTokens）へ FCM で送る。無効になったトークンは削除する
    を行う。送信者本人の端末には送らない。
 
@@ -16,7 +16,7 @@
 
    管理者専用（👤 ユーザー管理）：
      POST /admin    Authorization: Bearer <管理者の ID トークン>
-                    { "action": "listUsers" | "inspectUser" | "setPassword" | "suspend" | "unsuspend" | "deleteUser" | "deleteAuthOnly" | "adjustCoins" | "notifyAnnouncement", ... }
+                    { "action": "listUsers" | "inspectUser" | "setPassword" | "suspend" | "unsuspend" | "deleteUser" | "deleteAuthOnly" | "adjustCoins" | "previewAssets" | "adjustAssets" | "notifyAnnouncement", ... }
    ID トークンの uid が ADMIN_UID のときだけ実行する（それ以外は 403）。パスワードはどこにも保存・記録しない。
 
    全員への通知（通知を ON にした全端末 = fcmTokens）：
@@ -97,6 +97,16 @@ export async function handleRequest(request, env = {}, deps = createDefaultDeps(
       const result = await handleAdminAction(deps, uid, body);
       return jsonResponse(result, result.status || 200, cors);
     }
+    /* 💰 ゆう経済・🏇 ゆうダービー：本人の操作（残高・締切・結果・払い戻しはサーバーで確かめる） */
+    if (new URL(request.url).pathname.replace(/\/+$/, "") === "/economy") {
+      const result = await handleEconomyAction(deps, uid, body);
+      return jsonResponse(result, result.status || 200, cors);
+    }
+    /* 🎰 ゆうワールド「ゆうスロ」：着席・スピン・精算・公開設定（残高・抽選・精算はサーバーが確定） */
+    if (new URL(request.url).pathname.replace(/\/+$/, "") === "/yuslot") {
+      const result = await handleYuslotAction(deps, uid, body);
+      return jsonResponse(result, result.status || 200, cors);
+    }
 
     const messageId = typeof body?.messageId === "string" ? body.messageId : "";
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(messageId)) return jsonResponse({ error: "invalid_message_id" }, 400, cors);
@@ -158,8 +168,10 @@ export async function notifyForMessage(deps, uid, messageId) {
     }
   }));
 
-  await fs.update(`notificationLogs/${messageId}`, { tokenCount: tokens.length, sent, failed, removedTokens: removed.length })
-    .catch((error) => console.warn("log update failed", error));
+  /* 送信結果（端末数・成功・失敗）は Firestore に書き足さず、Cloudflare のログにだけ残す。
+     以前は送信後に notificationLogs を更新していたが、メッセージ1件につき書き込みが1回増えるだけで、どこからも読んでいなかった。
+     二重送信の防止は 4 の「まだ無いときだけ作る」だけで行っているので、この更新が無くても変わらない */
+  console.log("notify sent", JSON.stringify({ messageId, chatType: target.chatType, recipients: recipientUids.length, tokens: tokens.length, sent, failed, removed: removed.length }));
 
   return { sent, failed, removed: removed.length, recipients: recipientUids.length };
 }
@@ -443,7 +455,8 @@ export async function handleAdminAction(deps, callerUid, body) {
 
   const action = typeof body?.action === "string" ? body.action : "";
   const uid = typeof body?.uid === "string" ? body.uid : "";
-  if (action !== "listUsers" && action !== "notifyAnnouncement" && !UID_PATTERN.test(uid)) return { status: 400, error: "invalid_uid" };
+  const noUidActions = ["listUsers", "notifyAnnouncement", "renameUserRefs"];
+  if (!noUidActions.includes(action) && !UID_PATTERN.test(uid)) return { status: 400, error: "invalid_uid" };
 
   try {
     switch (action) {
@@ -455,7 +468,10 @@ export async function handleAdminAction(deps, callerUid, body) {
       case "deleteUser": return await adminDeleteUser(deps, callerUid, uid, body.confirmName);
       case "deleteAuthOnly": return await adminDeleteAuthOnly(deps, callerUid, uid);
       case "adjustCoins": return await adminAdjustCoins(deps, callerUid, uid, body);
+      case "previewAssets": return await adminPreviewAssets(deps, uid, body);
+      case "adjustAssets": return await adminAdjustAssets(deps, callerUid, uid, body);
       case "notifyAnnouncement": return await adminNotifyAnnouncement(deps, body);
+      case "renameUserRefs": return await adminRenameUserRefs(deps, body);
       default: return { status: 400, error: "unknown_action" };
     }
   } catch (error) {
@@ -895,6 +911,16 @@ async function adminNotifyAnnouncement(deps, body) {
   return result.status ? result : { ok: true, ...result };
 }
 
+/* 管理者による名前の強制変更のあと、名前が入っているチャット・グループ・友達関係を新しい名前に書き換える。
+   ブラウザからは他人のメッセージ等を書き換えられないので、管理者の操作を受けてサーバーが行う。 */
+async function adminRenameUserRefs(deps, body) {
+  const from = body?.from, to = body?.to;
+  const bad = (v) => typeof v !== "string" || !v || v.length > 100 || v.includes("/");
+  if (bad(from) || bad(to) || from === to) return { status: 400, error: "invalid_rename" };
+  const count = await rewriteNameRefs(deps.firestore, from, to);
+  return { ok: true, count };
+}
+
 /* ----- ゆうコインの増減（管理者） -----
    ・users/{名前} の coins だけを書き換える（銀行・株・馬券などには触れない）
    ・読んだときの更新時刻を条件にして書く（その間にアプリや自動処理がコインを変えていたら、読み直してやり直す）
@@ -971,6 +997,1084 @@ async function adminAdjustCoins(deps, callerUid, uid, body) {
   return { status: 409, error: "busy" };
 }
 
+/* ----- 総資産の増減（管理者。不正に増やされたコインが預金・株に移されていても回収できるようにする） -----
+   総資産 = 手持ちコイン + 銀行預金 + 保有株の評価額（株数 × 今の株価）− 借入残高（アプリ・derby-runner と同じ計算）
+   ・増やす：銀行預金（bank.deposit）に足す。手持ちコイン・株・借入には触れない
+   ・減らす：銀行預金から先に減らし、足りない分は保有株を「評価額の高い銘柄から」回収する。
+     回収した株の代金はコインにも預金にも戻さない（売却ではない）。株は1株単位なので、足りない分を超える株数を回収し、
+     超えた分（1株の株価より少ない）だけを預金に戻す → 総資産の減少は指定した金額とちょうど同じになる
+   ・手持ちコインと借入には触れない（手持ちコインは adjustCoins で別に減らす）。減らしたあとの総資産が 0 より少なくなる減らし方はしない
+   ・預金を減らしたら、利息の対象（interestBase）も預金を超えないようにする（引き出しと同じ）。株の取得額（cost）は株数に比例して減らす（売却と同じ）
+   ・previewAssets：今の内訳と、その金額で何がどれだけ減るか（書き込まない）。adjustAssets：その内容で実行する
+     表示したあとに預金・株・株価が変わっていたら（expected が違う）、何もせずに最新の内訳を返す
+   ・users の書き換え・総資産ランキング（rankings/assets）のその人の行と順位の更新・操作の記録（adminAuditLogs）は、
+     1回のまとめて書き込み（読んだときの更新時刻が条件）。途中でアプリ・自動処理が書き換えていたら読み直してやり直す
+   株の会社と最初の株価は script.js・derby-runner/economy.mjs と同じにすること */
+
+const ASSET_STOCK_INITIAL_PRICES = { YGM: 180, YMT: 240, YFD: 150, YEN: 280, YPY: 210 };
+const ADMIN_ASSET_ADJUST_MAX = 10000000;
+const ADMIN_ASSET_RETRY = 8;
+
+function assetInt(value) {
+  return Math.max(0, Math.floor(Number(value) || 0));
+}
+
+function marketPricesOf(market) {
+  const prices = {};
+  Object.entries(ASSET_STOCK_INITIAL_PRICES).forEach(([code, initial]) => {
+    const price = Number(market?.companies?.[code]?.price);
+    prices[code] = Number.isFinite(price) && price > 0 ? price : initial;
+  });
+  return prices;
+}
+
+/* users の内容（decode 済み）と株価から、総資産の内訳 */
+export function assetBreakdown(data, prices) {
+  const bank = data?.bank && typeof data.bank === "object" ? data.bank : {};
+  const deposit = assetInt(bank.deposit);
+  const loan = assetInt(bank.loan);
+  const coins = Number(data?.coins) || 0;
+  const stocks = Object.entries(data?.stocks && typeof data.stocks === "object" ? data.stocks : {})
+    .map(([code, h]) => {
+      const qty = assetInt(h?.qty);
+      const price = Number(prices[code]) || 0;
+      return { code, qty, cost: Math.max(0, Math.round(Number(h?.cost) || 0)), price, value: qty * price };
+    })
+    .filter((s) => s.qty > 0)
+    .sort((a, b) => (b.value - a.value) || (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+  const stockValue = stocks.reduce((sum, s) => sum + s.value, 0);
+  return { coins, deposit, interestBase: assetInt(bank.interestBase), loan, stocks, stockValue, total: coins + deposit + stockValue - loan };
+}
+
+/* 減らす・増やすときに、何がどれだけ変わるか。足りなければ error */
+export function planAssetAdjustment(breakdown, direction, amount) {
+  if (direction === "increase") {
+    const deposit = breakdown.deposit + amount;
+    return { direction, amount, fromDeposit: -amount, removed: [], change: 0, after: { deposit, interestBase: breakdown.interestBase, stocks: {} }, totalAfter: breakdown.total + amount };
+  }
+  const recoverable = breakdown.deposit + breakdown.stocks.filter((s) => s.price > 0).reduce((sum, s) => sum + s.value, 0);
+  const max = Math.max(0, Math.min(recoverable, breakdown.total));
+  if (amount > max) return { error: "insufficient_assets", max };
+
+  const fromDeposit = Math.min(breakdown.deposit, amount);
+  let rest = amount - fromDeposit;
+  let change = 0;
+  const removed = [];
+  const stocksAfter = {};
+  for (const s of breakdown.stocks) {
+    if (rest <= 0 || s.price <= 0) continue;
+    const qty = s.value <= rest ? s.qty : Math.ceil(rest / s.price);
+    const value = qty * s.price;
+    const costRemoved = Math.round(s.cost * (qty / s.qty));
+    removed.push({ code: s.code, qty, price: s.price, value, costRemoved, qtyBefore: s.qty, qtyAfter: s.qty - qty });
+    stocksAfter[s.code] = s.qty - qty > 0 ? { qty: s.qty - qty, cost: s.cost - costRemoved } : null;
+    if (value > rest) change = value - rest;
+    rest = Math.max(0, rest - value);
+  }
+  if (rest > 0) return { error: "insufficient_assets", max };
+  const deposit = breakdown.deposit - fromDeposit + change;
+  const interestBase = Math.min(breakdown.interestBase, deposit);
+  const totalAfter = breakdown.total - amount;
+  return { direction, amount, fromDeposit, removed, change, after: { deposit, interestBase, stocks: stocksAfter }, totalAfter };
+}
+
+/* 総資産ランキング（rankings/assets）のその人の行を、ランキングの株価で計算し直して並べ直す（derby-runner の buildAssetRanking と同じ並び） */
+export function rerankAssetRanking(rows, name, data, prices) {
+  const index = rows.findIndex((r) => r?.name === name);
+  if (index < 0) return null;
+  const b = assetBreakdown(data, prices);
+  const next = rows.map((r, i) => (i === index ? { ...r, coins: b.coins, deposit: b.deposit, stockValue: b.stockValue, loan: b.loan, total: b.total } : { ...r }));
+  next.sort((a, c) => ((Number(c.total) || 0) - (Number(a.total) || 0)) || (a.name < c.name ? -1 : a.name > c.name ? 1 : 0));
+  let rank = 0, prev = null;
+  next.forEach((r, i) => { const t = Number(r.total) || 0; if (t !== prev) { rank = i + 1; prev = t; } r.rank = rank; });
+  return { rows: next, before: rows[index], after: next.find((r) => r.name === name) };
+}
+
+function sameAssetSnapshot(breakdown, prices, expected) {
+  if (!expected || typeof expected !== "object") return true;
+  if (expected.deposit !== breakdown.deposit) return false;
+  const held = Object.fromEntries(breakdown.stocks.map((s) => [s.code, s.qty]));
+  const exp = expected.stocks && typeof expected.stocks === "object" ? expected.stocks : {};
+  const codes = new Set([...Object.keys(held), ...Object.keys(exp)]);
+  for (const code of codes) if ((held[code] || 0) !== (exp[code] || 0)) return false;
+  const expPrices = expected.prices && typeof expected.prices === "object" ? expected.prices : {};
+  return breakdown.stocks.every((s) => expPrices[s.code] === s.price);
+}
+
+function publicBreakdown(b, prices) {
+  return { coins: b.coins, deposit: b.deposit, loan: b.loan, stockValue: b.stockValue, total: b.total, stocks: b.stocks.map(({ code, qty, price, value }) => ({ code, qty, price, value })), prices };
+}
+
+function validateAssetRequest(body) {
+  const direction = body?.direction;
+  const amount = body?.amount;
+  if (direction !== "increase" && direction !== "decrease") return { status: 400, error: "invalid_direction" };
+  if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount <= 0 || amount > ADMIN_ASSET_ADJUST_MAX) return { status: 400, error: "invalid_amount" };
+  return null;
+}
+
+async function loadAssetTarget(fs, uid) {
+  const docs = await findUserDocsByUid(fs, uid);
+  if (docs.length !== 1) return { error: { status: 409, error: docs.length === 0 ? "user_not_found" : "multiple_user_docs" } };
+  const record = await fs.get(`userDeletions/${uid}`);
+  if (record && record.status !== "completed") return { error: { status: 409, error: "deletion_in_progress" } };
+  return { name: docs[0].id };
+}
+
+async function readAssetState(fs, uid, name) {
+  const [user, market] = await Promise.all([fs.getRaw(`users/${name}`), fs.get("market/current")]);
+  if (!user || user.fields?.uid?.stringValue !== uid) return { error: { status: 409, error: "user_not_found" } };
+  const data = decodeFields(user.fields);
+  if (!Number.isFinite(Number(data.coins))) return { error: { status: 409, error: "invalid_balance" } };
+  const prices = marketPricesOf(market);
+  return { user, data, prices, breakdown: assetBreakdown(data, prices) };
+}
+
+async function adminPreviewAssets(deps, uid, body) {
+  const fs = deps.firestore;
+  const target = await loadAssetTarget(fs, uid);
+  if (target.error) return target.error;
+  const state = await readAssetState(fs, uid, target.name);
+  if (state.error) return state.error;
+  const result = { ok: true, name: target.name, breakdown: publicBreakdown(state.breakdown, state.prices) };
+  if (body?.direction !== undefined || body?.amount !== undefined) {
+    const invalid = validateAssetRequest(body);
+    if (invalid) return invalid;
+    const plan = planAssetAdjustment(state.breakdown, body.direction, body.amount);
+    if (plan.error) return { status: 409, error: plan.error, max: plan.max, breakdown: result.breakdown };
+    result.plan = { direction: plan.direction, amount: plan.amount, fromDeposit: plan.fromDeposit, removed: plan.removed.map(({ code, qty, price, value, qtyBefore, qtyAfter }) => ({ code, qty, price, value, qtyBefore, qtyAfter })), change: plan.change, depositAfter: plan.after.deposit, totalAfter: plan.totalAfter };
+  }
+  return result;
+}
+
+async function adminAdjustAssets(deps, callerUid, uid, body) {
+  const invalid = validateAssetRequest(body);
+  if (invalid) return invalid;
+  const { direction, amount } = body;
+  const fs = deps.firestore;
+  const target = await loadAssetTarget(fs, uid);
+  if (target.error) return target.error;
+  const name = target.name;
+  const callerDocs = await findUserDocsByUid(fs, callerUid);
+  const byName = callerDocs.length === 1 ? callerDocs[0].id : "";
+
+  for (let attempt = 1; attempt <= ADMIN_ASSET_RETRY; attempt++) {
+    const [state, ranking] = await Promise.all([readAssetState(fs, uid, name), fs.getRaw("rankings/assets")]);
+    if (state.error) return state.error;
+    const { user, data, prices, breakdown } = state;
+    if (!sameAssetSnapshot(breakdown, prices, body?.expected)) return { status: 409, error: "assets_changed", breakdown: publicBreakdown(breakdown, prices) };
+    const plan = planAssetAdjustment(breakdown, direction, amount);
+    if (plan.error) return { status: 409, error: plan.error, max: plan.max, breakdown: publicBreakdown(breakdown, prices) };
+
+    /* users：bank.deposit / bank.interestBase と、変わる銘柄の stocks.{code} だけを書く（ほかの項目はそのまま） */
+    const userFields = { bank: { mapValue: { fields: { deposit: { integerValue: String(plan.after.deposit) }, interestBase: { integerValue: String(plan.after.interestBase) } } } } };
+    const fieldPaths = ["bank.deposit", "bank.interestBase"];
+    const stockFields = {};
+    Object.entries(plan.after.stocks).forEach(([code, holding]) => {
+      fieldPaths.push(`stocks.${code}`);
+      if (holding) stockFields[code] = { mapValue: { fields: { qty: { integerValue: String(holding.qty) }, cost: { integerValue: String(holding.cost) } } } };
+    });
+    if (Object.keys(stockFields).length) userFields.stocks = { mapValue: { fields: stockFields } };
+
+    /* 変更後の users の内容（ランキングの計算用） */
+    const afterData = structuredClone(data);
+    afterData.bank = { ...(afterData.bank || {}), deposit: plan.after.deposit, interestBase: plan.after.interestBase };
+    afterData.stocks = { ...(afterData.stocks || {}) };
+    Object.entries(plan.after.stocks).forEach(([code, holding]) => { if (holding) afterData.stocks[code] = holding; else delete afterData.stocks[code]; });
+    const afterBreakdown = assetBreakdown(afterData, prices);
+
+    const writes = [{
+      update: { name: fs.docName(`users/${name}`), fields: userFields },
+      updateMask: { fieldPaths },
+      currentDocument: { updateTime: user.updateTime }
+    }];
+
+    let rankingResult = null;
+    if (ranking) {
+      const rows = decodeValue(ranking.fields?.users) || [];
+      const rankingPrices = ranking.fields?.prices ? decodeValue(ranking.fields.prices) : null;
+      const reranked = Array.isArray(rows) ? rerankAssetRanking(rows, name, afterData, rankingPrices && Object.keys(rankingPrices).length ? rankingPrices : prices) : null;
+      if (reranked) {
+        rankingResult = { rankBefore: reranked.before.rank ?? null, rankAfter: reranked.after.rank, totalBefore: reranked.before.total ?? null, totalAfter: reranked.after.total };
+        writes.push({
+          update: { name: fs.docName("rankings/assets"), fields: { users: encodeValue(reranked.rows) } },
+          updateMask: { fieldPaths: ["users"] },
+          currentDocument: { updateTime: ranking.updateTime }
+        });
+      }
+    }
+
+    const summary = (b) => ({ coins: b.coins, deposit: b.deposit, stockValue: b.stockValue, loan: b.loan, total: b.total });
+    const logId = crypto.randomUUID().replace(/-/g, "");
+    writes.push({
+      update: {
+        name: fs.docName(`adminAuditLogs/${logId}`),
+        fields: encodeFields({
+          action: "adjustAssets", targetUid: uid, targetName: name, direction, amount,
+          delta: direction === "increase" ? amount : -amount,
+          before: summary(breakdown), after: summary(afterBreakdown),
+          beforeTotal: breakdown.total, afterTotal: afterBreakdown.total,
+          fromDeposit: plan.fromDeposit, changeToDeposit: plan.change,
+          removedStocks: plan.removed.map(({ code, qty, price, value, costRemoved, qtyBefore, qtyAfter }) => ({ code, qty, price, value, costRemoved, qtyBefore, qtyAfter })),
+          prices, ranking: rankingResult || { updated: false },
+          byUid: callerUid, byName, result: "ok"
+        })
+      },
+      updateTransforms: [{ fieldPath: "at", setToServerValue: "REQUEST_TIME" }],
+      currentDocument: { exists: false }
+    });
+
+    try {
+      await fs.commit(writes);
+      return {
+        ok: true, name, direction, amount,
+        beforeTotal: breakdown.total, afterTotal: afterBreakdown.total,
+        fromDeposit: plan.fromDeposit, change: plan.change,
+        removed: plan.removed.map(({ code, qty, price, value }) => ({ code, qty, price, value })),
+        breakdown: publicBreakdown(afterBreakdown, prices),
+        ranking: rankingResult
+      };
+    } catch (error) {
+      const retryable = [400, 409].includes(error?.status) && /FAILED_PRECONDITION|ABORTED|does not match|contention|ALREADY_EXISTS/i.test(String(error.message));
+      if (!retryable) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 60 * attempt));
+    }
+  }
+  return { status: 409, error: "busy" };
+}
+
+/* =========================================================
+   💰 ゆう経済・🏇 ゆうダービー（本人の操作をサーバーで検証して行う）
+
+   POST /economy   Authorization: Bearer <Firebase の ID トークン>
+                   { "action": "...", "username": "<自分の名前（省略可）>", ... }
+   ID トークンの uid の users/{名前} だけを書き換える（他人のデータは書き換えない）。
+   残高・株価・締切・オッズ・レース結果・払い戻し額は、ここ（サーバー）で計算・確認する（ブラウザから送られた値は使わない）。
+
+     bankDeposit / bankWithdraw { amount }   預け入れ・引き出し
+     bankBorrow / bankRepay                  緊急融資・返済
+     stockTrade { code, side, qty }          株の売買（株価は market/current）
+     loginBonus                              ログインボーナス（日本時間で1日1回）
+     bonus500                                追加ボーナス（1人1回）
+     placeBet { raceId, type, horses, amount }  馬券の購入（受付中のレース・締切前だけ）
+     ensureRaceResult { raceId }             発走時刻を過ぎたレースの結果を作る（まだ無ければ）
+     settleMyBets { raceId }                 結果の出たレースの、自分の未精算の馬券を精算する
+
+   users の書き換えは、読んだときの更新時刻を条件にしたまとめて書き込み（途中で書き換えられていたら読み直してやり直す）。
+   設定（コインの額・銀行・株・レースの時刻・オッズ）は script.js・derby-odds.js・derby-runner と同じにすること
+========================================================= */
+
+const ECON_START_COINS = 1000;
+const ECON_BONUS_COINS = 500;
+const ECON_LOGIN_BONUS_COINS = 50;
+const ECON_LOAN_AMOUNT = 500;
+const ECON_LOAN_MAX_COINS = 100;
+const ECON_LOAN_DAYS = 7;
+const ECON_MAX_TRADE_QTY = 100000;
+const ECON_MAX_AMOUNT = 100000000;
+const ECON_BET_MIN = 10;
+const ECON_RETRY = 8;
+const DAY_MS = 24 * 3600 * 1000;
+
+/* レースの時刻（script.js・derby-runner と同じ） */
+/* 本番の開催時刻（script.js・derby-runner と同じ）。テストのときだけ env で上書きできる（本番は env を設定しないので常にこの値） */
+let DERBY_RACE_HOUR = 15;
+let DERBY_RACE_MINUTE = 2;
+let DERBY_MORNING_HOUR = 11;
+let DERBY_MORNING_MINUTE = 30;
+const DERBY_MORNING_SUFFIX = "-1130";
+const DERBY_TWICE_DAILY_FROM = "2026-10-07";
+let DERBY_CLOSE_MINUTES_BEFORE = 10;
+
+/* テスト用の開催時刻の上書き（本番の env には無い）。DERBY_RACE_HM="15:2" / DERBY_MORNING_HM="11:30" / DERBY_CLOSE_MIN="0" */
+export function applyDerbyTimeOverrides(env = {}) {
+  const hm = (v) => { const m = /^(\d{1,2}):(\d{1,2})$/.exec(String(v || "")); return m ? [Number(m[1]), Number(m[2])] : null; };
+  const race = hm(env.DERBY_RACE_HM); if (race) { DERBY_RACE_HOUR = race[0]; DERBY_RACE_MINUTE = race[1]; }
+  const morning = hm(env.DERBY_MORNING_HM); if (morning) { DERBY_MORNING_HOUR = morning[0]; DERBY_MORNING_MINUTE = morning[1]; }
+  if (env.DERBY_CLOSE_MIN !== undefined && env.DERBY_CLOSE_MIN !== "") DERBY_CLOSE_MINUTES_BEFORE = Number(env.DERBY_CLOSE_MIN);
+}
+const DERBY_AUTO_RACE_ID = /^(\d{4}-\d{2}-\d{2})(-1130)?$/;
+const DERBY_MANUAL_RACE_ID = /^\d{4}-\d{2}-\d{2}-m\d{4}$/;
+/* レース結果を作ってよいのはサーバー（GitHub Actions の derby-runner と、この Worker）だけ */
+const DERBY_SERVER_GENERATORS = ["github-actions", "worker"];
+/* この日（レースIDの日付）以降のレースは、サーバーが作った結果だけを使う（それ以前のブラウザが作った結果はそのまま）。
+   null のあいだは確かめない（Firestore Rules でブラウザからの書き込みを止めるときに日付を入れる） */
+const DERBY_SERVER_RESULTS_FROM = null;
+
+const ECONOMY_ACTIONS = ["bankDeposit", "bankWithdraw", "bankBorrow", "bankRepay", "stockTrade", "loginBonus", "bonus500", "placeBet", "ensureRaceResult", "settleMyBets", "startingCoins", "renameCarry", "syncNameClaim"];
+const ECON_CARRY_FIELDS = ["coins", "bonus500Granted", "bonus500GrantedAt", "totalBetAmount", "bank", "stocks", "lastLoginBonusDate", "lastAnnouncementReadAt"];
+
+export function jstDateString(ms) {
+  return new Date(ms + JST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+function jstTimeMs(dayId, hour, minute) {
+  const [y, m, d] = dayId.split("-").map(Number);
+  return Date.UTC(y, m - 1, d, hour, minute, 0, 0) - JST_OFFSET_MS;
+}
+
+/* 自動開催の回の発走時刻（ミリ秒）。自動開催の raceId でなければ null */
+export function autoRaceTimeMs(raceId) {
+  const m = DERBY_AUTO_RACE_ID.exec(String(raceId || ""));
+  if (!m) return null;
+  if (m[2]) return m[1] >= DERBY_TWICE_DAILY_FROM ? jstTimeMs(m[1], DERBY_MORNING_HOUR, DERBY_MORNING_MINUTE) : null;
+  return jstTimeMs(m[1], DERBY_RACE_HOUR, DERBY_RACE_MINUTE);
+}
+
+/* いま投票を受け付けている自動開催の回（締切前のいちばん早い回。script.js の getOpenBettingRaceContexts と同じ） */
+export function nextAutoRaceId(nowMs) {
+  const candidates = [];
+  for (const offset of [-1, 0, 1, 2]) {
+    const dayId = jstDateString(nowMs + offset * DAY_MS);
+    if (dayId >= DERBY_TWICE_DAILY_FROM) candidates.push(`${dayId}${DERBY_MORNING_SUFFIX}`);
+    candidates.push(dayId);
+  }
+  return candidates
+    .map((id) => ({ id, closeMs: autoRaceTimeMs(id) - DERBY_CLOSE_MINUTES_BEFORE * 60000 }))
+    .filter((c) => nowMs < c.closeMs)
+    .sort((a, b) => a.closeMs - b.closeMs)[0]?.id || null;
+}
+
+function tsMillis(v) {
+  if (v === null || v === undefined) return NaN;
+  if (typeof v === "number") return v;
+  return Date.parse(v);
+}
+
+/* レースの予定（発走・締切・受付開始）。手動レースは derbyManualRaces/{raceId} を読む。見つからなければ null */
+async function loadRaceSchedule(fs, raceId) {
+  const auto = autoRaceTimeMs(raceId);
+  if (auto !== null) return { raceId, manual: false, raceMs: auto, closeMs: auto - DERBY_CLOSE_MINUTES_BEFORE * 60000 };
+  if (!DERBY_MANUAL_RACE_ID.test(String(raceId || ""))) return null;
+  const raw = await fs.getRaw(`derbyManualRaces/${raceId}`);
+  if (!raw) return null;
+  const data = decodeFields(raw.fields);
+  return {
+    raceId, manual: true, raw, cancelled: data.status === "cancelled",
+    raceMs: tsMillis(data.raceAt), closeMs: tsMillis(data.closeAt), openMs: tsMillis(data.openAt), betCount: Number(data.betCount) || 0
+  };
+}
+
+/* ---------- 固定オッズ（derby-odds.js の oddsVersion 1 と同じ計算。変更禁止） ---------- */
+
+const DERBY_FIXED_ODDS_FROM = "2026-10-09";
+const DERBY_BET_TYPES = ["win", "place", "quinella", "trio", "trifecta"];
+const DERBY_BET_COUNT = { win: 1, place: 1, quinella: 2, trio: 3, trifecta: 3 };
+const DERBY_FIXED_PAYOUT_RULE = "fixed-v1";
+const DERBY_V1 = Object.freeze({
+  horses: Object.freeze([
+    { number: 1, power: 6, fan: 0.5 }, { number: 2, power: 7, fan: 0.4 }, { number: 3, power: 8, fan: 0.5 },
+    { number: 4, power: 5, fan: 0.3 }, { number: 5, power: 9, fan: 0.8 }, { number: 6, power: 4, fan: 0.5 },
+    { number: 7, power: 6, fan: 0.4 }, { number: 8, power: 3, fan: 0.6 }, { number: 9, power: 7, fan: 1.0 },
+    { number: 10, power: 8, fan: 0.6 }
+  ].map(Object.freeze)),
+  returnRate: 0.8, condMin: 0.75, condRange: 0.55, popShade: 0.05, minTenths: 11,
+  capTenths: Object.freeze({ win: 999, place: 999, quinella: 4999, trio: 4999, trifecta: 9999 })
+});
+
+function derbyHash32(text) {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+function derbySeededRandom(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function isFixedOddsRaceId(raceId) {
+  return String(raceId || "").slice(0, 10) >= DERBY_FIXED_ODDS_FROM;
+}
+
+export function derbyRaceParams(raceId) {
+  if (!isFixedOddsRaceId(raceId)) return null;
+  const random = derbySeededRandom(derbyHash32(`v1:${raceId}`));
+  const cond = DERBY_V1.horses.map(() => Math.round((DERBY_V1.condMin + DERBY_V1.condRange * random()) * 100) / 100);
+  const strength = DERBY_V1.horses.map((h, i) => h.power * cond[i]);
+  const maxStrength = Math.max(...strength);
+  const popScore = DERBY_V1.horses.map((h, i) => 0.6 * strength[i] / maxStrength + 0.3 * h.fan + 0.1 * random());
+  const order = DERBY_V1.horses.map((_, i) => i).sort((a, b) => popScore[b] - popScore[a] || a - b);
+  const popRank = new Array(DERBY_V1.horses.length);
+  order.forEach((i, k) => { popRank[i] = k + 1; });
+  return { oddsVersion: 1, cond, popRank };
+}
+
+function derbyToTenths(probability, shade, type) {
+  let tenths = Math.floor(DERBY_V1.returnRate * shade / probability * 10);
+  if (tenths > DERBY_V1.capTenths[type]) tenths = DERBY_V1.capTenths[type];
+  if (tenths < DERBY_V1.minTenths) tenths = DERBY_V1.minTenths;
+  return tenths;
+}
+
+const derbyTableCache = new Map();
+
+export function derbyOddsTable(raceId) {
+  const params = derbyRaceParams(raceId);
+  if (!params) return null;
+  if (derbyTableCache.has(raceId)) return derbyTableCache.get(raceId);
+  const horses = DERBY_V1.horses;
+  const n = horses.length;
+  const strength = horses.map((h, i) => h.power * params.cond[i]);
+  let total = 0;
+  for (let i = 0; i < n; i++) total += strength[i];
+  const shade = params.popRank.map((rank) => 1 - DERBY_V1.popShade * (n - rank) / (n - 1));
+  const table = { oddsVersion: 1, win: {}, place: {}, quinella: {}, trio: {}, trifecta: {} };
+  const placeP = new Array(n).fill(0);
+  const quinellaP = {};
+  const trioP = {};
+  for (let a = 0; a < n; a++) {
+    for (let b = 0; b < n; b++) {
+      if (b === a) continue;
+      for (let c = 0; c < n; c++) {
+        if (c === a || c === b) continue;
+        const p = (strength[a] / total) * (strength[b] / (total - strength[a])) * (strength[c] / (total - strength[a] - strength[b]));
+        table.trifecta[`${horses[a].number}-${horses[b].number}-${horses[c].number}`] = derbyToTenths(p, (shade[a] + shade[b] + shade[c]) / 3, "trifecta");
+        placeP[a] += p; placeP[b] += p; placeP[c] += p;
+        const [q1, q2] = a < b ? [a, b] : [b, a];
+        const qKey = `${horses[q1].number}-${horses[q2].number}`;
+        quinellaP[qKey] = (quinellaP[qKey] || 0) + p;
+        const [t1, t2, t3] = [a, b, c].sort((x, y) => x - y);
+        const tKey = `${horses[t1].number}-${horses[t2].number}-${horses[t3].number}`;
+        trioP[tKey] = (trioP[tKey] || 0) + p;
+      }
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    table.win[horses[i].number] = derbyToTenths(strength[i] / total, shade[i], "win");
+    table.place[horses[i].number] = derbyToTenths(placeP[i], shade[i], "place");
+  }
+  const indexOf = (num) => horses.findIndex((h) => h.number === num);
+  for (const [key, p] of Object.entries(quinellaP)) {
+    const [x, y] = key.split("-").map(Number).map(indexOf);
+    table.quinella[key] = derbyToTenths(p, (shade[x] + shade[y]) / 2, "quinella");
+  }
+  for (const [key, p] of Object.entries(trioP)) {
+    const [x, y, z] = key.split("-").map(Number).map(indexOf);
+    table.trio[key] = derbyToTenths(p, (shade[x] + shade[y] + shade[z]) / 3, "trio");
+  }
+  if (derbyTableCache.size > 50) derbyTableCache.clear();
+  derbyTableCache.set(raceId, table);
+  return table;
+}
+
+export function derbyTicketOddsTenths(table, type, horses) {
+  if (!table || !Array.isArray(horses)) return null;
+  const h = horses.map(Number);
+  if (type === "win" || type === "place") return h.length === 1 ? table[type][h[0]] ?? null : null;
+  if (type === "quinella") return h.length === 2 ? table.quinella[[...h].sort((x, y) => x - y).join("-")] ?? null : null;
+  if (type === "trio") return h.length === 3 ? table.trio[[...h].sort((x, y) => x - y).join("-")] ?? null : null;
+  if (type === "trifecta") return h.length === 3 ? table.trifecta[h.join("-")] ?? null : null;
+  return null;
+}
+
+export function derbyFixedPayout(amount, oddsTenths) {
+  const a = Math.floor(Number(amount) || 0);
+  const t = Math.floor(Number(oddsTenths) || 0);
+  if (a <= 0 || t <= 0) return 0;
+  return Math.floor((a * t) / 10);
+}
+
+export function derbyRaceOddsRecord(raceId) {
+  const params = derbyRaceParams(raceId);
+  if (!params) return {};
+  const table = derbyOddsTable(raceId);
+  const numbers = DERBY_V1.horses.map((h) => h.number);
+  return { oddsVersion: 1, oddsCond: params.cond, oddsPopRank: params.popRank, oddsWinTenths: numbers.map((n) => table.win[n]), oddsPlaceTenths: numbers.map((n) => table.place[n]) };
+}
+
+export function derbyRaceOrder(raceId, random = Math.random) {
+  const params = derbyRaceParams(raceId);
+  if (!params) return null;
+  const keyed = DERBY_V1.horses.map((h, i) => ({ number: h.number, key: Math.pow(random(), 1 / (h.power * params.cond[i])) }));
+  keyed.sort((a, b) => b.key - a.key);
+  return keyed.map((h) => h.number);
+}
+
+/* 的中判定（script.js・derby-runner と同じ） */
+export function derbyBetWins(bet, order) {
+  const [top1, top2, top3] = order;
+  const top3set = [top1, top2, top3];
+  const horses = bet.horses || [];
+  if (bet.type === "win") return horses[0] === top1;
+  if (bet.type === "place") return top3set.includes(horses[0]);
+  if (bet.type === "quinella") {
+    if (horses.length !== 2) return false;
+    const a = [...horses].sort((x, y) => x - y), b = [top1, top2].sort((x, y) => x - y);
+    return a[0] === b[0] && a[1] === b[1];
+  }
+  if (bet.type === "trio") {
+    if (horses.length !== 3) return false;
+    const a = [...horses].sort((x, y) => x - y), b = [...top3set].sort((x, y) => x - y);
+    return a.every((n, i) => n === b[i]);
+  }
+  if (bet.type === "trifecta") return horses.length === 3 && horses[0] === top1 && horses[1] === top2 && horses[2] === top3;
+  return false;
+}
+
+/* 馬券の中身が正しいか（券種・馬の数・馬番号・重複・金額） */
+export function validBetShape(type, horses, amount) {
+  if (!DERBY_BET_TYPES.includes(type)) return "invalid_bet_type";
+  if (!Array.isArray(horses) || horses.length !== DERBY_BET_COUNT[type]) return "invalid_horses";
+  if (!horses.every((h) => Number.isInteger(h) && h >= 1 && h <= 10) || new Set(horses).size !== horses.length) return "invalid_horses";
+  if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount < ECON_BET_MIN || amount > ECON_MAX_AMOUNT) return "invalid_amount";
+  return null;
+}
+
+/* ---------- レースの演出用データ（derby-runner の buildRaceCheckpoints・buildFinishStats と同じ） ---------- */
+
+const DERBY_SEGMENTS = 48;
+const DERBY_STYLES = { 1: "start", 2: "front", 3: "mid", 4: "closer", 5: "stamina", 6: "front", 7: "stamina", 8: "longshot", 9: "front", 10: "closer" };
+
+function derbyStyleMultiplier(style, frac, random) {
+  switch (style) {
+    case "start": return frac < 0.3 ? 1.5 : (frac < 0.7 ? 1.0 : 0.7);
+    case "front": return frac < 0.5 ? 1.25 : 0.9;
+    case "mid": return frac < 0.3 ? 0.8 : (frac < 0.75 ? 1.2 : 1.1);
+    case "closer": return frac < 0.6 ? 0.65 : 1.6;
+    case "stamina": return 1.0;
+    case "longshot": return 0.5 + random() * 1.3;
+    default: return 1.0;
+  }
+}
+
+export function derbyCheckpoints(order, random = Math.random) {
+  const numbers = Object.keys(DERBY_STYLES).map(Number);
+  const gapStep = 0.015 + random() * 0.025;
+  const finalProgress = {};
+  order.forEach((n, rank) => { finalProgress[n] = Math.max(0.7, 1 - rank * gapStep); });
+  finalProgress[order[0]] = 1;
+  const weights = {};
+  numbers.forEach((n) => { weights[n] = Array.from({ length: DERBY_SEGMENTS }, (_, s) => derbyStyleMultiplier(DERBY_STYLES[n], s / DERBY_SEGMENTS, random) * (0.3 + random())); });
+  numbers.forEach((n) => { const total = weights[n].reduce((a, b) => a + b, 0); const scale = finalProgress[n] / total; weights[n] = weights[n].map((w) => w * scale); });
+  const cumulative = Object.fromEntries(numbers.map((n) => [n, 0]));
+  const frames = [];
+  for (let s = 0; s < DERBY_SEGMENTS; s++) {
+    const frame = {};
+    numbers.forEach((n) => { cumulative[n] += weights[n][s]; frame[n] = Math.min(1, Number(cumulative[n].toFixed(4))); });
+    frames.push(frame);
+  }
+  return frames;
+}
+
+function derbyTimeText(totalSeconds) {
+  const m = Math.floor(totalSeconds / 60);
+  return `${m}:${(totalSeconds - m * 60).toFixed(1).padStart(4, "0")}`;
+}
+
+function derbyMargin(gap) {
+  if (gap < 0.05) return "ハナ";
+  if (gap < 0.12) return "アタマ";
+  if (gap < 0.2) return "クビ";
+  if (gap < 0.35) return "1/2馬身";
+  if (gap < 0.55) return "3/4馬身";
+  if (gap < 0.8) return "1馬身";
+  if (gap < 1.2) return "1馬身1/2";
+  if (gap < 1.8) return "2馬身";
+  return `${Math.round(gap / 0.8)}馬身`;
+}
+
+export function derbyFinishStats(order, random = Math.random) {
+  let seconds = 116 + random() * 10;
+  const stats = [{ number: order[0], seconds, gap: 0 }];
+  for (let i = 1; i < order.length; i++) { const gap = 0.05 + random() * 0.55; seconds += gap; stats.push({ number: order[i], seconds, gap }); }
+  return stats.map((s, i) => ({ number: s.number, timeText: derbyTimeText(s.seconds), marginText: i === 0 ? "" : derbyMargin(s.gap) }));
+}
+
+/* サーバーが作った結果か（DERBY_SERVER_RESULTS_FROM 以降のレースだけ確かめる） */
+export function isTrustedRaceResult(raceId, race, serverResultsFrom = DERBY_SERVER_RESULTS_FROM) {
+  if (!race || !Array.isArray(race.resultOrder) || race.resultOrder.length !== 10) return false;
+  if (!serverResultsFrom || String(raceId).slice(0, 10) < serverResultsFrom) return true;
+  return DERBY_SERVER_GENERATORS.includes(race.generatedBy);
+}
+
+/* ---------- users の読み書き ---------- */
+
+function econError(status, error, extra = {}) {
+  return { status, error, ...extra };
+}
+
+async function loadMyUser(fs, uid, preferredName) {
+  if (typeof preferredName === "string" && preferredName && preferredName.length <= 100 && !preferredName.includes("/")) {
+    const raw = await fs.getRaw(`users/${preferredName}`);
+    if (raw && raw.fields?.uid?.stringValue === uid) return { name: preferredName, raw };
+  }
+  const docs = await findUserDocsByUid(fs, uid);
+  if (docs.length !== 1) return { error: econError(409, docs.length === 0 ? "NO_USER" : "multiple_user_docs") };
+  const raw = await fs.getRaw(`users/${docs[0].id}`);
+  if (!raw || raw.fields?.uid?.stringValue !== uid) return { error: econError(409, "NO_USER") };
+  return { name: docs[0].id, raw };
+}
+
+const restInt = (n) => ({ integerValue: String(n) });
+const restTime = (ms) => ({ timestampValue: new Date(ms).toISOString() });
+const restNull = () => ({ nullValue: null });
+
+/* bank の map を、今の値（型を保ったまま）に変更を重ねて作る */
+function bankWith(rawFields, changes) {
+  const fields = structuredClone(rawFields?.bank?.mapValue?.fields || {});
+  Object.entries(changes).forEach(([k, v]) => { fields[k] = v; });
+  return { mapValue: { fields } };
+}
+
+function econBank(data) {
+  const b = data?.bank && typeof data.bank === "object" ? data.bank : {};
+  const int = (v) => Math.max(0, Math.floor(Number(v) || 0));
+  return { deposit: int(b.deposit), interestBase: int(b.interestBase), loan: int(b.loan) };
+}
+
+function isRetryableCommitError(error) {
+  return [400, 409].includes(error?.status) && /FAILED_PRECONDITION|ABORTED|does not match|contention|ALREADY_EXISTS/i.test(String(error.message));
+}
+
+/* 自分の users を読み、plan（変更内容の計算）を作ってまとめて書く。途中で書き換えられていたらやり直す */
+async function runMyUserChange(deps, uid, preferredName, plan) {
+  const fs = deps.firestore;
+  for (let attempt = 1; attempt <= ECON_RETRY; attempt++) {
+    const me = await loadMyUser(fs, uid, preferredName);
+    if (me.error) return me.error;
+    const data = decodeFields(me.raw.fields);
+    if (typeof data.coins !== "number" || !Number.isSafeInteger(data.coins)) return econError(409, "invalid_balance");
+    const step = await plan({ name: me.name, raw: me.raw, data, now: deps.now() });
+    if (step.error) return step;
+    if (!step.userFields && !(step.writes || []).length) return { ok: true, ...step.result };
+    const writes = [];
+    if (step.userFields) {
+      writes.push({
+        update: { name: fs.docName(`users/${me.name}`), fields: step.userFields },
+        updateMask: { fieldPaths: step.fieldPaths || Object.keys(step.userFields) },
+        ...(step.userTransforms ? { updateTransforms: step.userTransforms } : {}),
+        currentDocument: { updateTime: me.raw.updateTime }
+      });
+    }
+    writes.push(...(step.writes || []));
+    try {
+      await fs.commit(writes);
+      return { ok: true, ...step.result };
+    } catch (error) {
+      if (!isRetryableCommitError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 60 * attempt));
+    }
+  }
+  return econError(409, "busy");
+}
+
+function parsePositiveAmount(value, max = ECON_MAX_AMOUNT) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= max ? value : null;
+}
+
+/* ---------- 各操作 ---------- */
+
+export async function handleEconomyAction(deps, uid, body) {
+  const action = typeof body?.action === "string" ? body.action : "";
+  if (!ECONOMY_ACTIONS.includes(action)) return econError(400, "unknown_action");
+  const name = body?.username;
+  try {
+    switch (action) {
+      case "bankDeposit": return await econBankDeposit(deps, uid, name, body.amount);
+      case "bankWithdraw": return await econBankWithdraw(deps, uid, name, body.amount);
+      case "bankBorrow": return await econBankBorrow(deps, uid, name);
+      case "bankRepay": return await econBankRepay(deps, uid, name);
+      case "stockTrade": return await econStockTrade(deps, uid, name, body);
+      case "loginBonus": return await econLoginBonus(deps, uid, name);
+      case "bonus500": return await econBonus500(deps, uid, name);
+      case "placeBet": return await econPlaceBet(deps, uid, name, body);
+      case "ensureRaceResult": return await econEnsureRaceResult(deps, body?.raceId);
+      case "settleMyBets": return await econSettleMyBets(deps, uid, name, body?.raceId);
+      case "startingCoins": return await econStartingCoins(deps, uid, name);
+      case "renameCarry": return await econRenameCarry(deps, uid, body);
+      case "syncNameClaim": return await econSyncNameClaim(deps, uid, name);
+      default: return econError(400, "unknown_action");
+    }
+  } catch (error) {
+    console.error("economy error", action, String(error?.message || error).slice(0, 300));
+    return econError(500, "internal_error");
+  }
+}
+
+/* 名前クレームの同期：ログイン中のユーザーのユーザー名（本人が所有する users/{名前}）を
+   Firebase Authentication のカスタムクレーム name に入れる。Firestore Rules はこの name で
+   「チャット・グループの当事者」を判定する。ほかのカスタムクレームは消さずに残す。
+   すでに同じ名前なら何もしない（トークンの作り直しを無駄に促さない）。 */
+async function setNameClaim(deps, uid, name) {
+  const existing = await deps.authAdmin.lookup(uid);
+  let claims = {};
+  try { claims = existing?.customAttributes ? JSON.parse(existing.customAttributes) : {}; } catch { claims = {}; }
+  if (claims.name === name) return false;
+  claims.name = name;
+  await deps.authAdmin.update(uid, { customAttributes: JSON.stringify(claims) });
+  return true;
+}
+
+async function econSyncNameClaim(deps, uid, name) {
+  const me = await loadMyUser(deps.firestore, uid, name);
+  if (me.error) return me.error;
+  const changed = await setNameClaim(deps, uid, me.name);
+  // changed が true のとき、アプリ側はトークンを再取得（getIdToken(true)）してから購読を始める
+  return { ok: true, name: me.name, changed };
+}
+
+/* 初期コイン（1000）：コインがまだ無いときだけ付ける（アプリが users を作った直後に呼ぶ） */
+async function econStartingCoins(deps, uid, name) {
+  const fs = deps.firestore;
+  const me = await loadMyUser(fs, uid, name);
+  if (me.error) return me.error;
+  const data = decodeFields(me.raw.fields);
+  if (typeof data.coins === "number") return { ok: true, granted: false, coins: data.coins };
+  try {
+    await fs.commit([{
+      update: { name: fs.docName(`users/${me.name}`), fields: { coins: restInt(ECON_START_COINS) } },
+      updateMask: { fieldPaths: ["coins"] },
+      currentDocument: { updateTime: me.raw.updateTime }
+    }]);
+    return { ok: true, granted: true, coins: ECON_START_COINS };
+  } catch (error) {
+    if (isRetryableCommitError(error)) return { ok: true, granted: false };
+    throw error;
+  }
+}
+
+/* 名前変更のときの経済項目の引き継ぎ：from・to がどちらも自分（uid が一致）のとき、
+   from の経済項目（コイン・銀行・株・累計賭け金・ボーナス・お知らせ既読）を to にコピーして、from を消す。
+   ブラウザは経済項目を書けないので、この引き継ぎだけサーバーが行う（新しい名前で初期コインが二重に付かないように） */
+async function econRenameCarry(deps, uid, body) {
+  const from = body?.from;
+  const to = body?.to;
+  const bad = (v) => typeof v !== "string" || !v || v.length > 100 || v.includes("/");
+  if (bad(from) || bad(to) || from === to) return econError(400, "invalid_rename");
+  const fs = deps.firestore;
+  for (let attempt = 1; attempt <= ECON_RETRY; attempt++) {
+    const [fromRaw, toRaw] = await Promise.all([fs.getRaw(`users/${from}`), fs.getRaw(`users/${to}`)]);
+    if (!toRaw || toRaw.fields?.uid?.stringValue !== uid) return econError(409, "rename_to_not_mine");
+    // 名前が変わったので、トークンの名前クレームも新しい名前（to）に合わせる（チャットの本人確認用）
+    if (!fromRaw) { await setNameClaim(deps, uid, to); return { ok: true, carried: false }; }
+    if (fromRaw.fields?.uid?.stringValue !== uid) return econError(409, "rename_from_not_mine");
+    const carry = {};
+    ECON_CARRY_FIELDS.forEach((f) => { if (f in fromRaw.fields) carry[f] = structuredClone(fromRaw.fields[f]); });
+    try {
+      await fs.commit([
+        { update: { name: fs.docName(`users/${to}`), fields: carry }, updateMask: { fieldPaths: ECON_CARRY_FIELDS }, currentDocument: { updateTime: toRaw.updateTime } },
+        { delete: fs.docName(`users/${from}`), currentDocument: { updateTime: fromRaw.updateTime } }
+      ]);
+      await setNameClaim(deps, uid, to);
+      // 名前が入っているチャット・グループ・友達関係を新しい名前に書き換える（from は本人であることを上で確認済み）。
+      // ブラウザは他人のメッセージ等を書き換えられないので、この引き継ぎはサーバーが行う。失敗しても引き継ぎ自体は成功扱いにする
+      let refs = 0;
+      try { refs = await rewriteNameRefs(fs, from, to); } catch (error) { console.error("rename refs rewrite failed", String(error?.message || error).slice(0, 200)); }
+      return { ok: true, carried: true, refs };
+    } catch (error) {
+      if (!isRetryableCommitError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 60 * attempt));
+    }
+  }
+  return econError(409, "busy");
+}
+
+/* 名前（ユーザー名）が入っているデータを古い名前から新しい名前に一括で書き換える（サービスアカウント）。
+   対象：messages（sender・receiver）／groups（owner・members 配列）／friends（user1・user2・requestedBy・acceptedBy）。
+   呼び出し元で「from が本人（または管理者）」であることを必ず確かめてから使うこと。1回の書き込みは 400 件ずつ。 */
+async function rewriteNameRefs(fs, from, to) {
+  const byPath = new Map(); // path -> { fields, mask:Set }
+  const stage = (path, field, value) => {
+    const e = byPath.get(path) || { fields: {}, mask: new Set() };
+    e.fields[field] = value; e.mask.add(field); byPath.set(path, e);
+  };
+  for (const field of ["sender", "receiver"]) {
+    for (const d of await fs.query("messages", [[field, "EQUAL", from]], { select: [field] })) stage(`messages/${d.id}`, field, to);
+  }
+  for (const d of await fs.query("groups", [["owner", "EQUAL", from]], { select: ["owner"] })) stage(`groups/${d.id}`, "owner", to);
+  for (const d of await fs.query("groups", [["members", "ARRAY_CONTAINS", from]], { select: ["members"] })) {
+    const members = (Array.isArray(d.data?.members) ? d.data.members : []).map((m) => (m === from ? to : m));
+    stage(`groups/${d.id}`, "members", members);
+  }
+  for (const field of ["user1", "user2", "requestedBy", "acceptedBy"]) {
+    for (const d of await fs.query("friends", [[field, "EQUAL", from]], { select: [field] })) stage(`friends/${d.id}`, field, to);
+  }
+  const writes = [...byPath.entries()].map(([path, e]) => ({
+    update: { name: fs.docName(path), fields: encodeFields(e.fields) },
+    updateMask: { fieldPaths: [...e.mask] }
+  }));
+  for (let i = 0; i < writes.length; i += 400) await fs.commit(writes.slice(i, i + 400));
+  return writes.length;
+}
+
+async function econBankDeposit(deps, uid, name, amountIn) {
+  const amount = parsePositiveAmount(amountIn);
+  if (!amount) return econError(400, "invalid_amount");
+  return runMyUserChange(deps, uid, name, ({ raw, data }) => {
+    const bank = econBank(data);
+    if (bank.loan > 0) return econError(409, "LOAN_ACTIVE");
+    if (data.coins < amount) return econError(409, "NOT_ENOUGH_COINS");
+    return { userFields: { coins: restInt(data.coins - amount), bank: bankWith(raw.fields, { deposit: restInt(bank.deposit + amount) }) }, result: { coins: data.coins - amount, deposit: bank.deposit + amount } };
+  });
+}
+
+async function econBankWithdraw(deps, uid, name, amountIn) {
+  const amount = parsePositiveAmount(amountIn);
+  if (!amount) return econError(400, "invalid_amount");
+  return runMyUserChange(deps, uid, name, ({ raw, data }) => {
+    const bank = econBank(data);
+    if (bank.deposit < amount) return econError(409, "NOT_ENOUGH_DEPOSIT");
+    const deposit = bank.deposit - amount;
+    return { userFields: { coins: restInt(data.coins + amount), bank: bankWith(raw.fields, { deposit: restInt(deposit), interestBase: restInt(Math.min(bank.interestBase, deposit)) }) }, result: { coins: data.coins + amount, deposit } };
+  });
+}
+
+async function econBankBorrow(deps, uid, name) {
+  return runMyUserChange(deps, uid, name, ({ raw, data, now }) => {
+    const bank = econBank(data);
+    if (bank.loan > 0) return econError(409, "LOAN_ACTIVE");
+    if (data.coins > ECON_LOAN_MAX_COINS) return econError(409, "TOO_MANY_COINS");
+    return {
+      userFields: {
+        coins: restInt(data.coins + ECON_LOAN_AMOUNT),
+        bank: bankWith(raw.fields, { loan: restInt(ECON_LOAN_AMOUNT), loanTakenAt: restTime(now), loanDueAt: restTime(now + ECON_LOAN_DAYS * DAY_MS), overdue: { booleanValue: false }, overdueDate: restNull(), lastAutoRepay: restNull() })
+      },
+      result: { coins: data.coins + ECON_LOAN_AMOUNT, loan: ECON_LOAN_AMOUNT }
+    };
+  });
+}
+
+async function econBankRepay(deps, uid, name) {
+  return runMyUserChange(deps, uid, name, ({ raw, data }) => {
+    const bank = econBank(data);
+    if (bank.loan <= 0) return econError(409, "NO_LOAN");
+    if (data.coins < bank.loan) return econError(409, "NOT_ENOUGH_COINS");
+    return {
+      userFields: {
+        coins: restInt(data.coins - bank.loan),
+        bank: bankWith(raw.fields, { loan: restInt(0), loanTakenAt: restNull(), loanDueAt: restNull(), overdue: { booleanValue: false }, overdueDate: restNull(), lastAutoRepay: restNull() })
+      },
+      result: { coins: data.coins - bank.loan, repaid: bank.loan }
+    };
+  });
+}
+
+async function econStockTrade(deps, uid, name, body) {
+  const code = body?.code;
+  const side = body?.side;
+  const qty = parsePositiveAmount(body?.qty, ECON_MAX_TRADE_QTY);
+  if (!Object.prototype.hasOwnProperty.call(ASSET_STOCK_INITIAL_PRICES, code)) return econError(400, "NO_COMPANY");
+  if (side !== "buy" && side !== "sell") return econError(400, "invalid_side");
+  if (!qty) return econError(400, "invalid_qty");
+  const market = await deps.firestore.get("market/current");
+  const price = marketPricesOf(market)[code];
+  return runMyUserChange(deps, uid, name, ({ data }) => {
+    const h = data.stocks?.[code] || {};
+    const holding = { qty: Math.max(0, Math.floor(Number(h.qty) || 0)), cost: Math.max(0, Math.round(Number(h.cost) || 0)) };
+    const amount = price * qty;
+    let next, coins;
+    if (side === "buy") {
+      if (data.coins < amount) return econError(409, "NOT_ENOUGH_COINS");
+      next = { qty: holding.qty + qty, cost: holding.cost + amount };
+      coins = data.coins - amount;
+    } else {
+      if (holding.qty < qty) return econError(409, "NOT_ENOUGH_STOCK");
+      const costPart = Math.round(holding.cost * (qty / holding.qty));
+      next = { qty: holding.qty - qty, cost: holding.cost - costPart };
+      coins = data.coins + amount;
+    }
+    const userFields = { coins: restInt(coins) };
+    if (next.qty > 0) userFields.stocks = { mapValue: { fields: { [code]: { mapValue: { fields: { qty: restInt(next.qty), cost: restInt(next.cost) } } } } } };
+    return { userFields, fieldPaths: ["coins", `stocks.${code}`], result: { coins, price, amount, qty: next.qty, marketDate: market?.date || "" } };
+  });
+}
+
+async function econLoginBonus(deps, uid, name) {
+  return runMyUserChange(deps, uid, name, ({ data, now }) => {
+    const today = jstDateString(now);
+    if (data.lastLoginBonusDate === today) return { result: { granted: false, today } };
+    return { userFields: { coins: restInt(data.coins + ECON_LOGIN_BONUS_COINS), lastLoginBonusDate: { stringValue: today } }, result: { granted: true, amount: ECON_LOGIN_BONUS_COINS, today } };
+  });
+}
+
+async function econBonus500(deps, uid, name) {
+  return runMyUserChange(deps, uid, name, ({ data, now }) => {
+    if (data.bonus500Granted === true) return { result: { granted: false } };
+    return { userFields: { coins: restInt(data.coins + ECON_BONUS_COINS), bonus500Granted: { booleanValue: true }, bonus500GrantedAt: restTime(now) }, result: { granted: true, amount: ECON_BONUS_COINS } };
+  });
+}
+
+/* 馬券の購入：受付中のレース（自動開催は締切前のいちばん早い回、手動レースは受付時間内）だけ。
+   コインの引き落とし・累計賭け金・馬券の作成（・手動レースの投票数）を1回のまとめて書き込みで行う */
+async function econPlaceBet(deps, uid, name, body) {
+  const { raceId, type, horses, amount } = body || {};
+  if (typeof raceId !== "string" || raceId.length > 40) return econError(400, "invalid_race");
+  const shapeError = validBetShape(type, horses, amount);
+  if (shapeError) return econError(400, shapeError);
+  if (!isFixedOddsRaceId(raceId)) return econError(409, "RACE_CLOSED");
+  const fs = deps.firestore;
+  for (let attempt = 1; attempt <= ECON_RETRY; attempt++) {
+    const now = deps.now();
+    const schedule = await loadRaceSchedule(fs, raceId);
+    if (!schedule) return econError(409, "RACE_CLOSED");
+    if (schedule.manual) {
+      if (schedule.cancelled) return econError(409, "MANUAL_RACE_CANCELLED");
+      if (!(now >= schedule.openMs && now < schedule.closeMs)) return econError(409, "MANUAL_RACE_CLOSED");
+    } else if (nextAutoRaceId(now) !== raceId) {
+      return econError(409, "RACE_CLOSED");
+    }
+    const me = await loadMyUser(fs, uid, name);
+    if (me.error) return me.error;
+    const data = decodeFields(me.raw.fields);
+    if (typeof data.coins !== "number" || !Number.isSafeInteger(data.coins)) return econError(409, "invalid_balance");
+    if (data.coins < amount) return econError(409, "NOT_ENOUGH_COINS");
+
+    const oddsTenths = derbyTicketOddsTenths(derbyOddsTable(raceId), type, horses);
+    const betId = crypto.randomUUID().replace(/-/g, "").slice(0, 20);
+    const total = Number(data.totalBetAmount) || 0;
+    const writes = [
+      {
+        update: { name: fs.docName(`users/${me.name}`), fields: { coins: restInt(data.coins - amount), totalBetAmount: restInt(total + amount) } },
+        updateMask: { fieldPaths: ["coins", "totalBetAmount"] },
+        currentDocument: { updateTime: me.raw.updateTime }
+      },
+      {
+        update: {
+          name: fs.docName(`raceBets/${betId}`),
+          fields: encodeFields({ raceId, uid, username: me.name, type, horses, amount, settled: false, win: null, payout: null, oddsVersion: 1, oddsTenths, placedBy: "worker" })
+        },
+        updateTransforms: [{ fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }],
+        currentDocument: { exists: false }
+      }
+    ];
+    if (schedule.manual) {
+      writes.push({
+        update: { name: fs.docName(`derbyManualRaces/${raceId}`), fields: { betCount: restInt(schedule.betCount + 1) } },
+        updateMask: { fieldPaths: ["betCount"] },
+        currentDocument: { updateTime: schedule.raw.updateTime }
+      });
+    }
+    try {
+      await fs.commit(writes);
+      return { ok: true, betId, raceId, coins: data.coins - amount, oddsTenths };
+    } catch (error) {
+      if (!isRetryableCommitError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 60 * attempt));
+    }
+  }
+  return econError(409, "busy");
+}
+
+/* 発走時刻を過ぎたレースの結果を作る（まだ無いとき。サーバーが作ったものでない結果は、確かめる日付以降なら作り直す） */
+async function econEnsureRaceResult(deps, raceId) {
+  if (typeof raceId !== "string" || !isFixedOddsRaceId(raceId)) return econError(400, "invalid_race");
+  const fs = deps.firestore;
+  const schedule = await loadRaceSchedule(fs, raceId);
+  if (!schedule || schedule.cancelled) return econError(409, "invalid_race");
+  if (!(deps.now() >= schedule.raceMs)) return econError(409, "race_not_started");
+  const existing = await fs.getRaw(`races/${raceId}`);
+  if (existing && isTrustedRaceResult(raceId, decodeFields(existing.fields))) return { ok: true, created: false };
+
+  const random = deps.random || Math.random;
+  const order = derbyRaceOrder(raceId, random);
+  const race = { raceId, resultOrder: order, checkpoints: derbyCheckpoints(order, random), finishStats: derbyFinishStats(order, random), status: "finished", generatedBy: "worker", ...derbyRaceOddsRecord(raceId) };
+  const logFields = { raceId, scheduledAt: new Date(schedule.raceMs), resultGeneratedBy: "worker", resultStatus: existing ? "regenerated" : "created" };
+  try {
+    await fs.commit([
+      {
+        update: { name: fs.docName(`races/${raceId}`), fields: encodeFields(race) },
+        updateTransforms: [{ fieldPath: "generatedAt", setToServerValue: "REQUEST_TIME" }],
+        currentDocument: existing ? { updateTime: existing.updateTime } : { exists: false }
+      },
+      {
+        update: { name: fs.docName(`raceLogs/${raceId}`), fields: encodeFields(logFields) },
+        updateMask: { fieldPaths: Object.keys(logFields) },
+        updateTransforms: [{ fieldPath: "resultGeneratedAt", setToServerValue: "REQUEST_TIME" }]
+      }
+    ]);
+    return { ok: true, created: true };
+  } catch (error) {
+    if (isRetryableCommitError(error)) return { ok: true, created: false };
+    throw error;
+  }
+}
+
+/* 精算してよい馬券か（締切までに買われた・中身が正しい） */
+export function betRejectReason(bet, closeMs, serverResultsFrom = DERBY_SERVER_RESULTS_FROM) {
+  if (validBetShape(bet.type, bet.horses, bet.amount)) return "invalid_bet";
+  const created = tsMillis(bet.createdAt);
+  if (!Number.isFinite(created) || !Number.isFinite(closeMs) || created > closeMs) return "after_close";
+  if (serverResultsFrom && String(bet.raceId).slice(0, 10) >= serverResultsFrom && bet.placedBy !== "worker") return "not_server_placed";
+  return null;
+}
+
+/* 結果の出たレースの、自分の未精算の馬券を精算する（払い戻しはサーバーでレースIDのオッズから計算） */
+/* 山分け方式（固定オッズより前のレース）の払い戻し：同じ券種の賭け金の合計 × 0.8 を、当たった人で賭け金に応じて分ける */
+function derbyPoolPayouts(allBets, order) {
+  const pools = {};
+  allBets.forEach((b) => {
+    const amount = Math.max(0, Math.floor(Number(b.amount) || 0));
+    if (!pools[b.type]) pools[b.type] = { total: 0, winning: 0 };
+    pools[b.type].total += amount;
+    if (derbyBetWins(b, order)) pools[b.type].winning += amount;
+  });
+  const out = {};
+  allBets.forEach((b) => {
+    const pool = pools[b.type];
+    const win = derbyBetWins(b, order);
+    out[b.id] = { win, payout: win && pool.winning > 0 ? Math.floor((Number(b.amount) || 0) / pool.winning * pool.total * 0.8) : 0 };
+  });
+  return out;
+}
+
+async function econSettleMyBets(deps, uid, name, raceId) {
+  if (typeof raceId !== "string" || raceId.length > 40 || !/^\d{4}-\d{2}-\d{2}/.test(raceId)) return econError(400, "invalid_race");
+  const fs = deps.firestore;
+  const fixed = isFixedOddsRaceId(raceId);
+  const [schedule, race] = await Promise.all([loadRaceSchedule(fs, raceId), fs.get(`races/${raceId}`)]);
+  if (fixed && !schedule) return econError(409, "invalid_race");
+  if (!race || !isTrustedRaceResult(raceId, race)) return econError(409, "no_result");
+  const me = await loadMyUser(fs, uid, name);
+  if (me.error) return me.error;
+  const bets = await fs.query("raceBets", [["raceId", "EQUAL", raceId], ["uid", "EQUAL", uid], ["settled", "EQUAL", false]]);
+  const table = fixed ? derbyOddsTable(raceId) : null;
+  /* 山分け方式は、そのレースの全馬券（賭け金の合計）が払い戻しの計算に要る */
+  const poolPayouts = fixed ? null : derbyPoolPayouts((await fs.query("raceBets", [["raceId", "EQUAL", raceId]])).map((b) => ({ id: b.id, ...b.data })), race.resultOrder);
+  const settled = [];
+  for (const bet of bets) {
+    const data = bet.data;
+    let fields;
+    if (fixed) {
+      const reject = betRejectReason(data, schedule.closeMs);
+      const oddsTenths = derbyTicketOddsTenths(table, data.type, data.horses);
+      const win = !reject && oddsTenths !== null && derbyBetWins(data, race.resultOrder);
+      const payout = win ? derbyFixedPayout(data.amount, oddsTenths) : 0;
+      fields = { settled: true, win, payout, payoutRule: DERBY_FIXED_PAYOUT_RULE, settledOddsTenths: oddsTenths, settledBy: "worker", ...(reject ? { rejectedReason: reject } : {}) };
+    } else {
+      const { win, payout } = poolPayouts[bet.id] || { win: false, payout: 0 };
+      fields = { settled: true, win, payout, settledBy: "worker" };
+    }
+    const payout = fields.payout;
+    const writes = [{
+      update: { name: fs.docName(`raceBets/${bet.id}`), fields: encodeFields(fields) },
+      updateMask: { fieldPaths: Object.keys(fields) },
+      currentDocument: { updateTime: bet.updateTime }
+    }];
+    if (payout > 0) {
+      writes.push({
+        update: { name: fs.docName(`users/${me.name}`), fields: {} },
+        updateMask: { fieldPaths: [] },
+        updateTransforms: [{ fieldPath: "coins", increment: restInt(payout) }],
+        currentDocument: { exists: true }
+      });
+    }
+    try {
+      await fs.commit(writes);
+      settled.push({ betId: bet.id, type: data.type, horses: data.horses, amount: data.amount, win: fields.win, payout, rejected: fields.rejectedReason || null });
+    } catch (error) {
+      if (!isRetryableCommitError(error)) throw error; /* ほかの処理（derby-runner など）が先に精算した */
+    }
+  }
+  return { ok: true, raceId, settled, payoutTotal: settled.reduce((s, b) => s + b.payout, 0) };
+}
+
 /* Firestore にデータが1件もない Authentication のユーザー（名前を決める前にやめたゲストなど）だけを消す */
 async function adminDeleteAuthOnly(deps, callerUid, uid) {
   if (uid === deps.adminUid) return { status: 400, error: "cannot_target_admin" };
@@ -1019,7 +2123,387 @@ function jsonResponse(data, status, cors) {
    本番用の依存（Google の認証・Firestore REST・FCM HTTP v1）
 ========================================================= */
 
+/* =========================================================
+   🎰 ゆうワールド「ゆうスロ」：サーバー権威のスロット
+   ・抽選・配当・残高・着席・精算はすべてサーバーが確定する（クライアントは表示だけ）。
+   ・プレイ中（スピン）は Firebase にアクセスしない。残高は「着席時に一度読んだ値＋署名セッションが持つ増減」で管理し、
+     一定間隔の flush と退出時の settle のときだけ Firestore にまとめて反映する（増分 increment で冪等）。
+   ・公開設定は worldConfig/yuslot（最上位管理者だけが変更）。非公開中は最上位管理者以外は遊べない。
+   ========================================================= */
+
+export const SLOT_MACHINES = {
+  // rates：台ごとの小当たり（さくらんぼ/ベル/スイカ）の確率。料金が高い台ほど還元率が下がるように調整してある。
+  //   当たりやすさ（還元率）の目標：Basic95 / Rush92 / Chance90 / Treasure88 / Rainbow85 / Jackpot82（%）。
+  //   確率・配当はここだけで管理し、演出では一切変えない。実測はシミュレーション（yuslot-sim.mjs）で検証する。
+  yubasic:    { price: 1, special: "orig",    specialRate: 1 / 400, rates: { cherry: 0.0809, bell: 0.0674, watermelon: 0.0540 } },
+  yurush:     { price: 2, special: "orig",    specialRate: 1 / 450, rates: { cherry: 0.0836, bell: 0.0697, watermelon: 0.0557 } },
+  yuchance:   { price: 3, special: "triple7", specialRate: 1 / 500, rates: { cherry: 0.0848, bell: 0.0707, watermelon: 0.0565 } },
+  yutreasure: { price: 5, special: "triple7", specialRate: 1 / 600, rates: { cherry: 0.0877, bell: 0.0731, watermelon: 0.0585 } },
+  yurainbow:  { price: 7, special: "triple7", specialRate: 1 / 700, rates: { cherry: 0.0856, bell: 0.0714, watermelon: 0.0571 } },
+  yujackpot:  { price: 9, special: "triple7", specialRate: 1 / 800, rates: { cherry: 0.0860, bell: 0.0717, watermelon: 0.0573 } }
+};
+export const SLOT_RULES = {
+  // 既定値（台ごとに rates で上書きしないときに使う）。freeReplay 以下は全台共通。
+  cherry: 0.06, bell: 0.05, watermelon: 0.04, replay: 0.02, star: 0.003, treasure: 0.006,
+  freeReplay: 0.01, starFreeSpins: 5, win3Mult: 3, specialMult: 80, feverMs: 20000,
+  treasurePrizes: [[3, 0.40], [5, 0.30], [10, 0.20], [20, 0.08], [50, 0.02]]
+};
+/* 台ごとの実効確率（rates が無い項目は SLOT_RULES の既定値。special は specialRate） */
+export function slotRates(machineId) {
+  const m = SLOT_MACHINES[machineId], R = SLOT_RULES, o = m && m.rates ? m.rates : {};
+  return {
+    cherry: o.cherry != null ? o.cherry : R.cherry,
+    bell: o.bell != null ? o.bell : R.bell,
+    watermelon: o.watermelon != null ? o.watermelon : R.watermelon,
+    replay: o.replay != null ? o.replay : R.replay,
+    star: o.star != null ? o.star : R.star,
+    treasure: o.treasure != null ? o.treasure : R.treasure,
+    special: o.special != null ? o.special : m.specialRate
+  };
+}
+const SLOT_FRUITS = ["cherry", "bell", "watermelon"];
+const SLOT_FLUSH_INTERVAL_MS = 15000;   // クライアントがこの間隔で flush する
+const SLOT_SEAT_GRACE_MS = 90000;       // 復旧猶予（約1分）＋flush の間隔ぶんの余裕
+const SLOT_SESSION_MAX_MS = 24 * 3600 * 1000;
+
+/* 営業時間（日本時間 07:00〜21:00）。日次リセットは 07:00 */
+function slotJstHour(nowMs) { return new Date(nowMs + 9 * 3600000).getUTCHours(); }
+export function slotBusinessOpen(nowMs) { const h = slotJstHour(nowMs); return h >= 7 && h < 21; }
+export function slotBusinessDay(nowMs) {
+  // 07:00 JST で日付が変わるように、JST から 7 時間引いた日付を使う
+  const d = new Date(nowMs + 9 * 3600000 - 7 * 3600000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+function slotPickTreasure(random) {
+  let r = random();
+  for (const [coins, p] of SLOT_RULES.treasurePrizes) { if (r < p) return coins; r -= p; }
+  return SLOT_RULES.treasurePrizes[0][0];
+}
+function slotDisplayPool(machineId) {
+  const m = SLOT_MACHINES[machineId];
+  return [...SLOT_FRUITS, "replay", "star", "treasure", m.special === "orig" ? "orig" : "triple7"];
+}
+function slotLoseCenter(machineId, random) {
+  const pool = slotDisplayPool(machineId);
+  const sp = SLOT_MACHINES[machineId].special === "orig" ? "orig" : "triple7";
+  const pick = () => pool[Math.floor(random() * pool.length) % pool.length];
+  // 期待感を高めるため、半分くらいのハズレは「リーチの形」（左2つが同じ・右だけ違う）で見せる。
+  // たまに特別絵柄（777/オリジナル）の惜しいリーチにする。あくまで表示だけで、配当は0のまま（結果は変えない）。
+  if (random() < 0.5) {
+    const pairSym = random() < 0.25 ? sp : pick();
+    let odd = pick(), guard = 0;
+    while (odd === pairSym && guard++ < 8) odd = pick();
+    if (odd === pairSym) odd = pool[(pool.indexOf(pairSym) + 1) % pool.length];
+    return [pairSym, pairSym, odd];
+  }
+  let c = [pick(), pick(), pick()];
+  if (c[0] === c[1] && c[1] === c[2]) c[2] = pool[(pool.indexOf(c[2]) + 1) % pool.length]; // 3つ揃いは避ける
+  return c;
+}
+
+/* 1スピンの抽選結果（純粋関数。残高には触れない）。free=無料スピン中、fever=FEVER中 */
+export function slotDrawOutcome(machineId, { free = false, fever = false } = {}, random = Math.random) {
+  const m = SLOT_MACHINES[machineId];
+  const R = SLOT_RULES;
+  if (!m) throw new Error("unknown_machine");
+  const rates = slotRates(machineId);
+  if (fever) {
+    // FEVER中はさくらんぼ・ベル・スイカのみ（必ずどれかが揃う）。重みは台ごとの小当たり確率に比例
+    const w = [["cherry", rates.cherry], ["bell", rates.bell], ["watermelon", rates.watermelon]];
+    const tot = rates.cherry + rates.bell + rates.watermelon;
+    let r = random() * tot, pick = "cherry";
+    for (const [s, p] of w) { if (r < p) { pick = s; break; } r -= p; }
+    return { result: pick, payout: m.price * R.win3Mult, freeAdd: 0, feverStart: false, prize: 0, center: [pick, pick, pick], fever: true };
+  }
+  const entries = [
+    ["cherry", rates.cherry], ["bell", rates.bell], ["watermelon", rates.watermelon],
+    ["replay", free ? R.freeReplay : rates.replay],
+    ["star", free ? 0 : rates.star],
+    ["treasure", rates.treasure],
+    ["special", rates.special]
+  ];
+  let r = random();
+  for (const [res, p] of entries) {
+    if (p <= 0) continue;
+    if (r < p) {
+      if (res === "cherry" || res === "bell" || res === "watermelon") return { result: res, payout: m.price * R.win3Mult, freeAdd: 0, feverStart: false, prize: 0, center: [res, res, res] };
+      if (res === "replay") return { result: "replay", payout: 0, freeAdd: 1, feverStart: false, prize: 0, center: ["replay", "replay", "replay"] };
+      if (res === "star") return { result: "star", payout: 0, freeAdd: R.starFreeSpins, feverStart: false, prize: 0, center: ["star", "star", "star"] };
+      if (res === "treasure") { const prize = slotPickTreasure(random); return { result: "treasure", payout: prize, freeAdd: 0, feverStart: false, prize, center: ["treasure", "treasure", "treasure"] }; }
+      if (res === "special") { const sym = m.special === "orig" ? "orig" : "triple7"; return { result: "special", symbol: sym, payout: m.price * R.specialMult, freeAdd: 0, feverStart: true, prize: 0, center: [sym, sym, sym] }; }
+    }
+    r -= p;
+  }
+  return { result: "lose", payout: 0, freeAdd: 0, feverStart: false, prize: 0, center: slotLoseCenter(machineId, random) };
+}
+
+/* セッションに1スピンを適用する（残高・無料スピン・FEVER・統計を更新）。Firestore には触れない */
+export function slotApplySpin(session, nowMs, random = Math.random) {
+  const price = session.price;
+  const fever = nowMs < (session.feverUntil || 0);
+  const usingFree = (session.freeSpins || 0) > 0;
+  const available = session.startCoins + session.delta;
+  if (!usingFree && available < price) return { error: "no_funds" };
+
+  const draw = slotDrawOutcome(session.machine, { free: usingFree, fever }, random);
+  const cost = usingFree ? 0 : price;
+  const next = { ...session };
+  next.delta = session.delta + draw.payout - cost;
+  next.freeSpins = (session.freeSpins || 0) - (usingFree ? 1 : 0) + draw.freeAdd;
+  // 特別役の当たりでは FEVER を自動では始めない。「開始待ち（feverPending）」にして、
+  // ユーザーが余韻を楽しんでから feverStart アクションで開始する。
+  if (draw.feverStart && !fever) next.feverPending = true;
+  next.spins = (session.spins || 0) + 1;
+  const coinWin = draw.payout > 0;
+  if (coinWin) { next.wins = (session.wins || 0) + 1; next.streak = (session.streak || 0) + 1; }
+  else if (draw.result === "lose") { next.streak = 0; }
+  else { next.wins = session.wins || 0; next.streak = session.streak || 0; }
+  next.lastMs = nowMs;
+
+  const balance = next.startCoins + next.delta;
+  const spin = {
+    result: draw.result, center: draw.center, payout: draw.payout, cost, prize: draw.prize,
+    freeAdd: draw.freeAdd, coinWin, feverStart: draw.feverStart && !fever, feverPending: next.feverPending === true,
+    fever: nowMs < (next.feverUntil || 0), feverUntil: next.feverUntil || 0,
+    balance, freeSpins: next.freeSpins, spins: next.spins, wins: next.wins, streak: next.streak
+  };
+  return { session: next, spin };
+}
+
+/* ----- 署名セッション（HMAC-SHA256。鍵はサービスアカウント秘密鍵などから導出） ----- */
+async function slotHmacKey(secret) {
+  const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(secret || "")));
+  return crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+}
+async function slotSignSession(session, secret) {
+  const key = await slotHmacKey(secret);
+  const body = base64UrlEncodeString(JSON.stringify(session));
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+  return `${body}.${base64UrlEncodeBytes(new Uint8Array(sig))}`;
+}
+async function slotVerifySession(token, secret) {
+  const [body, sig] = String(token || "").split(".");
+  if (!body || !sig) return null;
+  const key = await slotHmacKey(secret);
+  const ok = await crypto.subtle.verify("HMAC", key, base64UrlDecode(sig), new TextEncoder().encode(body));
+  if (!ok) return null;
+  try { return JSON.parse(base64UrlDecodeToString(body)); } catch { return null; }
+}
+function slotRandomHex(n = 16) {
+  const b = new Uint8Array(n); crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/* ----- 公開設定（worldConfig/yuslot）。短時間キャッシュしてスピン中の読み取りを避ける ----- */
+let slotConfigCache = { value: null, at: 0 };
+export function resetYuslotCacheForTest() { slotConfigCache = { value: null, at: 0 }; }
+async function slotGetPublished(deps, { maxAgeMs = 30000 } = {}) {
+  const now = deps.now();
+  if (slotConfigCache.value !== null && now - slotConfigCache.at < maxAgeMs) return slotConfigCache.value;
+  try {
+    const doc = await deps.firestore.get("worldConfig/yuslot");
+    const published = doc?.yuslotPublished === true;
+    slotConfigCache = { value: published, at: now };
+    return published;
+  } catch (error) {
+    console.warn("yuslot config read failed", String(error?.message || error).slice(0, 120));
+    return slotConfigCache.value === true ? false : false; // 取得失敗は非公開扱い
+  }
+}
+function slotIsTopAdmin(deps, uid) { return uid && uid === deps.adminUid; }
+
+export async function handleYuslotAction(deps, uid, body) {
+  const action = typeof body?.action === "string" ? body.action : "";
+  try {
+    switch (action) {
+      case "config": return await yuslotConfig(deps, uid);
+      case "setConfig": return await yuslotSetConfig(deps, uid, body);
+      case "lobby": return await yuslotLobby(deps, uid);
+      case "seat": return await yuslotSeat(deps, uid, body);
+      case "spin": return await yuslotSpin(deps, uid, body);
+      case "feverStart": return await yuslotFeverStart(deps, uid, body);
+      case "flush": return await yuslotFlush(deps, uid, body);
+      case "settle": return await yuslotSettle(deps, uid, body);
+      default: return { status: 400, error: "unknown_action" };
+    }
+  } catch (error) {
+    console.error("yuslot error", action, String(error?.message || error).slice(0, 300));
+    return { status: 500, error: "internal_error" };
+  }
+}
+
+async function yuslotConfig(deps, uid) {
+  const published = await slotGetPublished(deps);
+  return { ok: true, published, isTopAdmin: slotIsTopAdmin(deps, uid), open: slotBusinessOpen(deps.now()), serverNowMs: deps.now(), day: slotBusinessDay(deps.now()) };
+}
+
+async function yuslotSetConfig(deps, uid, body) {
+  if (!slotIsTopAdmin(deps, uid)) return { status: 403, error: "not_top_admin" };
+  const published = body?.published === true;
+  await deps.firestore.commit([{
+    update: { name: deps.firestore.docName("worldConfig/yuslot"), fields: { yuslotPublished: { booleanValue: published }, updatedAtMs: { integerValue: String(deps.now()) }, updatedByUid: { stringValue: uid } } },
+    updateMask: { fieldPaths: ["yuslotPublished", "updatedAtMs", "updatedByUid"] }
+  }]);
+  slotConfigCache = { value: published, at: deps.now() };
+  return { ok: true, published };
+}
+
+async function yuslotLobby(deps, uid) {
+  const published = await slotGetPublished(deps);
+  if (!published && !slotIsTopAdmin(deps, uid)) return { status: 403, error: "not_published" };
+  const now = deps.now();
+  const ids = Object.keys(SLOT_MACHINES);
+  const seats = {};
+  await Promise.all(ids.map(async (id) => {
+    const raw = await deps.firestore.getRaw(`yuslotSeats/${id}`);
+    const d = raw ? decodeFields(raw.fields) : null;
+    seats[id] = d && Number(d.graceUntilMs || 0) > now ? { name: d.name || "", occupied: true, mine: d.uid === uid } : { occupied: false };
+  }));
+  return { ok: true, seats, open: slotBusinessOpen(now), serverNowMs: now };
+}
+
+async function yuslotSeat(deps, uid, body) {
+  const machine = typeof body?.machine === "string" ? body.machine : "";
+  if (!SLOT_MACHINES[machine]) return { status: 400, error: "unknown_machine" };
+  const published = await slotGetPublished(deps);
+  if (!published && !slotIsTopAdmin(deps, uid)) return { status: 403, error: "not_published" };
+  const now = deps.now();
+  if (!slotBusinessOpen(now)) return { status: 409, error: "closed" };
+
+  const me = await loadMyUser(deps.firestore, uid, body?.username);
+  if (me.error) return me.error;
+  const startCoins = Number(decodeFields(me.raw.fields).coins || 0);
+
+  const seatPath = `yuslotSeats/${machine}`;
+  const raw = await deps.firestore.getRaw(seatPath);
+  const cur = raw ? decodeFields(raw.fields) : null;
+  if (cur && cur.uid !== uid && Number(cur.graceUntilMs || 0) > now) return { status: 409, error: "seat_taken", name: cur.name || "" };
+
+  const nonce = slotRandomHex();
+  const seatFields = {
+    uid: { stringValue: uid }, name: { stringValue: me.name }, nonce: { stringValue: nonce },
+    machine: { stringValue: machine }, seatedAtMs: { integerValue: String(now) },
+    graceUntilMs: { integerValue: String(now + SLOT_SEAT_GRACE_MS) }, flushedTotal: { integerValue: "0" }
+  };
+  const write = { update: { name: deps.firestore.docName(seatPath), fields: seatFields } };
+  if (raw) write.currentDocument = { updateTime: raw.updateTime }; else write.currentDocument = { exists: false };
+  try {
+    await deps.firestore.commit([write]);
+  } catch (error) {
+    if (isRetryableCommitError(error) || error.status === 409) return { status: 409, error: "seat_taken" };
+    throw error;
+  }
+
+  const session = {
+    v: 1, uid, name: me.name, machine, price: SLOT_MACHINES[machine].price,
+    startCoins, delta: 0, flushed: 0, freeSpins: 0, feverUntil: 0,
+    spins: 0, wins: 0, streak: 0, day: slotBusinessDay(now), nonce, seatMs: now, lastMs: now
+  };
+  const signed = await slotSignSession(session, deps.slotSecret);
+  return { ok: true, session: signed, machine, price: session.price, startCoins, name: me.name, balance: startCoins, freeSpins: 0, open: true, serverNowMs: now, day: session.day };
+}
+
+async function yuslotLoadSession(deps, uid, body) {
+  const session = await slotVerifySession(body?.session, deps.slotSecret);
+  if (!session || session.uid !== uid) return { error: { status: 401, error: "bad_session" } };
+  if (!SLOT_MACHINES[session.machine]) return { error: { status: 400, error: "unknown_machine" } };
+  return { session };
+}
+
+async function yuslotSpin(deps, uid, body) {
+  const now = deps.now();
+  const loaded = await yuslotLoadSession(deps, uid, body);
+  if (loaded.error) return loaded.error;
+  const session = loaded.session;
+  // 非公開に切り替わっていたら、一般ユーザーはスピンできない（残りは settle で安全に退出）
+  const published = await slotGetPublished(deps);
+  if (!published && !slotIsTopAdmin(deps, uid)) return { status: 403, error: "not_published", mustSettle: true };
+  if (now - session.seatMs > SLOT_SESSION_MAX_MS) return { status: 409, error: "session_expired", mustSettle: true };
+  if (session.day !== slotBusinessDay(now)) return { status: 409, error: "day_rollover", mustSettle: true };
+  if (!slotBusinessOpen(now)) return { status: 409, error: "closed", mustSettle: true };
+
+  const applied = slotApplySpin(session, now, deps.random);
+  if (applied.error) return { status: 409, error: applied.error };
+  const signed = await slotSignSession(applied.session, deps.slotSecret);
+  return { ok: true, spin: applied.spin, session: signed };
+}
+
+/* FEVER を開始する（特別役の当たりで feverPending になっている分を、ユーザー操作のタイミングで始める）。
+   Firestore には触れない。連打しても二重開始・報酬重複しない（feverPending を一度だけ消費する）。 */
+async function yuslotFeverStart(deps, uid, body) {
+  const now = deps.now();
+  const loaded = await yuslotLoadSession(deps, uid, body);
+  if (loaded.error) return loaded.error;
+  const session = loaded.session;
+  const alreadyFever = now < (session.feverUntil || 0);
+  if (!session.feverPending || alreadyFever) {
+    // 開始待ちが無い、またはすでに FEVER 中 → 何もしない（冪等）
+    const signed = await slotSignSession(session, deps.slotSecret);
+    return { ok: true, started: false, session: signed, fever: alreadyFever, feverUntil: session.feverUntil || 0, serverNowMs: now };
+  }
+  const next = { ...session, feverUntil: now + SLOT_RULES.feverMs, feverPending: false };
+  const signed = await slotSignSession(next, deps.slotSecret);
+  return { ok: true, started: true, session: signed, fever: true, feverUntil: next.feverUntil, serverNowMs: now };
+}
+
+/* 増減をまとめて Firestore に反映する（flush/settle 共通。seat の flushedTotal で冪等化） */
+async function yuslotPersist(deps, uid, session, { release }) {
+  const now = deps.now();
+  const seatPath = `yuslotSeats/${session.machine}`;
+  const raw = await deps.firestore.getRaw(seatPath);
+  const cur = raw ? decodeFields(raw.fields) : null;
+  // 自分の着席でなく、nonce も違う＝別の人に取られた/すでに解放済み。未反映分は（安全のため）反映しない
+  if (!cur || cur.uid !== uid || cur.nonce !== session.nonce) return { ok: true, applied: 0, seatLost: !release };
+  const toApply = Math.trunc(session.delta - Number(cur.flushedTotal || 0));
+  const writes = [];
+  if (toApply !== 0) {
+    writes.push({
+      update: { name: deps.firestore.docName(`users/${session.name}`), fields: {} },
+      updateMask: { fieldPaths: [] },
+      updateTransforms: [{ fieldPath: "coins", increment: { integerValue: String(toApply) } }],
+      currentDocument: { exists: true }
+    });
+  }
+  if (release) {
+    writes.push({ delete: deps.firestore.docName(seatPath), currentDocument: { updateTime: raw.updateTime } });
+  } else {
+    writes.push({
+      update: { name: deps.firestore.docName(seatPath), fields: { flushedTotal: { integerValue: String(Math.trunc(session.delta)) }, graceUntilMs: { integerValue: String(now + SLOT_SEAT_GRACE_MS) }, lastFlushMs: { integerValue: String(now) } } },
+      updateMask: { fieldPaths: ["flushedTotal", "graceUntilMs", "lastFlushMs"] },
+      currentDocument: { updateTime: raw.updateTime }
+    });
+  }
+  await deps.firestore.commit(writes);
+  return { ok: true, applied: toApply };
+}
+
+async function yuslotFlush(deps, uid, body) {
+  const loaded = await yuslotLoadSession(deps, uid, body);
+  if (loaded.error) return loaded.error;
+  const session = loaded.session;
+  let res;
+  try { res = await yuslotPersist(deps, uid, session, { release: false }); }
+  catch (error) { if (isRetryableCommitError(error)) return { status: 409, error: "busy" }; throw error; }
+  if (res.seatLost) return { status: 409, error: "seat_lost", mustStop: true };
+  const next = { ...session, flushed: Math.trunc(session.delta) };
+  const signed = await slotSignSession(next, deps.slotSecret);
+  return { ok: true, session: signed, applied: res.applied, balance: session.startCoins + session.delta };
+}
+
+async function yuslotSettle(deps, uid, body) {
+  const loaded = await yuslotLoadSession(deps, uid, body);
+  if (loaded.error) return loaded.error;
+  const session = loaded.session;
+  let res;
+  try { res = await yuslotPersist(deps, uid, session, { release: true }); }
+  catch (error) { if (isRetryableCommitError(error)) { res = { ok: true, applied: 0 }; } else throw error; }
+  // FEVER・無料スピンは退出で破棄（セッション限りで Firestore に保存していない）
+  return { ok: true, applied: res.applied || 0, finalBalance: session.startCoins + session.delta };
+}
+
 export function createDefaultDeps(env, fetchImpl = (...args) => fetch(...args)) {
+  applyDerbyTimeOverrides(env);
   const projectId = env.FIREBASE_PROJECT_ID || DEFAULT_PROJECT_ID;
   const firestoreBase = env.FIRESTORE_BASE_URL || "https://firestore.googleapis.com/v1";
   const fcmBase = env.FCM_BASE_URL || "https://fcm.googleapis.com/v1";
@@ -1032,6 +2516,9 @@ export function createDefaultDeps(env, fetchImpl = (...args) => fetch(...args)) 
   return {
     now: () => Date.now(),
     adminUid: env.ADMIN_UID || DEFAULT_ADMIN_UID,
+    // ゆうスロの署名セッションの鍵（新しい Secret は不要。サービスアカウント秘密鍵などから導出）
+    slotSecret: env.SLOT_SESSION_SECRET || env.FIREBASE_SERVICE_ACCOUNT || DEFAULT_ADMIN_UID,
+    random: () => { const b = new Uint32Array(1); crypto.getRandomValues(b); return b[0] / 4294967296; },
     verifyIdToken: (token) => verifyFirebaseIdToken(token, projectId, fetchImpl),
     firestore: createFirestoreClient({ base: firestoreBase, projectId, getAccessToken, fetchImpl }),
     authAdmin: createAuthAdminClient({ base: authAdminBase, projectId, getAccessToken, fetchImpl }),

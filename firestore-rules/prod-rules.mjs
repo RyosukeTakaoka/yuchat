@@ -105,6 +105,9 @@ const DOCS = "/databases/(default)/documents";
 const admin = { uid: ADMIN_UID, token: {} };
 const userA = { uid: "rulesTestUserA", token: {} };
 const fakeAdmin = { uid: "rulesTestFakeAdmin", token: { email: "admin@example.com", name: "admin" } };
+// 第2・第3段階：チャット・ゲームは名前クレーム（通知サーバーがログイン時にトークンへ入れる）で本人確認する
+const userAlice = { uid: "rulesTestUserA", token: { name: "alice" } }; // userA と同じ UID＋名前クレーム alice
+const userCarol = { uid: "rulesTestUserC", token: { name: "carol" } };
 
 const manualRace = { raceId: "2030-01-01-m1200", dayId: "2030-01-01", status: "scheduled", betCount: 0, createdByUid: ADMIN_UID };
 const announcementDoc = { title: "お知らせ", body: "本文", createdByUid: ADMIN_UID, createdByName: "admin" };
@@ -129,6 +132,7 @@ const TEST_CASES = [
   testCase("DENY", "一般：手動レースのキャンセル", userA, "update", "derbyManualRaces/2030-01-01-m1200", { data: { ...manualRace, status: "cancelled" }, existing: manualRace }),
   testCase("DENY", "一般：手動レースの投票数を0に戻す", userA, "update", "derbyManualRaces/2030-01-01-m1200", { data: { ...manualRace, betCount: 0 }, existing: { ...manualRace, betCount: 3 } }),
   testCase("DENY", "一般：手動レースの削除", userA, "delete", "derbyManualRaces/2030-01-01-m1200", { existing: manualRace }),
+  testCase("DENY", "一般：手動レースの betCount を増やす（投票と同じ形。Worker が行う）", userA, "update", "derbyManualRaces/2030-01-01-m1200", { data: { ...manualRace, betCount: 1 }, existing: { ...manualRace, betCount: 0 } }),
   testCase("DENY", "メール・名前が管理者風でも UID が違う人：手動レースの作成", fakeAdmin, "create", "derbyManualRaces/2030-01-01-m1200", { data: manualRace }),
   // 廃止したイベント機能（events / eventParticipants）：管理者も一般ユーザーも読み書きできない
   testCase("DENY", "管理者：イベントの読み取り（廃止）", admin, "get", "events/ev-test", { existing: eventDoc }),
@@ -140,12 +144,22 @@ const TEST_CASES = [
   testCase("DENY", "一般：参加記録の読み取り（廃止）", userA, "get", "eventParticipants/ev-test_rulesTestUserA", { existing: { eventId: "ev-test", uid: userA.uid } }),
   testCase("DENY", "一般：参加記録の作成（廃止）", userA, "create", "eventParticipants/ev-test_rulesTestUserA", { data: { eventId: "ev-test", uid: userA.uid, username: "x" } }),
   testCase("DENY", "一般：参加記録の削除（廃止）", userA, "delete", "eventParticipants/ev-test_rulesTestUserA", { existing: { eventId: "ev-test", uid: userA.uid } }),
-  // ゆうダービーの馬券：固定オッズ方式のレース（2026-10-09 以降）は固定オッズの精算だけ。自分の馬券だけ精算できる
-  testCase("ALLOW", "raceBets：旧方式のレースの自分の馬券を旧方式で精算", userA, "update", "raceBets/b-old", { data: { raceId: "2026-10-08", uid: userA.uid, settled: true, win: true, payout: 80 }, existing: { raceId: "2026-10-08", uid: userA.uid, settled: false } }),
-  testCase("DENY", "raceBets：新方式のレースの馬券を古い形式で精算", userA, "update", "raceBets/b-new", { data: { raceId: "2026-10-09", uid: userA.uid, settled: true, win: true, payout: 80 }, existing: { raceId: "2026-10-09", uid: userA.uid, settled: false } }),
-  testCase("ALLOW", "raceBets：新方式のレースの自分の馬券を固定オッズで精算", userA, "update", "raceBets/b-new", { data: { raceId: "2026-10-09", uid: userA.uid, settled: true, win: true, payout: 600, payoutRule: "fixed-v1" }, existing: { raceId: "2026-10-09", uid: userA.uid, settled: false } }),
+  // ゆうダービーの馬券（raceBets）：購入・精算・改変はブラウザからはできない（通知 Worker が行う）。読み取りだけできる
+  testCase("ALLOW", "raceBets：自分の馬券の読み取り", userA, "get", "raceBets/b-old", { existing: { raceId: "2026-10-09", uid: userA.uid, settled: false } }),
+  testCase("DENY", "raceBets：自分の馬券をブラウザから精算（固定オッズの目印付きでも）", userA, "update", "raceBets/b-new", { data: { raceId: "2026-10-09", uid: userA.uid, settled: true, win: true, payout: 600, payoutRule: "fixed-v1" }, existing: { raceId: "2026-10-09", uid: userA.uid, settled: false } }),
   testCase("DENY", "raceBets：他人の馬券を精算", userA, "update", "raceBets/b-other", { data: { raceId: "2026-10-09", uid: "someoneElse", settled: true, win: true, payout: 600, payoutRule: "fixed-v1" }, existing: { raceId: "2026-10-09", uid: "someoneElse", settled: false } }),
-  testCase("ALLOW", "raceBets：新方式のレースの馬券購入", userA, "create", "raceBets/b-buy", { data: { raceId: "2026-10-12", uid: userA.uid, type: "win", horses: [1], amount: 100, settled: false, oddsVersion: 1, oddsTenths: 25 } }),
+  testCase("DENY", "raceBets：コインを払わず馬券を作る", userA, "create", "raceBets/b-buy", { data: { raceId: "2026-10-12", uid: userA.uid, type: "win", horses: [1], amount: 1000000, settled: false } }),
+  testCase("DENY", "raceBets：馬券を削除する", userA, "delete", "raceBets/b-old", { existing: { raceId: "2026-10-09", uid: userA.uid, settled: false } }),
+  // 🎰 ゆうワールド：公開設定（worldConfig）と着席（yuslotSeats）はサーバー（通知 Worker）だけが書く
+  testCase("ALLOW", "worldConfig：公開設定の読み取り（ログイン済みなら可）", userA, "get", "worldConfig/yuslot", { existing: { yuslotPublished: false } }),
+  testCase("DENY", "worldConfig：一般がブラウザから公開に書き換える", userA, "update", "worldConfig/yuslot", { data: { yuslotPublished: true }, existing: { yuslotPublished: false } }),
+  testCase("DENY", "worldConfig：一般がブラウザから公開設定を作る", userA, "create", "worldConfig/yuslot2", { data: { yuslotPublished: true } }),
+  testCase("DENY", "worldConfig：最上位管理者でもブラウザからは書き換えられない（Worker 経由だけ）", admin, "update", "worldConfig/yuslot", { data: { yuslotPublished: true }, existing: { yuslotPublished: false } }),
+  testCase("DENY", "yuslotSeats：一般が着席状況を直接読む", userA, "get", "yuslotSeats/yubasic", { existing: { uid: userA.uid, nonce: "n1", delta: 0 } }),
+  testCase("DENY", "yuslotSeats：最上位管理者でも着席状況を直接読めない", admin, "get", "yuslotSeats/yubasic", { existing: { uid: userA.uid, nonce: "n1", delta: 0 } }),
+  testCase("DENY", "yuslotSeats：一般が勝手に着席する", userA, "create", "yuslotSeats/yurush", { data: { uid: userA.uid, nonce: "x", delta: 0, flushedTotal: 0 } }),
+  testCase("DENY", "yuslotSeats：他人の着席を書き換えてコインを増やす", userA, "update", "yuslotSeats/yubasic", { data: { uid: userA.uid, delta: 1000000 }, existing: { uid: "someoneElse", nonce: "n1", delta: 0 } }),
+  testCase("DENY", "yuslotSeats：着席を削除して解放する", userA, "delete", "yuslotSeats/yubasic", { existing: { uid: userA.uid, nonce: "n1", delta: 0 } }),
   // お知らせ（announcements）：読み取りはログイン済みなら誰でも・作成/編集/削除は管理者だけ
   testCase("ALLOW", "一般：お知らせの読み取り", userA, "get", "announcements/a1", { existing: announcementDoc }),
   testCase("ALLOW", "管理者：お知らせの削除", admin, "delete", "announcements/a1", { existing: announcementDoc }),
@@ -157,23 +171,51 @@ const TEST_CASES = [
   testCase("ALLOW", "users：自分の lastAnnouncementReadAt の更新（既存の users のルールのまま）", userA, "update", "users/alice", { data: { uid: userA.uid, coins: 1000, lastAnnouncementReadAt: "2030-01-01" }, existing: { uid: userA.uid, coins: 1000 } }),
   // 一般ユーザーの読み取りと既存データは今まで通り
   testCase("ALLOW", "一般：手動レースの読み取り", userA, "get", "derbyManualRaces/2030-01-01-m1200", { existing: manualRace }),
-  testCase("ALLOW", "users：自分のデータ更新", userA, "update", "users/alice", { data: { uid: userA.uid, coins: 900 }, existing: { uid: userA.uid, coins: 1000 } }),
+  testCase("DENY", "users：自分のコインをブラウザから書き換える", userA, "update", "users/alice", { data: { uid: userA.uid, coins: 900 }, existing: { uid: userA.uid, coins: 1000 } }),
+  testCase("DENY", "users：自分の銀行・株をブラウザから書き換える", userA, "update", "users/alice", { data: { uid: userA.uid, coins: 1000, bank: { deposit: 999999 } }, existing: { uid: userA.uid, coins: 1000 } }),
+  testCase("ALLOW", "users：経済項目でない自分のデータ更新（オンライン・通知設定）", userA, "update", "users/alice", { data: { uid: userA.uid, coins: 1000, online: true }, existing: { uid: userA.uid, coins: 1000 } }),
   testCase("ALLOW", "users：ランキング（他人のデータの読み取り）", userA, "get", "users/bob", { existing: { uid: "bob", coins: 1000 } }),
   testCase("DENY", "users：他人の名前の書き換え", userA, "update", "users/bob", { data: { uid: "bob", name: "へんななまえ", coins: 1000 }, existing: { uid: "bob", name: "bob", coins: 1000 } }),
   testCase("DENY", "users：他人のコインの書き換え", userA, "update", "users/bob", { data: { uid: "bob", coins: 999999 }, existing: { uid: "bob", coins: 1000 } }),
   testCase("DENY", "users：他人のデータの削除", userA, "delete", "users/bob", { existing: { uid: "bob", coins: 1000 } }),
   testCase("DENY", "users：管理者でも他人の users を直接は書き換えられない（名前の強制変更以外）", admin, "update", "users/bob", { data: { uid: "bob", coins: 1 }, existing: { uid: "bob", coins: 1000 } }),
-  testCase("ALLOW", "users：自分の名前で新規登録", userA, "create", "users/alice2", { data: { uid: userA.uid, name: "alice2" } }),
+  testCase("ALLOW", "users：自分の名前で新規登録（経済項目なし）", userA, "create", "users/alice2", { data: { uid: userA.uid, name: "alice2" } }),
+  testCase("DENY", "users：新規登録で経済項目（コイン）を入れる", userA, "create", "users/alice3", { data: { uid: userA.uid, name: "alice3", coins: 1000000 } }),
   testCase("ALLOW", "friends：友達追加", userA, "create", "friends/alice_bob", { data: { user1: "alice", user2: "bob" } }),
-  testCase("ALLOW", "groups：グループ作成", userA, "create", "groups/g1", { data: { name: "g", members: ["alice"] } }),
-  testCase("ALLOW", "messages：メッセージ送信", userA, "create", "messages/m1", { data: { sender: "alice", text: "hi" } }),
-  testCase("ALLOW", "messages：既読", userA, "update", "messages/m1", { data: { sender: "bob", readBy: ["alice"] }, existing: { sender: "bob", readBy: [] } }),
-  testCase("ALLOW", "gameRooms：部屋作成", userA, "create", "gameRooms/r1", { data: { host: "alice" } }),
-  testCase("ALLOW", "gameInvites：招待", userA, "create", "gameInvites/i1", { data: { from: "alice", to: "bob" } }),
-  testCase("ALLOW", "fcmTokens：通知トークン保存", userA, "create", "fcmTokens/t1", { data: { uid: userA.uid } }),
-  testCase("ALLOW", "races：レース結果作成（自動開催）", userA, "create", "races/2030-01-02", { data: { raceId: "2030-01-02", status: "finished" } }),
-  testCase("ALLOW", "raceBets：投票", userA, "create", "raceBets/b1", { data: { raceId: "2030-01-02", uid: userA.uid, amount: 100 } }),
-  testCase("ALLOW", "raceLogs：開催ログ", userA, "create", "raceLogs/2030-01-02", { data: { raceId: "2030-01-02" } }),
+  // ===== 第2段階：チャット・通知（名前クレームで本人確認） =====
+  testCase("ALLOW", "groups：メンバーが自分のグループを読む", userAlice, "get", "groups/g1", { existing: { name: "g", owner: "alice", ownerUid: userAlice.uid, members: ["alice", "bob"] } }),
+  testCase("DENY", "groups：非メンバーが他人のグループを覗く", userCarol, "get", "groups/g1", { existing: { name: "g", owner: "alice", ownerUid: userAlice.uid, members: ["alice", "bob"] } }),
+  testCase("ALLOW", "groups：作成者が自分でグループを作る", userAlice, "create", "groups/g2", { data: { name: "g", owner: "alice", ownerUid: userAlice.uid, members: ["alice"] } }),
+  testCase("DENY", "groups：自分を入れずにグループを作る", userAlice, "create", "groups/g3", { data: { name: "g", owner: "alice", ownerUid: userAlice.uid, members: ["bob"] } }),
+  testCase("DENY", "groups：非メンバーがグループを書き換える", userCarol, "update", "groups/g1", { data: { name: "x", owner: "alice", ownerUid: userAlice.uid, members: ["alice", "bob"] }, existing: { name: "g", owner: "alice", ownerUid: userAlice.uid, members: ["alice", "bob"] } }),
+  testCase("ALLOW", "messages：自分の1対1メッセージを送る", userAlice, "create", "messages/m1", { data: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("DENY", "messages：他人になりすまして送る（sender 偽装）", userAlice, "create", "messages/m2", { data: { sender: "bob", senderUid: userAlice.uid, receiver: "carol", type: "friend", text: "x" } }),
+  testCase("DENY", "messages：senderUid を他人にして送る", userAlice, "create", "messages/m3", { data: { sender: "alice", senderUid: "someoneElse", receiver: "bob", type: "friend", text: "x" } }),
+  testCase("ALLOW", "messages：当事者が自分あての1対1を読む", userAlice, "get", "messages/m1", { existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("DENY", "messages：第三者が他人の1対1を覗く", userCarol, "get", "messages/m1", { existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("DENY", "messages：名前クレーム無しが他人の1対1を覗く", userA, "get", "messages/m1", { existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("ALLOW", "messages：送信者が自分のメッセージを送信取り消し", userAlice, "update", "messages/m1", { data: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi", deleted: true }, existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("DENY", "messages：自分のメッセージでも本文は編集できない", userAlice, "update", "messages/m1", { data: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "編集" }, existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("DENY", "messages：第三者がリアクションを付ける", userCarol, "update", "messages/m1", { data: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi", reactions: { x: ["carol"] } }, existing: { sender: "alice", senderUid: userAlice.uid, receiver: "bob", type: "friend", text: "hi" } }),
+  testCase("ALLOW", "fcmTokens：自分の UID でトークン保存", userAlice, "create", "fcmTokens/t1", { data: { uid: userAlice.uid, username: "alice" } }),
+  testCase("DENY", "fcmTokens：他人の UID でトークン保存", userAlice, "create", "fcmTokens/t2", { data: { uid: "someoneElse", username: "bob" } }),
+  testCase("DENY", "fcmTokens：トークンの読み取り（アプリからは不可）", userAlice, "get", "fcmTokens/t1", { existing: { uid: userAlice.uid } }),
+  // ===== 第3段階：ゲーム・ユーザー作成 =====
+  testCase("ALLOW", "gameRooms：作成者が自分で部屋を作る", userAlice, "create", "gameRooms/r1", { data: { gameType: "othello", owner: "alice", ownerUid: userAlice.uid, members: ["alice"], memberUids: [userAlice.uid], status: "waiting" } }),
+  testCase("DENY", "gameRooms：ownerUid を他人にして部屋を作る", userAlice, "create", "gameRooms/r2", { data: { gameType: "othello", ownerUid: "someoneElse", members: ["x"], memberUids: ["someoneElse"], status: "waiting" } }),
+  testCase("ALLOW", "gameRooms：ロビーの読み取り（ログイン済み）", userAlice, "get", "gameRooms/r1", { existing: { gameType: "othello", ownerUid: userAlice.uid, members: ["alice"], memberUids: [userAlice.uid] } }),
+  testCase("DENY", "gameRooms：非参加者が盤面を書き換える", userCarol, "update", "gameRooms/r1", { data: { gameType: "othello", ownerUid: userAlice.uid, members: ["alice"], memberUids: [userAlice.uid], gameState: { x: 1 } }, existing: { gameType: "othello", ownerUid: userAlice.uid, members: ["alice"], memberUids: [userAlice.uid] } }),
+  testCase("ALLOW", "gameInvites：送り主が自分で招待を作る", userAlice, "create", "gameInvites/r1_b", { data: { roomId: "r1", fromUid: userAlice.uid, from: "alice", toUid: "uidBob", to: "bob", status: "pending" } }),
+  testCase("DENY", "gameInvites：送り主を偽装して招待を作る", userAlice, "create", "gameInvites/r1_c", { data: { roomId: "r1", fromUid: "someoneElse", toUid: "uidCarol", status: "pending" } }),
+  testCase("DENY", "gameInvites：当事者でない人が招待を覗く", userCarol, "get", "gameInvites/r1_b", { existing: { roomId: "r1", fromUid: userAlice.uid, toUid: "uidBob", status: "pending" } }),
+  testCase("DENY", "users：name とドキュメントIDが食い違う作成（なりすまし）", userAlice, "create", "users/mismatch", { data: { uid: userAlice.uid, name: "別の名前" } }),
+  testCase("DENY", "users：他人の既存ユーザー名を乗っ取る（上書き）", userCarol, "update", "users/alice", { data: { uid: userCarol.uid, name: "alice" }, existing: { uid: userAlice.uid, name: "alice" } }),
+  testCase("ALLOW", "fcmTokens：通知トークン保存（名前クレーム無しでも自分の UID なら可）", userA, "create", "fcmTokens/t3", { data: { uid: userA.uid } }),
+  testCase("DENY", "races：ブラウザからレース結果を作る（結果の改ざん防止）", userA, "create", "races/2030-01-02", { data: { raceId: "2030-01-02", status: "finished", generatedBy: "github-actions" } }),
+  testCase("DENY", "races：終わったレースの結果を書き換える", userA, "update", "races/2030-01-02", { data: { raceId: "2030-01-02", resultOrder: [9,1,2,3,4,5,6,7,8,10] }, existing: { raceId: "2030-01-02", resultOrder: [1,2,3,4,5,6,7,8,9,10] } }),
+  testCase("DENY", "raceBets：ブラウザから投票（馬券作成）", userA, "create", "raceBets/b1", { data: { raceId: "2030-01-02", uid: userA.uid, amount: 100 } }),
+  testCase("DENY", "raceLogs：ブラウザから開催ログを書く", userA, "create", "raceLogs/2030-01-02", { data: { raceId: "2030-01-02" } }),
+  testCase("ALLOW", "races：レース結果の読み取り（今まで通り）", userA, "get", "races/2030-01-02", { existing: { raceId: "2030-01-02", status: "finished" } }),
   testCase("DENY", "未ログイン：users の読み取り（今まで通り拒否）", null, "get", "users/alice", { existing: { uid: userA.uid } }),
   testCase("DENY", "未ログイン：メッセージ送信（今まで通り拒否）", null, "create", "messages/m2", { data: { text: "x" } }),
   testCase("DENY", "未ログイン：イベントの読み取り", null, "get", "events/ev-test", { existing: eventDoc }),

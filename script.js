@@ -31,10 +31,16 @@ import {
   FIXED_PAYOUT_RULE
 } from "./derby-odds.js?v=20261013-fixed-odds";
 
+/* 🎡 ゆうワールド（ゆうスロなどのお店）。残高・抽選・公開・営業時間の判定はすべて Worker 任せ（Firebase には触らない） */
+import {
+  initYuWorld, openYuWorldView, stopYuWorldView
+} from "./yuworld.js?v=20261015-yuworld3";
+
 import {
   getFirestore, collection, addDoc, getDocs, getDoc, doc, setDoc,
   updateDoc, deleteDoc, query, where, onSnapshot, orderBy, limit, arrayUnion, arrayRemove, deleteField,
-  serverTimestamp, writeBatch, runTransaction
+  serverTimestamp, writeBatch, runTransaction, or, and, startAfter,
+  getAggregateFromServer, count as aggregateCount, sum as aggregateSum
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 /* ゆう銀行の返済期限（Timestamp）に使う */
 import { Timestamp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
@@ -89,7 +95,11 @@ let selectedChatType = null;
 let selectedFriendshipId = null;
 
 let replyingMessage = null;
-let pendingImageData = null;
+/* 送信前に選んだ画像（選択中の表示・解除・送信に使う）
+   { id, name, size, status: "preparing" | "ready" | "error", dataURL, sentBytes, error } */
+let pendingImage = null;
+let pendingImageSeq = 0;
+let isSendingMessage = false;
 
 let unsubscribeFriends = null;
 let unsubscribeFriendsAsUser2 = null;
@@ -103,6 +113,7 @@ let fcmForegroundListenerReady = false;
 let currentGameType = "daifugo";
 let selectedGameRoomId = null;
 let unsubscribeGameRooms = null;
+let messagesListenerFailed = false;
 let unsubscribeCurrentGame = null;
 let selectedDaifugoCards = [];
 let selectedShogiPiece = null;
@@ -199,6 +210,11 @@ const changeNameButton = document.getElementById("changeNameButton");
 
 const imageButton = document.getElementById("imageButton");
 const imageInput = document.getElementById("imageInput");
+const imagePreviewBar = document.getElementById("imagePreviewBar");
+const imagePreviewThumb = document.getElementById("imagePreviewThumb");
+const imagePreviewName = document.getElementById("imagePreviewName");
+const imagePreviewStatus = document.getElementById("imagePreviewStatus");
+const imagePreviewClear = document.getElementById("imagePreviewClear");
 
 const chatView = document.getElementById("chatView");
 const derbyView = document.getElementById("derbyView");
@@ -208,6 +224,7 @@ const announcementsView = document.getElementById("announcementsView");
 const userManageView = document.getElementById("userManageView");
 const economyView = document.getElementById("economyView");
 const economyContent = document.getElementById("economyContent");
+const yuworldView = document.getElementById("yuworldView");
 
 const derbyCountdown = document.getElementById("derbyCountdown");
 const raceTrack = document.getElementById("raceTrack");
@@ -950,12 +967,31 @@ function isInterruptedBySignOut(session) {
   return session !== appSessionSeq || !currentUser;
 }
 
+/* チャット・グループの本人確認用に、ログイン中のユーザー名をトークンのカスタムクレーム name に入れる。
+   Firestore Rules は token.name で「1対1・グループの当事者」を判定するので、購読を始める前に同期する。
+   すでにトークンの name が今の名前と同じなら、通信せず何もしない（ログインのたびの無駄な通信を避ける）。 */
+async function ensureNameClaim() {
+  if (!currentUser || !username) return;
+  try {
+    const result = await currentUser.getIdTokenResult();
+    if (result?.claims?.name === username) return;
+    await callEconomyApi("syncNameClaim");
+    await currentUser.getIdToken(true); /* 新しい name クレームをトークンに反映してから購読を始める */
+  } catch (error) {
+    console.error("名前の確認情報の同期に失敗しました（チャットが表示されないときは、一度ログインし直してください）:", error);
+  }
+}
+
 async function startApp() {
   if (!currentUser || !username) return;
 
   const session = ++appSessionSeq;
   const startedUid = currentUser.uid;
   await waitForFirestoreAuth();
+  if (session !== appSessionSeq || !currentUser || currentUser.uid !== startedUid || !username) return;
+
+  /* チャット・グループの読み取りは token.name で本人確認するので、購読の前に名前クレームを同期する */
+  await ensureNameClaim();
   if (session !== appSessionSeq || !currentUser || currentUser.uid !== startedUid || !username) return;
 
   try {
@@ -1107,17 +1143,26 @@ async function updateProfileImageEverywhere(image) {
   if (!username) return;
 
   try {
-    const snapshot = await getDocs(collection(db, "friends"));
-    const batch = writeBatch(db);
-    let count = 0;
-
-    snapshot.forEach((item) => {
+    /* 自分が入っている友達関係だけを読む（以前は friends を全件読んでいた） */
+    const [asUser1, asUser2] = await Promise.all([
+      getDocs(query(collection(db, "friends"), where("user1", "==", username))),
+      getDocs(query(collection(db, "friends"), where("user2", "==", username)))
+    ]);
+    const updates = new Map();
+    const add = (ref, data) => updates.set(ref.path, { ref, data: { ...(updates.get(ref.path)?.data || {}), ...data } });
+    [...asUser1.docs, ...asUser2.docs].forEach((item) => {
       const data = item.data();
-      if (data.user1 === username) { batch.update(item.ref, { user1Photo: image }); count++; }
-      if (data.user2 === username) { batch.update(item.ref, { user2Photo: image }); count++; }
+      if (data.user1 === username) add(item.ref, { user1Photo: image });
+      if (data.user2 === username) add(item.ref, { user2Photo: image });
     });
 
-    if (count > 0) await batch.commit();
+    /* 1回の書き込みは500件まで */
+    const list = [...updates.values()];
+    for (let i = 0; i < list.length; i += 400) {
+      const batch = writeBatch(db);
+      list.slice(i, i + 400).forEach(({ ref, data }) => batch.update(ref, data));
+      await batch.commit();
+    }
   } catch (error) {
     console.error("プロフィール画像同期エラー:", error);
   }
@@ -1148,8 +1193,6 @@ changeNameButton?.addEventListener("click", async () => {
     }
 
     const oldName = username;
-    const oldUserSnap = await getDoc(doc(db, "users", oldName));
-    const oldUserData = oldUserSnap.exists() ? oldUserSnap.data() : {};
 
     await setDoc(newUserRef, {
       uid: currentUser.uid,
@@ -1161,30 +1204,21 @@ changeNameButton?.addEventListener("click", async () => {
       ...(isNotifySetupDoneLocally() ? { notificationSetupDone: true } : {})
     });
 
-    /* コイン・ボーナス受け取り済み・累計賭け金・ゆう銀行（預金・借入）・ゆう株・ログインボーナス・お知らせの既読の状態を新しい名前に引き継ぐ
-       （引き継がないと、次に開いたときに初期コインやボーナスがもう一度付いてしまう） */
-    const carriedCoinFields = {};
-    ["coins", "bonus500Granted", "bonus500GrantedAt", "totalBetAmount", "bank", "stocks", "lastLoginBonusDate", "lastAnnouncementReadAt"].forEach((key) => {
-      if (oldUserData[key] !== undefined) carriedCoinFields[key] = oldUserData[key];
-    });
-    if (Object.keys(carriedCoinFields).length > 0) {
-      try {
-        await updateDoc(newUserRef, carriedCoinFields);
-      } catch (error) {
-        console.error("ゆうcoinの引き継ぎエラー:", error);
-      }
+    /* コイン・ゆう銀行・ゆう株・累計賭け金・ボーナス・お知らせ既読の引き継ぎと、古い名前のデータの削除は Worker が行う
+       （ブラウザは経済項目を書けない。引き継がないと、次に開いたときに初期コインやボーナスがもう一度付いてしまう）。
+       古い名前と新しい名前のどちらも自分（uid）であることをサーバーが確かめる */
+    try {
+      await callEconomyApi("renameCarry", { from: oldName, to: trimmed });
+    } catch (error) {
+      console.error("ゆうcoinの引き継ぎエラー:", error?.economyCode || error);
     }
 
     username = trimmed;
     localStorage.setItem("yuuchat_username", username);
 
-    await migrateUsername(oldName, username);
-
-    try {
-      await deleteDoc(doc(db, "users", oldName));
-    } catch (error) {
-      console.warn("旧ユーザーデータ削除失敗:", error);
-    }
+    /* メッセージ・グループ・友達関係の名前の書き換えと名前クレームの更新は renameCarry（サーバー）が行う。
+       新しい名前クレームをトークンに反映してから購読をやり直す（チャットの本人確認に使う） */
+    try { await currentUser.getIdToken(true); } catch (error) { console.error("トークン更新エラー:", error); }
 
     if (myName) myName.textContent = username;
     updateFcmTokenUsername();
@@ -1199,79 +1233,9 @@ changeNameButton?.addEventListener("click", async () => {
   }
 });
 
-/* =========================================================
-   名前変更時のデータ移行
-========================================================= */
-
-async function migrateUsername(oldName, newName) {
-  if (!oldName || !newName || oldName === newName) return;
-
-  try {
-    /* 友達 */
-    const friendsSnapshot = await getDocs(collection(db, "friends"));
-    const friendBatch = writeBatch(db);
-    let friendChanged = false;
-
-    friendsSnapshot.forEach((friendDoc) => {
-      const data = friendDoc.data();
-      const updateData = {};
-      if (data.user1 === oldName) updateData.user1 = newName;
-      if (data.user2 === oldName) updateData.user2 = newName;
-      if (data.requestedBy === oldName) updateData.requestedBy = newName;
-      if (data.acceptedBy === oldName) updateData.acceptedBy = newName;
-
-      if (Object.keys(updateData).length > 0) {
-        updateData.updatedAt = serverTimestamp();
-        friendBatch.update(friendDoc.ref, updateData);
-        friendChanged = true;
-      }
-    });
-    if (friendChanged) await friendBatch.commit();
-
-    /* グループ */
-    const groupsSnapshot = await getDocs(collection(db, "groups"));
-    const groupBatch = writeBatch(db);
-    let groupChanged = false;
-
-    groupsSnapshot.forEach((groupDoc) => {
-      const data = groupDoc.data();
-      const members = Array.isArray(data.members) ? [...data.members] : [];
-      const newMembers = members.map((m) => (m === oldName ? newName : m));
-      const updateData = {};
-
-      if (JSON.stringify(members) !== JSON.stringify(newMembers)) updateData.members = newMembers;
-      if (data.owner === oldName) updateData.owner = newName;
-
-      if (Object.keys(updateData).length > 0) {
-        updateData.updatedAt = serverTimestamp();
-        groupBatch.update(groupDoc.ref, updateData);
-        groupChanged = true;
-      }
-    });
-    if (groupChanged) await groupBatch.commit();
-
-    /* メッセージ */
-    const messagesSnapshot = await getDocs(collection(db, "messages"));
-    const messageBatch = writeBatch(db);
-    let messageChanged = false;
-
-    messagesSnapshot.forEach((messageDoc) => {
-      const data = messageDoc.data();
-      const updateData = {};
-      if (data.sender === oldName) updateData.sender = newName;
-      if (data.receiver === oldName) updateData.receiver = newName;
-
-      if (Object.keys(updateData).length > 0) {
-        messageBatch.update(messageDoc.ref, updateData);
-        messageChanged = true;
-      }
-    });
-    if (messageChanged) await messageBatch.commit();
-  } catch (error) {
-    console.error("名前変更データ移行エラー:", error);
-    throw error;
-  }
-}
+/* 名前変更のときの、名前が入ったメッセージ・グループ・友達関係の書き換えは、
+   通知サーバー（Cloudflare Worker）がサービスアカウントで行う（ブラウザは他人のメッセージ等を書き換えられない）。
+   本人の名前変更は renameCarry、管理者の強制変更は admin の renameUserRefs で引き継ぐ。 */
 
 /* =========================================================
    友達一覧
@@ -1799,7 +1763,8 @@ async function leaveGroup(groupId) {
       if (!snap.exists()) return;
       const data = snap.data();
       const remaining = (Array.isArray(data.members) ? data.members : []).filter((name) => name !== username);
-      if (remaining.length === 0) { deleteAfter = true; transaction.delete(ref); return; }
+      /* 最後の1人のときは、グループがまだある間にメッセージを消してからグループを消す（トランザクションの外で行う） */
+      if (remaining.length === 0) { deleteAfter = true; return; }
 
       const update = { members: remaining, [`lastReadAt.${currentUser.uid}`]: deleteField(), updatedAt: serverTimestamp() };
       const iAmAdmin = data.ownerUid ? data.ownerUid === currentUser.uid : data.owner === username;
@@ -1815,7 +1780,10 @@ async function leaveGroup(groupId) {
   closeChatModal();
   if (selectedChatType === "group" && selectedChat === groupId) resetChat();
   showAppToast("👥 グループ", `「${group.name || "グループ"}」から退出しました`);
-  if (deleteAfter) await deleteGroupMessages(groupId);
+  if (deleteAfter) {
+    await deleteGroupMessages(groupId);
+    try { await deleteDoc(doc(db, "groups", groupId)); } catch (error) { console.error("空グループの削除エラー:", error); }
+  }
 }
 
 async function deleteGroup(groupId) {
@@ -1823,12 +1791,13 @@ async function deleteGroup(groupId) {
   if (!isGroupAdmin(group)) throw new Error("NOT_ADMIN");
   if (!confirm(`「${group.name || "グループ"}」を削除しますか？\nメンバー全員のグループとメッセージが消え、元に戻せません。`)) return;
   await withGroupAction(async () => {
+    /* グループがまだある間にメッセージを消す（ルールは「グループの管理者か」をグループを見て確かめるため、先に消す） */
+    await deleteGroupMessages(groupId);
     await deleteDoc(doc(db, "groups", groupId));
   });
   closeChatModal();
   if (selectedChatType === "group" && selectedChat === groupId) resetChat();
   showAppToast("👥 グループ", `「${group.name || "グループ"}」を削除しました`);
-  await deleteGroupMessages(groupId);
 }
 
 /* 削除したグループのメッセージを消す（グループを削除したときだけ。500件ずつ） */
@@ -1936,8 +1905,16 @@ function renderChatHeaderForGroup(group) {
    チャット選択
 ========================================================= */
 
+/* すでに開いていて、メッセージの監視が正常に動いているチャットか（同じチャットをもう一度選んでも監視を作り直さない） */
+function isMessagesListenerActiveFor(type, chatId, friendshipId = null) {
+  if (!unsubscribeMessages || messagesListenerFailed) return false;
+  if (selectedChatType !== type || selectedChat !== chatId) return false;
+  return type !== "friend" || selectedFriendshipId === friendshipId;
+}
+
 function selectFriendChat(friend) {
   if (!friend) return;
+  const alreadyListening = isMessagesListenerActiveFor("friend", friend.friend, friend.friendshipId);
   selectedChatType = "friend";
   selectedChat = friend.friend;
   selectedFriendshipId = friend.friendshipId;
@@ -1948,11 +1925,13 @@ function selectFriendChat(friend) {
   if (sendButton) sendButton.disabled = false;
   renderFriends();
   renderGroups();
-  listenSelectedChatMessages();
+  if (alreadyListening) markSelectedChatAsRead();
+  else listenSelectedChatMessages();
 }
 
 function selectGroupChat(group) {
   if (!group) return;
+  const alreadyListening = isMessagesListenerActiveFor("group", group.id);
   selectedChatType = "group";
   selectedChat = group.id;
   selectedFriendshipId = null;
@@ -1963,10 +1942,12 @@ function selectGroupChat(group) {
   if (sendButton) sendButton.disabled = false;
   renderFriends();
   renderGroups();
-  listenSelectedChatMessages();
+  if (alreadyListening) markSelectedChatAsRead();
+  else listenSelectedChatMessages();
 }
 
 function resetChat() {
+  chatPaging = null;
   selectedChat = null;
   selectedChatType = null;
   selectedFriendshipId = null;
@@ -1976,6 +1957,7 @@ function resetChat() {
   if (chatHeader) chatHeader.textContent = "相手を選択してください";
   if (messageInput) messageInput.disabled = true;
   if (sendButton) sendButton.disabled = true;
+  if (!isSendingMessage) clearPendingImage();
   if (messagesElement) {
     messagesElement.innerHTML = `<div class="empty-state">チャットを選択してください</div>`;
   }
@@ -2011,45 +1993,196 @@ function isMessageForSelectedChat(message) {
   return false;
 }
 
-/* 選んだチャットのメッセージだけを購読する（以前は messages コレクション全体を購読していた）
-   ・グループ：groupId が一致するもの
-   ・友達：自分→相手、相手→自分 の2つ（どちらも等号だけの条件なので、複合インデックスは不要） */
+/* =========================================================
+   選んだチャットのメッセージ
+   ・開いたときは最新 MESSAGE_PAGE_SIZE 件だけを onSnapshot で購読する（新着・既読・送信取り消しなどはリアルタイムで反映）
+       グループ：groupId が一致するもの
+       友達：「自分→相手」または「相手→自分」（or で1つの問い合わせにまとめる）
+       どちらも createdAt の新しい順＋limit。保存の形は今まで通り
+   ・上へスクロールしたら（または一番上の「過去のメッセージを読み込む」を押したら）、いちばん古い読み込み済みのメッセージより前を
+     MESSAGE_PAGE_SIZE 件ずつ1回だけ読む（getDocs）。それより前が無くなったら、もう問い合わせない
+   ・読み込んだメッセージは ID ごとに1つだけ持つ（同じメッセージを重ねて表示しない）。新着で購読の範囲から外れたメッセージも表示し続ける
+   ・必要な複合インデックス（messages：sender＋receiver＋createdAt 降順／groupId＋createdAt 降順）が無くて問い合わせが失敗したときは、
+     以前と同じ「全件を購読する」方式に自動で切り替える（チャットが表示されなくなることはない）
+========================================================= */
+
+const MESSAGE_PAGE_SIZE = 15;
 let selectedChatMessages = [];
+let chatPaging = null;
+
+function buildChatMessagesQuery(type, chatId, extra = []) {
+  const base = collection(db, "messages");
+  if (type === "group") return query(base, where("groupId", "==", chatId), orderBy("createdAt", "desc"), ...extra);
+  return query(base, or(
+    and(where("sender", "==", username), where("receiver", "==", chatId)),
+    and(where("sender", "==", chatId), where("receiver", "==", username))
+  ), orderBy("createdAt", "desc"), ...extra);
+}
+
+function toChatMessage(snap) {
+  return { id: snap.id, ...snap.data({ serverTimestamps: "estimate" }) };
+}
+
+/* 読み込んだメッセージ（購読分＋過去分）を古い順に並べて描く */
+function renderPagedChat(paging, scrollMode) {
+  if (paging !== chatPaging) return;
+  selectedChatMessages = [...paging.messages.values()]
+    .filter(isMessageForSelectedChat)
+    .sort((a, b) => timestampMillis(a.createdAt, Infinity) - timestampMillis(b.createdAt, Infinity));
+  renderSelectedMessages(selectedChatMessages, { scrollMode, olderState: paging.fallback ? null : paging.olderState });
+  markSelectedChatAsRead();
+}
 
 function listenSelectedChatMessages() {
   if (unsubscribeMessages) { unsubscribeMessages(); unsubscribeMessages = null; }
+  messagesListenerFailed = false;
   selectedChatMessages = [];
+  chatPaging = null;
   if (!username || !selectedChat) return;
 
   if (messagesElement) messagesElement.innerHTML = `<div class="loading">読み込み中...</div>`;
 
-  const chatKey = `${selectedChatType}:${selectedChat}`;
-  const queries = selectedChatType === "group"
-    ? [query(collection(db, "messages"), where("groupId", "==", selectedChat))]
+  const paging = {
+    key: `${selectedChatType}:${selectedChat}`,
+    type: selectedChatType,
+    chatId: selectedChat,
+    messages: new Map(),   /* id → メッセージ（購読分と過去分をまとめて1つ） */
+    snaps: new Map(),      /* id → ドキュメント（過去分を読むときの起点に使う） */
+    liveIds: new Set(),    /* いま購読している最新分の id */
+    olderState: "unknown", /* "more"：まだ前がある／"loading"：読み込み中／"none"：もう無い（サーバーの結果を受け取るまでは "unknown"） */
+    serverSynced: false,   /* サーバーから最新 MESSAGE_PAGE_SIZE 件を受け取ったか */
+    firstRendered: false,
+    fallback: false
+  };
+  chatPaging = paging;
+
+  /* 開き直したときなどは、まず端末に残っていたデータ（fromCache）だけで結果が届くことがある。
+     その件数は最新 MESSAGE_PAGE_SIZE 件とは限らない（足りない・間が抜けている）ので、
+     ・端末のデータの段階では表示だけして、「過去のメッセージがあるか」は決めない（ボタンも出さず、過去分も読まない）
+     ・サーバーからの最初の結果を受け取ったら、表示をその最新件数で置き換え、そこで「過去のメッセージがあるか」を決める
+     サーバーの結果が端末のデータと同じでも届くように includeMetadataChanges を付ける。
+     受け取ったあとの「中身が変わらない知らせ」（送信中→送信済み・オンライン／オフラインの切り替えだけ）は描き直さない。
+     includeMetadataChanges は知らせの種類が増えるだけで、読み取り回数は増えない */
+  const unsubscribe = onSnapshot(
+    buildChatMessagesQuery(paging.type, paging.chatId, [limit(MESSAGE_PAGE_SIZE)]),
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      if (chatPaging !== paging) return;
+      const fromServer = !snapshot.metadata.fromCache;
+      const firstFromServer = fromServer && !paging.serverSynced;
+      if (paging.serverSynced && snapshot.docChanges().length === 0) {
+        /* 中身の変わらない知らせ：描き直さず、過去分を読む起点の判断に使う送信中の印（hasPendingWrites）だけ新しくする */
+        snapshot.docs.forEach((item) => { if (paging.snaps.has(item.id)) paging.snaps.set(item.id, item); });
+        return;
+      }
+      if (firstFromServer) {
+        /* 端末のデータで先に描いた分を、サーバーの最新件数で置き換える（範囲の外の古いメッセージを残さない） */
+        paging.serverSynced = true;
+        paging.messages = new Map();
+        paging.snaps = new Map();
+        paging.olderState = snapshot.size < MESSAGE_PAGE_SIZE ? "none" : "more";
+      }
+      paging.liveIds = new Set(snapshot.docs.map((item) => item.id));
+      snapshot.docs.forEach((item) => {
+        paging.messages.set(item.id, toChatMessage(item));
+        paging.snaps.set(item.id, item);
+      });
+      renderPagedChat(paging, paging.firstRendered ? "auto" : "bottom");
+      paging.firstRendered = true;
+    },
+    (error) => {
+      if (chatPaging !== paging) return;
+      if (error?.code === "failed-precondition") {
+        /* 複合インデックスがまだ無い：以前と同じ全件の購読に切り替える */
+        console.warn("チャットの最新件数だけの読み込みに必要なインデックスが無いため、全件の読み込みに切り替えます:", error.message);
+        listenSelectedChatMessagesUnlimited(paging);
+        return;
+      }
+      console.error("チャット読み込みエラー:", error);
+      messagesListenerFailed = true; /* もう一度選んだときは監視を作り直す */
+      if (messagesElement) {
+        messagesElement.innerHTML = `<div class="empty-state">メッセージの読み込みに失敗しました</div>`;
+      }
+    }
+  );
+  unsubscribeMessages = () => unsubscribe();
+}
+
+/* いちばん古い読み込み済みのメッセージより前を MESSAGE_PAGE_SIZE 件読む（1回だけ。それ以上前が無ければ以後は読まない） */
+async function loadOlderChatMessages() {
+  const paging = chatPaging;
+  if (!paging || paging.fallback || paging.olderState !== "more") return;
+
+  let oldest = null;
+  paging.snaps.forEach((snap, id) => {
+    const message = paging.messages.get(id);
+    if (!message?.createdAt || snap.metadata?.hasPendingWrites) return;
+    if (!oldest || timestampMillis(message.createdAt) < timestampMillis(paging.messages.get(oldest.id).createdAt)) oldest = snap;
+  });
+  if (!oldest) { paging.olderState = "none"; renderPagedChat(paging, "keep"); return; }
+
+  paging.olderState = "loading";
+  renderPagedChat(paging, "keep");
+  try {
+    const snap = await getDocs(buildChatMessagesQuery(paging.type, paging.chatId, [startAfter(oldest), limit(MESSAGE_PAGE_SIZE)]));
+    if (chatPaging !== paging) return;
+    snap.docs.forEach((item) => {
+      if (!paging.messages.has(item.id)) paging.messages.set(item.id, toChatMessage(item));
+      if (!paging.snaps.has(item.id)) paging.snaps.set(item.id, item);
+    });
+    paging.olderState = snap.size < MESSAGE_PAGE_SIZE ? "none" : "more";
+  } catch (error) {
+    console.error("過去のメッセージの読み込みエラー:", error);
+    if (chatPaging !== paging) return;
+    paging.olderState = "more"; /* もう一度試せるように */
+  }
+  renderPagedChat(paging, "keep");
+}
+
+/* 過去分として読んだメッセージに自分がした変更（送信取り消し・リアクション）は購読で届かないので、そのメッセージだけ読み直す */
+async function refreshLoadedChatMessage(messageId) {
+  const paging = chatPaging;
+  if (!paging || paging.fallback || !paging.messages.has(messageId) || paging.liveIds.has(messageId)) return;
+  try {
+    const snap = await getDoc(doc(db, "messages", messageId));
+    if (chatPaging !== paging || !snap.exists()) return;
+    paging.messages.set(messageId, toChatMessage(snap));
+    renderPagedChat(paging, "keep");
+  } catch (error) {
+    console.warn("メッセージの読み直しエラー:", error);
+  }
+}
+
+/* 以前と同じ方式（そのチャットのメッセージを全件購読する）。インデックスが無いときだけ使う */
+function listenSelectedChatMessagesUnlimited(paging) {
+  if (unsubscribeMessages) { unsubscribeMessages(); unsubscribeMessages = null; }
+  paging.fallback = true;
+  paging.olderState = "none";
+
+  const queries = paging.type === "group"
+    ? [query(collection(db, "messages"), where("groupId", "==", paging.chatId))]
     : [
-      query(collection(db, "messages"), where("sender", "==", username), where("receiver", "==", selectedChat)),
-      query(collection(db, "messages"), where("sender", "==", selectedChat), where("receiver", "==", username))
+      query(collection(db, "messages"), where("sender", "==", username), where("receiver", "==", paging.chatId)),
+      query(collection(db, "messages"), where("sender", "==", paging.chatId), where("receiver", "==", username))
     ];
   const parts = queries.map(() => null);
 
   const update = () => {
-    if (parts.some((part) => part === null)) return;
-    if (`${selectedChatType}:${selectedChat}` !== chatKey) return;
-    selectedChatMessages = parts.flat()
-      .filter(isMessageForSelectedChat)
-      .sort((a, b) => timestampMillis(a.createdAt, Infinity) - timestampMillis(b.createdAt, Infinity));
-    renderSelectedMessages(selectedChatMessages);
-    markSelectedChatAsRead();
+    if (parts.some((part) => part === null) || chatPaging !== paging) return;
+    paging.messages = new Map(parts.flat().map((m) => [m.id, m]));
+    renderPagedChat(paging, paging.firstRendered ? "auto" : "bottom");
+    paging.firstRendered = true;
   };
 
   const unsubscribers = queries.map((q, index) => onSnapshot(
     q,
     (snapshot) => {
-      parts[index] = snapshot.docs.map((item) => ({ id: item.id, ...item.data({ serverTimestamps: "estimate" }) }));
+      parts[index] = snapshot.docs.map(toChatMessage);
       update();
     },
     (error) => {
       console.error("チャット読み込みエラー:", error);
+      messagesListenerFailed = true; /* もう一度選んだときは監視を作り直す */
       if (messagesElement) {
         messagesElement.innerHTML = `<div class="empty-state">メッセージの読み込みに失敗しました</div>`;
       }
@@ -2058,15 +2191,47 @@ function listenSelectedChatMessages() {
   unsubscribeMessages = () => unsubscribers.forEach((unsubscribe) => unsubscribe());
 }
 
-function renderSelectedMessages(allMessages) {
+/* 上の端までスクロールしたら、過去のメッセージを読み込む */
+messagesElement?.addEventListener("scroll", () => {
+  if (messagesElement.scrollTop < 60 && chatPaging?.olderState === "more") loadOlderChatMessages();
+}, { passive: true });
+
+/* scrollMode：
+     "bottom"：一番下へ（チャットを開いた最初）
+     "keep"  ：見ていた位置をそのまま（過去のメッセージを上に足したとき）
+     "auto"  ：一番下の近くを見ていたとき・自分が新しく送ったときは一番下へ、上の方を読んでいるときは位置をそのまま
+   olderState：一番上に出す「過去のメッセージを読み込む」の状態（null なら出さない） */
+function renderSelectedMessages(allMessages, { scrollMode = "bottom", olderState = null } = {}) {
   if (!messagesElement) return;
 
   const messages = allMessages.filter(isMessageForSelectedChat);
+
+  /* 描き直す前に、見ていた位置（画面の一番上に見えているメッセージと、そのずれ）を覚えておく */
+  const previousLastId = messagesElement.dataset.lastMessageId || "";
+  const nearBottom = messagesElement.scrollHeight - messagesElement.scrollTop - messagesElement.clientHeight < 150;
+  let anchorId = null, anchorOffset = 0;
+  const viewTop = messagesElement.getBoundingClientRect().top;
+  for (const row of messagesElement.querySelectorAll(".message-row[data-message-id]")) {
+    const rect = row.getBoundingClientRect();
+    if (rect.bottom > viewTop) { anchorId = row.dataset.messageId; anchorOffset = rect.top - viewTop; break; }
+  }
+
   messagesElement.innerHTML = "";
 
   if (messages.length === 0) {
+    messagesElement.dataset.lastMessageId = "";
     messagesElement.innerHTML = `<div class="empty-state">まだメッセージがありません</div>`;
     return;
+  }
+
+  if (olderState === "more" || olderState === "loading") {
+    const loader = document.createElement("button");
+    loader.type = "button";
+    loader.className = "messages-older";
+    loader.disabled = olderState === "loading";
+    loader.textContent = olderState === "loading" ? "読み込み中…" : "↑ 過去のメッセージを読み込む";
+    loader.addEventListener("click", () => loadOlderChatMessages());
+    messagesElement.appendChild(loader);
   }
 
   const readInfo = getSelectedChatReadInfo();
@@ -2076,7 +2241,31 @@ function renderSelectedMessages(allMessages) {
     messagesElement.appendChild(row);
   });
 
-  requestAnimationFrame(() => { messagesElement.scrollTop = messagesElement.scrollHeight; });
+  const last = messages[messages.length - 1];
+  messagesElement.dataset.lastMessageId = last.id || "";
+  const sentByMeNow = last.id !== previousLastId && (last.senderUid ? last.senderUid === currentUser?.uid : last.sender === username);
+  const toBottom = scrollMode === "bottom" || (scrollMode === "auto" && (nearBottom || sentByMeNow || !anchorId));
+
+  const restore = () => {
+    if (toBottom) { messagesElement.scrollTop = messagesElement.scrollHeight; return; }
+    const row = anchorId && messagesElement.querySelector(`.message-row[data-message-id="${CSS.escape(anchorId)}"]`);
+    if (row) messagesElement.scrollTop += (row.getBoundingClientRect().top - messagesElement.getBoundingClientRect().top) - anchorOffset;
+  };
+  restore();
+  requestAnimationFrame(restore);
+
+  /* 画像はあとから読み込まれて高さが変わるので、読み込まれたら位置を合わせ直す（その間にユーザーが動かしていなければ） */
+  const expectedTop = () => messagesElement.scrollTop;
+  let settledTop = null;
+  requestAnimationFrame(() => { settledTop = expectedTop(); });
+  messagesElement.querySelectorAll("img").forEach((img) => {
+    if (img.complete) return;
+    img.addEventListener("load", () => {
+      if (settledTop !== null && Math.abs(messagesElement.scrollTop - settledTop) > 2) return;
+      restore();
+      settledTop = expectedTop();
+    }, { once: true });
+  });
 }
 
 function renderMessage(message, readInfo = getSelectedChatReadInfo()) {
@@ -2362,6 +2551,7 @@ async function toggleReaction(message, emoji) {
     else reactions[emoji] = users;
 
     await updateDoc(messageRef, { reactions });
+    refreshLoadedChatMessage(message.id);
   } catch (error) {
     console.error("リアクションエラー:", error);
   }
@@ -2385,7 +2575,10 @@ async function unsendMessage(messageId) {
       return;
     }
 
-    await updateDoc(messageRef, { deleted: true, deletedAt: serverTimestamp() });
+    /* 画像はこのメッセージのドキュメントの中だけにある（ほかのメッセージ・グループと共有していない）ので、
+       取り消したら画像のデータも消す（取り消したメッセージの画像は表示しないので、残しても保存容量と通信量を使うだけ） */
+    await updateDoc(messageRef, { deleted: true, deletedAt: serverTimestamp(), image: deleteField() });
+    refreshLoadedChatMessage(messageId);
   } catch (error) {
     console.error("送信取り消しエラー:", error);
     alert("送信取り消しに失敗しました。");
@@ -2405,25 +2598,71 @@ messageInput?.addEventListener("keydown", (event) => {
   }
 });
 
+/* 送信中は「送信中…」を出し、送信ボタン・画像の選択と解除を止める（二重送信を防ぐ） */
+function setSendingState(sending) {
+  isSendingMessage = sending;
+  if (sendButton) {
+    sendButton.textContent = sending ? "送信中…" : "送信";
+    sendButton.disabled = sending || !selectedChat;
+    sendButton.classList.toggle("sending", sending);
+    sendButton.setAttribute("aria-busy", sending ? "true" : "false");
+  }
+  renderImagePreview();
+}
+
+/* 送信の失敗を、ユーザーに分かる言葉にする */
+function describeSendError(error, hasImage) {
+  const code = String(error?.code || "");
+  const message = String(error?.message || "");
+  if (code === "unavailable" || code === "deadline-exceeded" || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+    return "通信できませんでした。電波の良い場所で、もう一度送信してください。";
+  }
+  if (hasImage && (code === "invalid-argument" || /maximum|size|too large|exceeds/i.test(message))) {
+    return "画像が大きすぎて送信できませんでした。別の画像を選んでください。";
+  }
+  if (code === "permission-denied" || code === "unauthenticated") {
+    return "送信する権限がありませんでした。ログインし直してから、もう一度送信してください。";
+  }
+  return hasImage ? "画像を送信できませんでした。もう一度送信してください。" : "メッセージを送信できませんでした。";
+}
+
 async function sendMessage() {
+  if (isSendingMessage) return;
   if (!currentUser || !username) return;
   if (!selectedChat || !selectedChatType) {
     alert("友達またはグループを選択してください。");
     return;
   }
 
+  /* 画像を準備中（小さくしている途中）は送らない。終わったら送れる */
+  if (pendingImage?.status === "preparing") {
+    renderImagePreview("画像を準備しています。少し待ってから送信してください。");
+    return;
+  }
+
   const text = messageInput?.value?.trim() || "";
-  const image = pendingImageData || null;
-  if (!text && !image) return;
+  const sendingImage = pendingImage?.status === "ready" ? pendingImage : null;
+  const image = sendingImage?.dataURL || null;
+  if (!text && !image) {
+    if (pendingImage?.status === "error") renderImagePreview();
+    return;
+  }
+
+  if (image && typeof navigator !== "undefined" && navigator.onLine === false) {
+    sendingImage.error = "通信できませんでした。電波の良い場所で、もう一度送信してください。";
+    renderImagePreview();
+    return;
+  }
 
   /* 入力欄は送信した時点ですぐ空にする（以前は保存が終わってから空にしていたため、
-     続けて打ち始めた次のメッセージが消えてしまうことがあった）。失敗したら元に戻す */
+     続けて打ち始めた次のメッセージが消えてしまうことがあった）。失敗したら元に戻す
+     画像は送信が成功するまで選択したまま（失敗したらそのまま送り直せる） */
   const replyingAtSend = replyingMessage;
   if (messageInput) { messageInput.value = ""; messageInput.placeholder = "メッセージを入力"; }
-  pendingImageData = null;
-  if (imageInput) imageInput.value = "";
+  if (sendingImage) sendingImage.error = "";
   replyingMessage = null;
   updateReplyBar();
+  setSendingState(true);
 
   try {
     const messageData = {
@@ -2471,16 +2710,18 @@ async function sendMessage() {
       batch.set(chatRef.ref, chatUpdate, { merge: true });
     }
     await batch.commit();
+    /* 送信が成功したときだけ、送った画像の選択を解除する（送信中に別の画像を選び直していたら、そちらは残す） */
+    if (sendingImage && pendingImage === sendingImage) clearPendingImage();
+    setSendingState(false);
     requestPushNotification(messageRef.id);
   } catch (error) {
     console.error("メッセージ送信エラー:", error);
+    const errorText = describeSendError(error, Boolean(image));
     if (messageInput && !messageInput.value) messageInput.value = text;
-    if (image && !pendingImageData) {
-      pendingImageData = image;
-      if (messageInput) messageInput.placeholder = "画像を選択しました。送信できます";
-    }
     if (replyingAtSend && !replyingMessage) { replyingMessage = replyingAtSend; updateReplyBar(); }
-    alert("メッセージを送信できませんでした。");
+    if (sendingImage && pendingImage === sendingImage) sendingImage.error = errorText;
+    setSendingState(false);
+    alert(errorText);
   }
 }
 
@@ -2488,30 +2729,162 @@ async function sendMessage() {
    画像送信
 ========================================================= */
 
-imageButton?.addEventListener("click", () => imageInput?.click());
+/* 画像はメッセージ（messages/{id}.image）に data URL のまま保存する（以前からの形。表示側はそのまま）。
+   Firestore の1ドキュメントは 1MiB までなので、大きな画像は送る前に端末の中で小さくする
+   （以前はそのまま保存していたため、約750KBを超える写真は保存できずに送信が失敗していた）
+   ・選べるファイルは今まで通り 5MB まで（制限は緩めない）
+   ・元の画像が十分小さければそのまま送る（GIF のアニメーションなども保つ）
+   ・大きければ長い辺 1600px まで縮めて JPEG にし、data URL が CHAT_IMAGE_MAX_LENGTH 以下になるまで画質・大きさを下げる
+   ・CHAT_IMAGE_MAX_LENGTH は 300KB（以前は 700KB）。Firestore の無料枠（保存容量・通信量）を守るため。
+     写真はふつう長い辺 1600〜1280px のまま収まる。これより大きい GIF・PNG は JPEG に変わる（GIF のアニメーションは止まる） */
+const CHAT_IMAGE_MAX_FILE_BYTES = 5 * 1024 * 1024;
+const CHAT_IMAGE_MAX_LENGTH = 300 * 1024;
+const CHAT_IMAGE_SIDES = [1600, 1280, 1024, 800, 640];
+const CHAT_IMAGE_QUALITIES = [0.85, 0.75, 0.65, 0.55];
+async function prepareChatImage(file) {
+  const original = await readFileAsDataURL(file);
+  if (original.length <= CHAT_IMAGE_MAX_LENGTH && /^data:image\/(jpeg|png|gif|webp);/.test(original)) return original;
+
+  const url = URL.createObjectURL(file);
+  try {
+    const image = await loadImageElement(url);
+    const width = image.naturalWidth || image.width;
+    const height = image.naturalHeight || image.height;
+    if (!width || !height) throw new Error("IMAGE_LOAD_FAILED");
+    for (const side of CHAT_IMAGE_SIDES) {
+      const scale = Math.min(1, side / Math.max(width, height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#fff"; // 透明な部分（PNG など）が黒くならないように
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      for (const quality of CHAT_IMAGE_QUALITIES) {
+        const dataURL = canvas.toDataURL("image/jpeg", quality);
+        if (dataURL.length <= CHAT_IMAGE_MAX_LENGTH) return dataURL;
+      }
+    }
+    throw new Error("IMAGE_TOO_LARGE");
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/* data URL の中身のおおよそのバイト数 */
+function dataURLBytes(dataURL) {
+  const base64 = String(dataURL || "").split(",")[1] || "";
+  return Math.floor(base64.length * 3 / 4);
+}
+
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+/* 選択中の画像の表示（プレビュー・ファイル名・サイズ・状態・解除ボタン） */
+function renderImagePreview(notice = "") {
+  if (!imagePreviewBar) return;
+  imageButton?.classList.toggle("has-image", Boolean(pendingImage));
+  imageButton?.setAttribute("title", pendingImage ? "画像を選び直す" : "画像を送る");
+  if (imageButton) imageButton.disabled = isSendingMessage;
+  if (!pendingImage) {
+    imagePreviewBar.classList.add("hidden");
+    imagePreviewBar.classList.remove("is-error", "is-sending");
+    if (imagePreviewThumb) { imagePreviewThumb.removeAttribute("src"); imagePreviewThumb.classList.add("hidden"); }
+    if (imagePreviewName) imagePreviewName.textContent = "";
+    if (imagePreviewStatus) imagePreviewStatus.textContent = "";
+    return;
+  }
+
+  const item = pendingImage;
+  imagePreviewBar.classList.remove("hidden");
+  if (imagePreviewThumb) {
+    if (item.dataURL) {
+      if (imagePreviewThumb.getAttribute("src") !== item.dataURL) imagePreviewThumb.src = item.dataURL;
+      imagePreviewThumb.classList.remove("hidden");
+    } else {
+      imagePreviewThumb.removeAttribute("src");
+      imagePreviewThumb.classList.add("hidden");
+    }
+  }
+  if (imagePreviewName) {
+    const size = formatFileSize(item.size);
+    imagePreviewName.textContent = size ? `${item.name}（${size}）` : item.name;
+    imagePreviewName.title = item.name;
+  }
+
+  let status = "";
+  if (isSendingMessage && item.status === "ready") status = "送信中…";
+  else if (item.error) status = item.error;
+  else if (notice) status = notice;
+  else if (item.status === "preparing") status = "画像を準備中…";
+  else if (item.status === "ready") status = item.sentBytes && item.sentBytes < item.size ? `送信できます（${formatFileSize(item.sentBytes)}に小さくして送ります）` : "送信できます";
+  if (imagePreviewStatus) imagePreviewStatus.textContent = status;
+  imagePreviewBar.classList.toggle("is-error", Boolean(item.error || notice) && !isSendingMessage);
+  imagePreviewBar.classList.toggle("is-sending", isSendingMessage);
+  if (imagePreviewClear) imagePreviewClear.disabled = isSendingMessage;
+}
+
+/* 選んだ画像の選択を解除する（送信済みのメッセージや履歴には触れない） */
+function clearPendingImage() {
+  pendingImageSeq++;
+  pendingImage = null;
+  if (imageInput) imageInput.value = ""; // 同じ画像をもう一度選んでも選び直せるように
+  renderImagePreview();
+}
+
+imagePreviewClear?.addEventListener("click", () => {
+  if (isSendingMessage) return;
+  clearPendingImage();
+});
+
+imageButton?.addEventListener("click", () => {
+  if (isSendingMessage) return;
+  imageInput?.click();
+});
 
 imageInput?.addEventListener("change", async (event) => {
   const file = event.target.files?.[0];
   if (!file) return;
+  if (isSendingMessage) { imageInput.value = ""; return; }
 
   if (!file.type.startsWith("image/")) {
     alert("画像ファイルを選択してください。");
+    imageInput.value = "";
     return;
   }
 
-  if (file.size > 5 * 1024 * 1024) {
+  if (file.size > CHAT_IMAGE_MAX_FILE_BYTES) {
     alert("画像は5MB以下にしてください。");
     imageInput.value = "";
     return;
   }
 
+  /* 新しく選んだ画像に切り替える（準備が終わる前に選び直したら、古い方の結果は使わない） */
+  const seq = ++pendingImageSeq;
+  const item = { id: seq, name: file.name || "画像", size: file.size, status: "preparing", dataURL: "", sentBytes: 0, error: "" };
+  pendingImage = item;
+  imageInput.value = "";
+  renderImagePreview();
+
   try {
-    pendingImageData = await readFileAsDataURL(file);
-    if (messageInput) messageInput.placeholder = "画像を選択しました。送信できます";
+    const dataURL = await prepareChatImage(file);
+    if (pendingImageSeq !== seq) return;
+    item.dataURL = dataURL;
+    item.sentBytes = dataURLBytes(dataURL);
+    item.status = "ready";
   } catch (error) {
     console.error("画像読み込みエラー:", error);
-    pendingImageData = null;
+    if (pendingImageSeq !== seq) return;
+    item.status = "error";
+    item.error = error?.message === "IMAGE_TOO_LARGE"
+      ? "画像を小さくできませんでした。別の画像を選んでください。"
+      : "この画像は読み込めませんでした。別の画像（JPEG / PNG など）を選んでください。";
   }
+  renderImagePreview();
 });
 
 function readFileAsDataURL(file) {
@@ -2628,6 +3001,9 @@ let lastReadWriteKey = "";
 
 async function markSelectedChatAsRead() {
   if (!currentUser || !username || !selectedChat || !isChatScreenVisible()) return;
+  /* 端末に残っていたデータだけで描いている段階（サーバーの最新をまだ受け取っていない）では既読にしない。
+     同じチャットのタップ・アプリに戻ったとき・チャット画面への切り替えなど、どこから呼ばれても同じ */
+  if (chatPaging && !chatPaging.fallback && !chatPaging.serverSynced) return;
   const chatRef = getSelectedChatRef();
   if (!chatRef) return;
 
@@ -3244,7 +3620,7 @@ tabButtons.forEach((button) => {
 function switchView(view) {
   /* 👤 ユーザー管理は管理者だけ（タブも管理者にだけ表示） */
   if (view === "usermanage" && !isAdminUser()) view = "chat";
-  const views = { chat: chatView, derby: derbyView, economy: economyView, games: gamesView, announcements: announcementsView, mypage: mypageView, usermanage: userManageView };
+  const views = { chat: chatView, derby: derbyView, economy: economyView, games: gamesView, yuworld: yuworldView, announcements: announcementsView, mypage: mypageView, usermanage: userManageView };
 
   Object.entries(views).forEach(([name, element]) => {
     if (!element) return;
@@ -3260,12 +3636,25 @@ function switchView(view) {
   if (view === "mypage") loadMyPage();
   if (view === "derby") { refreshDerbySubscriptionsIfNeeded(); renderRaceInfo(); }
   else stopDerbySubscriptions();
+  /* ルーム一覧の監視はゲーム画面を開いている間だけ（戻ったときに最新の一覧を読み直す）。開いているルームの監視は続ける */
   if (view === "games") loadGameRooms();
+  else stopGameRoomsSubscription();
   if (view === "economy") openEconomyView();
+  if (view === "yuworld") openYuWorldView();
+  else stopYuWorldView();
   if (view === "announcements") openAnnouncementsView();
   else stopAnnouncementsSubscription();
   if (view === "usermanage") openUserManageView();
 }
+
+/* 🎡 ゆうワールド（ゆうスロ）を初期化する。トークン・ユーザー名・最上位管理者かどうかは呼ばれた時点の状態を使う */
+initYuWorld({
+  endpoint: NOTIFY_ENDPOINT.replace(/\/notify$/, "/yuslot"),
+  getToken: () => currentUser.getIdToken(),
+  getUsername: () => username,
+  isTopAdmin: () => isAdminUser(),
+  onSettled: () => { /* 精算後は既存の coins リスナーが users の残高を拾って各画面を更新する */ }
+});
 
 /* =========================================================
    ログアウト
@@ -3306,6 +3695,8 @@ logoutButton?.addEventListener("click", async () => {
     currentWinPool = {};
     myCoins = 0;
     myAllBets = [];
+    betHistoryErrorCode = "";
+    myPageStatsShownForUid = "";
     myLatestUserData = null;
     resetLoginBonusState();
     economyBankAmount = "";
@@ -3336,6 +3727,8 @@ async function loadMyPage() {
   if (!currentUser) return;
   if (myName) myName.textContent = username || "ゲスト";
 
+  /* 馬券の購読がエラーで止まっていたら、マイページを開いたこのときに1回だけ作り直す（自動では繰り返さない） */
+  refreshMyBetHistoryWindow({ retryAfterError: true });
   await loadMyPageStats();
   await loadCoinRanking();
 }
@@ -3343,6 +3736,44 @@ async function loadMyPage() {
 async function loadMyPageStats() {
   const session = appSessionSeq;
   if (!currentUser || !username) return;
+
+  /* 自分の全馬券を読む代わりに、Firestore の集計（件数・合計）だけを読む（集計1回は、1,000件ごとに読み取り1回）。
+     条件は等号だけなので複合インデックスは不要。
+     集計そのものが使えないとき（BET_STATS_FALLBACK_CODES）だけ、以前と同じく全件を読んで数える。
+     無料枠の超過・権限・通信などのエラーでは全件を読まない（読み取りが増えるだけで直らず、オフラインでは手元の古いデータで誤った値になる）。
+     そのときは前に表示した値をそのまま残し、まだ一度も表示していなければ「—」にする（0 とは表示しない） */
+  const uid = currentUser.uid;
+  const render = (betCount, hitCount, profit) => {
+    if (myBetCount) myBetCount.textContent = betCount;
+    if (myHitCount) myHitCount.textContent = hitCount;
+    if (myProfit) myProfit.textContent = (profit >= 0 ? "+" : "") + profit;
+    myPageStatsShownForUid = uid;
+  };
+  const renderUnavailable = () => {
+    if (myPageStatsShownForUid === uid) return;
+    [myBetCount, myHitCount, myProfit].forEach((el) => { if (el) el.textContent = "—"; });
+  };
+
+  try {
+    const mine = query(collection(db, "raceBets"), where("uid", "==", currentUser.uid));
+    const settled = query(mine, where("settled", "==", true));
+    const [all, totals, hits] = await Promise.all([
+      getAggregateFromServer(mine, { n: aggregateCount() }),
+      getAggregateFromServer(settled, { amount: aggregateSum("amount"), payout: aggregateSum("payout") }),
+      getAggregateFromServer(query(settled, where("win", "==", true)), { n: aggregateCount() })
+    ]);
+    if (session !== appSessionSeq) return;
+    render(all.data().n, hits.data().n, Number(totals.data().payout || 0) - Number(totals.data().amount || 0));
+    return;
+  } catch (error) {
+    if (isInterruptedBySignOut(session)) return;
+    if (!BET_STATS_FALLBACK_CODES.has(error?.code)) {
+      console.warn("マイページ統計を読み込めませんでした（全件は読みません）:", error?.code || error);
+      renderUnavailable();
+      return;
+    }
+    console.warn("マイページ統計の集計が使えないため、全件を読んで数えます:", error.code);
+  }
 
   try {
     const snapshot = await getDocs(query(collection(db, "raceBets"), where("uid", "==", currentUser.uid)));
@@ -3359,12 +3790,12 @@ async function loadMyPageStats() {
       }
     });
 
-    if (myBetCount) myBetCount.textContent = betCount;
-    if (myHitCount) myHitCount.textContent = hitCount;
-    if (myProfit) myProfit.textContent = (profit >= 0 ? "+" : "") + profit;
+    if (session !== appSessionSeq) return;
+    render(betCount, hitCount, profit);
   } catch (error) {
     if (isInterruptedBySignOut(session)) return;
     console.error("マイページ統計エラー:", error);
+    renderUnavailable();
   }
 }
 
@@ -3647,15 +4078,9 @@ function updateCoinDisplays(coins) {
 async function grantStartingCoinsIfNeeded() {
   if (!username) return;
   try {
-    await runTransaction(db, async (transaction) => {
-      const userRef = doc(db, "users", username);
-      const snap = await transaction.get(userRef);
-      if (!snap.exists()) return;
-      if (typeof snap.data().coins === "number") return;
-      transaction.update(userRef, { coins: YUU_START_COINS });
-    });
+    await callEconomyApi("startingCoins");
   } catch (error) {
-    console.error("ゆうcoin初期付与エラー:", error);
+    console.warn("ゆうcoin初期付与エラー:", error?.economyCode || error);
   }
 }
 
@@ -3669,20 +4094,9 @@ async function grantBonusCoinsIfNeeded() {
   if (!username || bonusGrantInFlight) return;
   bonusGrantInFlight = true;
   try {
-    await runTransaction(db, async (transaction) => {
-      const userRef = doc(db, "users", username);
-      const snap = await transaction.get(userRef);
-      if (!snap.exists()) return;
-      const data = snap.data();
-      if (typeof data.coins !== "number" || data.bonus500Granted === true) return;
-      transaction.update(userRef, {
-        coins: data.coins + YUU_BONUS_COINS,
-        bonus500Granted: true,
-        bonus500GrantedAt: serverTimestamp()
-      });
-    });
+    await callEconomyApi("bonus500");
   } catch (error) {
-    console.warn("ゆうcoin追加ボーナスの付与に失敗:", error);
+    console.warn("ゆうcoin追加ボーナスの付与に失敗:", error?.economyCode || error);
   } finally {
     bonusGrantInFlight = false;
   }
@@ -4012,57 +4426,20 @@ betButton?.addEventListener("click", async () => {
     betButton.disabled = true;
     const raceId = getActiveBettingRaceContext().raceId;
 
-    /* 累計賭け金（totalBetAmount）は、馬券の作成・コインの引き落としと同じトランザクションで加算する
-       （馬券1枚につき1回だけ。払い戻しや外れでは減らさない）。
-       万一 totalBetAmount の書き込みが拒否されても投票はできるよう、そのときは従来どおりの内容でやり直す
-       （累計は derby-runner が馬券の記録から計算し直す） */
-    const manualRef = isManualRaceId(raceId) ? doc(db, "derbyManualRaces", raceId) : null;
-    const placeBet = (withTotal) => (manualRef ? runCountedTransaction : (fn) => runTransaction(db, fn))(async (transaction) => {
-      const userRef = doc(db, "users", username);
-      const userSnap = await transaction.get(userRef);
-      const coins = userSnap.exists() ? Number(userSnap.data().coins || 0) : 0;
-      if (coins < amount) throw new Error("NOT_ENOUGH_COINS");
-
-      /* 手動レース：受付時間内で、キャンセルされていないことを同じトランザクションの中で確かめ、
-         投票数（betCount）を増やす（投票があるレースは管理者がキャンセルできないようにするため） */
-      const manualSnap = manualRef ? await transaction.get(manualRef) : null;
-      if (manualRef) {
-        const race = manualSnap.exists() ? manualSnap.data() : null;
-        if (!race || race.status === "cancelled") throw new Error("MANUAL_RACE_CANCELLED");
-        const now = derbyNow();
-        if (now < toDateValue(race.openAt) || now >= toDateValue(race.closeAt)) throw new Error("MANUAL_RACE_CLOSED");
-        transaction.update(manualRef, { betCount: Number(race.betCount || 0) + 1 });
-      }
-
-      const userUpdate = { coins: coins - amount };
-      if (withTotal) userUpdate.totalBetAmount = Number(userSnap.data().totalBetAmount || 0) + amount;
-      transaction.update(userRef, userUpdate);
-
-      const betRef = doc(collection(db, "raceBets"));
-      /* 固定オッズ方式のレースは、買ったときのオッズも記録する（精算はレースIDから計算し直した値で行う） */
-      const fixedTenths = isFixedOddsRace(raceId) ? getTicketOddsTenths(getRaceOddsTable(raceId), type, horses) : null;
-      transaction.set(betRef, {
-        raceId, uid: currentUser.uid, username, type, horses, amount,
-        settled: false, win: null, payout: null, createdAt: serverTimestamp(),
-        ...(fixedTenths !== null ? { oddsVersion: getRaceOddsTable(raceId).oddsVersion, oddsTenths: fixedTenths } : {})
-      });
-    });
-
-    try {
-      await placeBet(true);
-    } catch (error) {
-      if (error?.code !== "permission-denied") throw error;
-      console.warn("累計賭け金を記録できなかったため、従来の方法で投票します:", error);
-      await placeBet(false);
-    }
+    /* 馬券の購入は Worker に頼む（残高・締切・オッズ・手動レースの受付をサーバーで確かめる）。
+       コインの引き落とし・累計賭け金・馬券の作成（・手動レースの betCount）はサーバーが1回で行う */
+    await callEconomyApi("placeBet", { raceId, type, horses, amount });
 
     alert("投票しました！");
     resetBetHorsesSelection();
   } catch (error) {
-    console.error("投票エラー:", error);
-    if (error.message === "NOT_ENOUGH_COINS") alert("ゆうcoinが足りません。");
-    else if (error.message === "MANUAL_RACE_CANCELLED") alert("このレースはキャンセルされました。");
-    else if (error.message === "MANUAL_RACE_CLOSED") alert("このレースは投票受付時間外です。");
+    const code = error?.economyCode || error?.message;
+    console.error("投票エラー:", code, error);
+    if (code === "NOT_ENOUGH_COINS") alert("ゆうcoinが足りません。");
+    else if (code === "MANUAL_RACE_CANCELLED") alert("このレースはキャンセルされました。");
+    else if (code === "MANUAL_RACE_CLOSED" || code === "RACE_CLOSED") alert("このレースは投票を受け付けていません（締切・発走済みなど）。");
+    else if (code === "invalid_horses" || code === "invalid_bet_type" || code === "invalid_amount") alert("投票の内容が正しくありません。");
+    else if (code === "NETWORK") alert("サーバーに接続できませんでした。時間をおいてもう一度お試しください。");
     else alert("投票に失敗しました。");
   } finally {
     updateBetFormEnabled();
@@ -4137,64 +4514,29 @@ function showRaceHitAnimation(bet, payout) {
   }, 4500);
 }
 
-async function settleMyBets(raceId, resultOrder) {
+async function settleMyBets(raceId) {
   const session = appSessionSeq;
   if (!currentUser || !username) return;
 
+  /* 精算（結果の確認・払い戻しの計算・コインの加算）はすべて Worker に任せる（固定オッズも山分け方式も）。
+     ブラウザは払い戻し額を自分で決めない・馬券やコインを直接書き換えない。
+     結果を待っている自分の馬券があるときだけ頼む（毎回は呼ばない） */
   try {
-    const mySnap = await getDocs(query(
+    const pendingSnap = await getDocs(query(
       collection(db, "raceBets"),
       where("raceId", "==", raceId),
       where("uid", "==", currentUser.uid),
       where("settled", "==", false)
     ));
-    if (mySnap.empty) return;
-
-    for (const betDoc of mySnap.docs) {
-      /* 1枚の精算に失敗しても、残りの馬券の精算は続ける */
-      try {
-        const bet = betDoc.data();
-        /* 固定オッズ方式：floor(賭け金 × オッズ)。オッズはレースIDから計算し直す（馬券に記録された値は使わない）。
-           それ以前のレースは従来の山分け方式 */
-        const fixed = isFixedOddsRace(raceId);
-        const fixedResult = fixed ? computeFixedBetSettlement(bet, raceId, evaluateBetWin(bet, resultOrder)) : null;
-        const isWin = fixed ? fixedResult.isWin : evaluateBetWin(bet, resultOrder);
-        const payout = fixed ? fixedResult.payout : (isWin ? await computePoolPayout(raceId, bet, resultOrder) : 0);
-        let settledNow = false;
-
-        await runTransaction(db, async (transaction) => {
-          /* Firestore のトランザクションは「読み込みを全部終えてから書き込む」必要がある。
-             以前は払い戻しのときに書き込みの後で users を読んでいたため、
-             当たり馬券の精算が毎回失敗していた */
-          const betRef = doc(db, "raceBets", betDoc.id);
-          const userRef = doc(db, "users", username);
-          const freshBet = await transaction.get(betRef);
-          const userSnap = payout > 0 ? await transaction.get(userRef) : null;
-
-          settledNow = false;
-          if (!freshBet.exists() || freshBet.data().settled) return;
-
-          transaction.update(betRef, fixed
-            ? { settled: true, win: isWin, payout, payoutRule: FIXED_PAYOUT_RULE, settledOddsTenths: fixedResult.oddsTenths }
-            : { settled: true, win: isWin, payout });
-          if (payout > 0) {
-            const coins = userSnap?.exists() ? Number(userSnap.data().coins || 0) : 0;
-            transaction.update(userRef, { coins: coins + payout });
-          }
-          settledNow = true;
-        });
-
-        if (settledNow && isWin && payout > 0) showRaceHitAnimationWhenRevealed(raceId, bet, payout);
-      } catch (error) {
-        if (isInterruptedBySignOut(session)) return;
-        console.error(`[ベット精算エラー] raceId=${raceId} betId=${betDoc.id} code=${error?.code || "(なし)"} message=${error?.message || error}`, error);
-      }
-    }
-
+    if (pendingSnap.empty || session !== appSessionSeq) return;
+    const result = await callEconomyApi("settleMyBets", { raceId });
+    if (session !== appSessionSeq) return;
+    (result?.settled || []).forEach((b) => { if (b.win && b.payout > 0) showRaceHitAnimationWhenRevealed(raceId, b, b.payout); });
     loadMyPageStats();
   } catch (error) {
     if (isInterruptedBySignOut(session)) return;
-    console.error("ベット精算エラー:", error);
+    /* まだ結果が無い（no_result）などはよくあることなので、警告だけにとどめる */
+    console.warn("ベット精算（Worker）エラー:", error?.economyCode || error);
   }
 }
 
@@ -4234,7 +4576,7 @@ async function catchUpMissedRaces(attempt = 1) {
       }
 
       if (raceSnap.exists() && raceSnap.data().status === "finished") {
-        await settleMyBets(raceId, raceSnap.data().resultOrder);
+        await settleMyBets(raceId);
       }
     }
   } catch (error) {
@@ -4251,30 +4593,149 @@ async function catchUpMissedRaces(attempt = 1) {
 /* ----- 自分の投票（すべてのレース分）を一括管理。
    ここから「購入した馬券」「コイン増減」「自分の馬ハイライト」などを組み立てる ----- */
 
-function listenMyBetHistory() {
-  if (unsubscribeMyBetHistory) { unsubscribeMyBetHistory(); unsubscribeMyBetHistory = null; }
-  if (!currentUser) return;
+/* =========================================================
+   自分の馬券（ゆうダービー）
+   ・以前は自分の馬券を全件（過去すべて）購読していた。今は次の2つだけを購読する
+       ① 最近のレース（今日から7日前まで・明日の自動開催の回・読み込み済みの手動レース）の自分の馬券
+          （where uid ＋ where raceId in [...]。等号と in だけなので複合インデックスは不要）
+       ② 未精算の自分の馬券（where uid ＋ where settled == false）… 古いレースの未精算も取りこぼさない
+   ・購読するレースの範囲は、日付が変わった・手動レースが増えたときに作り直す（refreshMyBetHistoryWindow）
+   ・それより前の履歴は「過去の投票履歴をすべて読み込む」を押したときだけ1回読む
+   ・問い合わせが失敗したときは、以前と同じ全件の購読に切り替える
+   ・精算（settleMyBets・catchUpMissedRaces）は今まで通り Firestore を直接確かめるので、この範囲に関係なく取りこぼさない
+========================================================= */
 
-  /* 【重要】where(uid) + orderBy(createdAt) を組み合わせたクエリは、
-     Firestore側で複合インデックスの作成が必要で、それが無いと
-     このリスナーがエラーで止まり、馬券が一切表示されなくなっていた。
-     orderByをやめてJavaScript側で並び替えることで、
-     Firebase Console側の追加設定を一切不要にした。 */
+const BET_HISTORY_RECENT_DAYS = 7;
+const BET_HISTORY_MAX_RACES = 30; /* Firestore の in に渡せる数の上限 */
+let betHistoryParts = { recent: new Map(), unsettled: new Map(), older: new Map() };
+let betHistoryWindowKey = "";
+let betHistoryFullLoaded = false;
+let betHistoryFallback = false;
+/* 最近の分・未精算の購読がエラーで止まった理由（空なら正常）。止まっても全件には切り替えず、最後に受け取ったデータのまま表示する */
+let betHistoryErrorCode = "";
+let myPageStatsShownForUid = "";
+
+/* 全件の読み込みに切り替えてよいのは「その問い合わせの形が使えない」ときだけ（必要最小限）。
+   failed-precondition：複合インデックスが無い・作成中（全件の問い合わせは単一項目のインデックスで動く）
+   unimplemented     ：集計（count・sum）が使えない
+   それ以外（resource-exhausted＝無料枠の超過・permission-denied・unauthenticated・unavailable などの通信エラー・internal など）は
+   全件に切り替えても同じ理由で失敗するか、読み取りが増えるだけなので切り替えない */
+const BET_QUERY_FALLBACK_CODES = new Set(["failed-precondition"]);
+const BET_STATS_FALLBACK_CODES = new Set(["failed-precondition", "unimplemented"]);
+
+function getRecentBetRaceIds() {
+  const now = derbyNow();
+  const ids = new Set();
+  for (let d = -1; d < BET_HISTORY_RECENT_DAYS; d++) {
+    const dayId = formatRaceId(new Date(now.getTime() - d * DAY_MS));
+    getRaceContextsForDay(dayId).forEach((c) => ids.add(c.raceId));
+  }
+  /* 新しいレースを優先して、上限までにする */
+  return [...ids].sort().reverse().slice(0, BET_HISTORY_MAX_RACES);
+}
+
+function rebuildMyAllBets() {
+  const merged = new Map();
+  [betHistoryParts.older, betHistoryParts.recent, betHistoryParts.unsettled].forEach((part) => part.forEach((bet, id) => merged.set(id, bet)));
+  myAllBets = [...merged.values()].sort((a, b) => {
+    const at = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
+    const bt = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
+    return bt - at;
+  });
+  renderBetHistory(myAllBets);
+  renderMyActiveTickets();
+}
+
+function stopMyBetHistory() {
+  if (unsubscribeMyBetHistory) { unsubscribeMyBetHistory(); unsubscribeMyBetHistory = null; }
+}
+
+function listenMyBetHistory() {
+  stopMyBetHistory();
+  betHistoryParts = { recent: new Map(), unsettled: new Map(), older: new Map() };
+  betHistoryWindowKey = "";
+  betHistoryFullLoaded = false;
+  betHistoryFallback = false;
+  betHistoryErrorCode = "";
+  if (!currentUser) return;
+  subscribeMyBetHistoryWindow();
+}
+
+function subscribeMyBetHistoryWindow() {
+  if (!currentUser) return;
+  stopMyBetHistory();
+  const uid = currentUser.uid;
+  const raceIds = getRecentBetRaceIds();
+  betHistoryWindowKey = raceIds.join(",");
+  betHistoryErrorCode = "";
+  const toBets = (snap) => new Map(snap.docs.map((d) => [d.id, { id: d.id, ...d.data() }]));
+  /* 2つの購読は別々に扱う。片方が止まっても、もう片方の購読と、止まった方が最後に受け取ったデータはそのまま残す */
+  let stopThis = null;
+  const onError = (error) => {
+    if (currentUser?.uid !== uid || unsubscribeMyBetHistory !== stopThis) return;
+    const code = error?.code || "unknown";
+    if (BET_QUERY_FALLBACK_CODES.has(code)) {
+      console.warn("馬券の購読（最近の分）に必要なインデックスが無いため、全件の購読に切り替えます:", code);
+      listenMyBetHistoryUnlimited();
+      return;
+    }
+    console.warn("馬券の購読が止まりました（全件には切り替えません。マイページを開くか、レースの範囲が変わったときに作り直します）:", code);
+    betHistoryErrorCode = code;
+    rebuildMyAllBets();
+  };
+
+  const unsubscribers = [
+    onSnapshot(query(collection(db, "raceBets"), where("uid", "==", uid), where("raceId", "in", raceIds)), (snap) => {
+      betHistoryParts.recent = toBets(snap);
+      rebuildMyAllBets();
+    }, onError),
+    onSnapshot(query(collection(db, "raceBets"), where("uid", "==", uid), where("settled", "==", false)), (snap) => {
+      betHistoryParts.unsettled = toBets(snap);
+      rebuildMyAllBets();
+    }, onError)
+  ];
+  stopThis = () => unsubscribers.forEach((u) => u());
+  unsubscribeMyBetHistory = stopThis;
+}
+
+/* 日付が変わった・手動レースが増えたなど、購読するレースの範囲が変わったときだけ作り直す。
+   retryAfterError：購読がエラーで止まっていたら作り直す（マイページを開いたときだけ渡す。
+   手動レースの更新などのたびに作り直すと、無料枠の超過中に何度も試すことになるので、ほかのきっかけでは作り直さない） */
+function refreshMyBetHistoryWindow({ retryAfterError = false } = {}) {
+  if (!currentUser || betHistoryFallback || !unsubscribeMyBetHistory) return;
+  if ((retryAfterError && betHistoryErrorCode) || getRecentBetRaceIds().join(",") !== betHistoryWindowKey) subscribeMyBetHistoryWindow();
+}
+
+/* 以前と同じ方式（自分の馬券を全件購読）。問い合わせが失敗したときだけ使う */
+function listenMyBetHistoryUnlimited() {
+  stopMyBetHistory();
+  betHistoryFallback = true;
+  betHistoryFullLoaded = true;
+  betHistoryErrorCode = "";
+  if (!currentUser) return;
   unsubscribeMyBetHistory = onSnapshot(
     query(collection(db, "raceBets"), where("uid", "==", currentUser.uid)),
     (snap) => {
-      myAllBets = snap.docs
-        .map((d) => ({ id: d.id, ...d.data() }))
-        .sort((a, b) => {
-          const at = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
-          const bt = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
-          return bt - at;
-        });
-      renderBetHistory(myAllBets);
-      renderMyActiveTickets();
+      betHistoryParts = { recent: new Map(snap.docs.map((d) => [d.id, { id: d.id, ...d.data() }])), unsettled: new Map(), older: new Map() };
+      rebuildMyAllBets();
     },
     (error) => console.error("投票履歴監視エラー:", error)
   );
+}
+
+/* 「過去の投票履歴をすべて読み込む」：それより前の履歴を1回だけ読む */
+async function loadOlderBetHistory() {
+  if (!currentUser || betHistoryFullLoaded) return;
+  betHistoryFullLoaded = true;
+  try {
+    const snap = await getDocs(query(collection(db, "raceBets"), where("uid", "==", currentUser.uid)));
+    betHistoryParts.older = new Map(snap.docs.map((d) => [d.id, { id: d.id, ...d.data() }]));
+    rebuildMyAllBets();
+  } catch (error) {
+    betHistoryFullLoaded = false;
+    console.error("過去の投票履歴の読み込みエラー:", error);
+    alert("過去の投票履歴を読み込めませんでした。");
+  }
 }
 
 function getMyBetsForRace(raceId) {
@@ -4362,9 +4823,16 @@ function renderBetHistory(bets) {
   if (!historyEl) return;
   historyEl.innerHTML = "";
 
-  if (bets.length === 0) {
-    historyEl.innerHTML = `<div class="empty-state">まだ投票履歴がありません</div>`;
-    return;
+  if (betHistoryErrorCode) {
+    /* 止まった購読がある：手元の履歴が最新とは限らないことを知らせる（「投票はありません」とは言わない） */
+    const notice = document.createElement("div");
+    notice.className = "empty-state history-error";
+    notice.textContent = "最新の投票履歴を読み込めませんでした。しばらくしてからマイページを開き直してください。";
+    historyEl.appendChild(notice);
+  } else if (bets.length === 0) {
+    historyEl.innerHTML = betHistoryFullLoaded
+      ? `<div class="empty-state">まだ投票履歴がありません</div>`
+      : `<div class="empty-state">最近（7日以内）の投票はありません</div>`;
   }
 
   bets.slice(0, 30).forEach((bet) => {
@@ -4382,6 +4850,15 @@ function renderBetHistory(bets) {
       <div style="font-size:11px; color:#888; margin-top:3px;">${escapeHTML(bet.raceId)}　${escapeHTML(resultText)}</div>`;
     historyEl.appendChild(item);
   });
+
+  if (!betHistoryFullLoaded) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "secondary history-more";
+    more.textContent = "過去の投票履歴をすべて読み込む";
+    more.addEventListener("click", () => loadOlderBetHistory());
+    historyEl.appendChild(more);
+  }
 }
 
 
@@ -4496,48 +4973,35 @@ function buildFinishStats(resultOrder) {
 /* 開催ログ（管理用）：raceLogs/{raceId}。一般の画面には表示しない（Firebase Console で確認する）。
    GitHub Actions の自動開催（derby-runner）も同じドキュメントに記録する */
 async function tryGenerateRaceResult(raceId) {
+  /* 固定オッズ方式のレースの結果は Worker（サーバー）が作る。ブラウザは結果を書き込まない。
+     発走時刻を過ぎていれば作り、まだ結果が無ければ作られる（二重には作らない） */
+  if (isFixedOddsRace(raceId)) {
+    try {
+      await callEconomyApi("ensureRaceResult", { raceId });
+    } catch (error) {
+      if (error?.economyCode !== "race_not_started") console.warn("レース結果の生成（Worker）エラー:", error?.economyCode || error);
+    }
+    return;
+  }
+
+  /* 以前の山分け方式のレース（FIXED_ODDS_FROM より前）は、これまで通り（この分は derby-runner も作る） */
   const raceRef = doc(db, "races", raceId);
   const logRef = doc(db, "raceLogs", raceId);
-
   try {
     await runTransaction(db, async (transaction) => {
       const snap = await transaction.get(raceRef);
       if (snap.exists()) return;
-
-      /* 固定オッズ方式のレースは「能力 × 当日の調子」の比で着順を決め、オッズの記録も残す（乱数は今ここで引く） */
-      const fixed = isFixedOddsRace(raceId);
-      const resultOrder = fixed ? generateFixedOddsRaceOrder(raceId) : generateWeightedRaceOrder();
-
+      const resultOrder = generateWeightedRaceOrder();
       transaction.set(raceRef, {
-        raceId,
-        resultOrder,
+        raceId, resultOrder,
         checkpoints: buildRaceCheckpoints(resultOrder),
         finishStats: buildFinishStats(resultOrder),
-        status: "finished",
-        generatedAt: serverTimestamp(),
-        generatedBy: "client",
-        ...(fixed ? buildRaceOddsRecord(raceId) : {})
+        status: "finished", generatedAt: serverTimestamp(), generatedBy: "client"
       });
-
-      transaction.set(logRef, {
-        raceId,
-        scheduledAt: parseRaceIdToDate(raceId),
-        resultGeneratedAt: serverTimestamp(),
-        resultGeneratedBy: "client",
-        resultStatus: "created"
-      }, { merge: true });
+      transaction.set(logRef, { raceId, scheduledAt: parseRaceIdToDate(raceId), resultGeneratedAt: serverTimestamp(), resultGeneratedBy: "client", resultStatus: "created" }, { merge: true });
     });
   } catch (error) {
     console.error(`[レース抽選エラー] raceId=${raceId} code=${error?.code || "(なし)"} message=${error?.message || error}`, error);
-    try {
-      await setDoc(logRef, {
-        raceId,
-        lastClientError: `${error?.code || ""} ${error?.message || error}`.trim().slice(0, 500),
-        lastClientErrorAt: serverTimestamp()
-      }, { merge: true });
-    } catch (logError) {
-      console.warn("開催ログの記録にも失敗:", logError);
-    }
   }
 }
 
@@ -5002,6 +5466,7 @@ function refreshDerbySubscriptionsIfNeeded() {
 
   if (activeId !== lastActiveBettingRaceId) {
     lastActiveBettingRaceId = activeId;
+    refreshMyBetHistoryWindow();
     /* 固定オッズ方式のレースは、オッズのために馬券を購読しない（投票でオッズは変わらない） */
     if (isFixedOddsRace(activeId)) {
       if (unsubscribeWinBets) { unsubscribeWinBets(); unsubscribeWinBets = null; }
@@ -5039,7 +5504,7 @@ function listenLiveRace(raceId) {
 
       if (snap.exists() && snap.data().status === "finished") {
         liveRaceResult = snap.data();
-        settleMyBets(raceId, liveRaceResult.resultOrder);
+        settleMyBets(raceId);
       } else {
         liveRaceResult = null;
       }
@@ -5169,21 +5634,6 @@ function isAdminUser() {
   return Boolean(currentUser && currentUser.uid === ADMIN_UID);
 }
 
-/* 手動レースの投票数（betCount）は、
-   Firestore のルールで「読んだ値 + 1」になっているかを確かめている。
-   同時に何人かが書き込むと、古い値で計算した側は（競合なのに自動でやり直されず）permission-denied で拒否されるので、
-   そのときは少し待って最新の値で数回やり直す（拒否された書き込みは何も反映されていないので、二重にはならない） */
-async function runCountedTransaction(updateFunction, attempts = 8) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await runTransaction(db, updateFunction);
-    } catch (error) {
-      if (error?.code !== "permission-denied" || attempt >= attempts) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 100 * attempt + Math.random() * 300 * attempt));
-    }
-  }
-}
-
 function updateAdminVisibility() {
   const admin = isAdminUser();
   document.getElementById("derbyAdminPanel")?.classList.toggle("hidden", !admin);
@@ -5243,49 +5693,10 @@ async function adminRenameUser(oldName, newName) {
   });
 
   rankingCache = null;
-  const migrated = await migrateRenamedUserData(oldName, newName);
+  /* 名前が入ったメッセージ・グループ・友達関係の書き換えは通知サーバー（サービスアカウント）が行う
+     （ロックダウン後はブラウザから他人のメッセージ等を書き換えられないため） */
+  const migrated = await callAdminApi("renameUserRefs", { from: oldName, to: newName });
   return { targetUid, migrated };
-}
-
-/* 友達・グループ・メッセージのうち、古い名前が入っているものだけを書き換える（通常の名前変更と同じ項目） */
-async function migrateRenamedUserData(oldName, newName) {
-  const updates = new Map();
-  const add = (ref, data) => updates.set(ref.path, { ref, data: { ...(updates.get(ref.path)?.data || {}), ...data } });
-
-  const [asUser1, asUser2, groupsSnap, sent, received] = await Promise.all([
-    getDocs(query(collection(db, "friends"), where("user1", "==", oldName))),
-    getDocs(query(collection(db, "friends"), where("user2", "==", oldName))),
-    getDocs(query(collection(db, "groups"), where("members", "array-contains", oldName))),
-    getDocs(query(collection(db, "messages"), where("sender", "==", oldName))),
-    getDocs(query(collection(db, "messages"), where("receiver", "==", oldName)))
-  ]);
-
-  [...asUser1.docs, ...asUser2.docs].forEach((d) => {
-    const data = d.data();
-    const change = {};
-    if (data.user1 === oldName) change.user1 = newName;
-    if (data.user2 === oldName) change.user2 = newName;
-    if (data.requestedBy === oldName) change.requestedBy = newName;
-    if (data.acceptedBy === oldName) change.acceptedBy = newName;
-    if (Object.keys(change).length) add(d.ref, { ...change, updatedAt: serverTimestamp() });
-  });
-  groupsSnap.docs.forEach((d) => {
-    const data = d.data();
-    const change = { members: (Array.isArray(data.members) ? data.members : []).map((m) => (m === oldName ? newName : m)) };
-    if (data.owner === oldName) change.owner = newName;
-    add(d.ref, { ...change, updatedAt: serverTimestamp() });
-  });
-  sent.docs.forEach((d) => add(d.ref, { sender: newName }));
-  received.docs.forEach((d) => add(d.ref, { receiver: newName }));
-
-  /* 1回の書き込みは500件まで */
-  const list = [...updates.values()];
-  for (let i = 0; i < list.length; i += 400) {
-    const batch = writeBatch(db);
-    list.slice(i, i + 400).forEach(({ ref, data }) => batch.update(ref, data));
-    await batch.commit();
-  }
-  return { friends: asUser1.size + asUser2.size, groups: groupsSnap.size, messages: sent.size + received.size };
 }
 
 async function promptAdminRename(oldName) {
@@ -5359,6 +5770,7 @@ async function checkRenamedByAdmin() {
 ========================================================= */
 
 const ADMIN_ENDPOINT = NOTIFY_ENDPOINT.replace(/\/notify$/, "/admin");
+const ECONOMY_ENDPOINT = NOTIFY_ENDPOINT.replace(/\/notify$/, "/economy");
 const ADMIN_PASSWORD_MIN_LENGTH = 8;
 const ADMIN_PASSWORD_MAX_LENGTH = 128;
 
@@ -5378,6 +5790,8 @@ let userManageBusy = false;
 let userManageSeq = 0;
 
 const ADMIN_COIN_ADJUST_MAX = 1000000;
+/* 総資産の増減（Worker の ADMIN_ASSET_ADJUST_MAX と同じ） */
+const ADMIN_ASSET_ADJUST_MAX = 10000000;
 
 const ADMIN_ERROR_MESSAGES = {
   invalid_amount: `金額は1〜${ADMIN_COIN_ADJUST_MAX.toLocaleString()}の整数で入力してください。`,
@@ -5386,6 +5800,8 @@ const ADMIN_ERROR_MESSAGES = {
   balance_too_large: "残高が大きくなりすぎるため、増やせません。",
   invalid_balance: "このユーザーのコインの値が正しくないため、変更できません。",
   busy: "ほかの操作と重なったため変更できませんでした。もう一度お試しください。",
+  insufficient_assets: "回収できる資産（預金＋保有株）を超えるか、総資産がマイナスになるため、減らせません。",
+  assets_changed: "表示したあとに預金・株・株価が変わっていました。最新の内訳を表示し直したので、もう一度操作してください。",
   not_admin: "管理者としてログインしていないため、操作できません。",
   invalid_uid: "対象のユーザーが正しくありません。",
   invalid_password: `パスワードは${ADMIN_PASSWORD_MIN_LENGTH}文字以上${ADMIN_PASSWORD_MAX_LENGTH}文字以内にしてください。`,
@@ -5418,6 +5834,26 @@ function describeAdminError(error) {
   if (code === "network") return "通知サーバー（Cloudflare Worker）に接続できませんでした。";
   if (code.startsWith("auth_")) return `Firebase Authentication でエラーになりました（${code.slice(5)}）。`;
   return `処理できませんでした（${code || "不明なエラー"}）。`;
+}
+
+/* 💰 ゆう経済・🏇 ゆうダービー：本人の操作を Worker（残高・締切・結果・払い戻しをサーバーで検証）に頼む。
+   ログインしていない・ネットワークエラーのときは code を付けた Error を投げる */
+async function callEconomyApi(action, payload = {}) {
+  if (!currentUser || !username) throw economyError("NOT_LOGGED_IN");
+  const token = await currentUser.getIdToken();
+  let response;
+  try {
+    response = await fetch(ECONOMY_ENDPOINT, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ action, username, ...payload })
+    });
+  } catch (error) {
+    throw economyError("NETWORK");
+  }
+  const json = await response.json().catch(() => ({}));
+  if (!response.ok) { const e = economyError(json.error || `http_${response.status}`); e.detail = json; throw e; }
+  return json;
 }
 
 async function callAdminApi(action, payload = {}) {
@@ -5649,10 +6085,25 @@ function renderUserManageDetail(info) {
       <p id="umCoinError" class="admin-form-error"></p>
     </section>` : "";
 
+  /* 総資産の増減（内訳は開いたときに Worker から読む） */
+  const assetHtml = hasUserDoc && info.user && !deleting ? `
+    <section class="um-coins um-assets" aria-label="総資産の増減" data-um-assets-uid="${escapeHTML(info.uid)}">
+      <div class="um-coins-balance">総資産 <b id="umAssetTotal">…</b></div>
+      <div id="umAssetBreakdown" class="um-assets-breakdown">内訳を読み込み中…</div>
+      <div class="um-coins-row">
+        <input id="umAssetAmount" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="金額" aria-label="総資産を増減する金額" autocomplete="off">
+        <button type="button" data-um-asset="increase">＋増やす</button>
+        <button type="button" class="secondary" data-um-asset="decrease">−減らす（回収）</button>
+      </div>
+      <p class="um-note">増やす：銀行預金に足します。減らす：預金から先に減らし、足りない分は保有株を評価額の高い銘柄から回収します（代金は戻しません）。手持ちコインは上の「ゆうコイン」で別に変更してください。</p>
+      <p id="umAssetError" class="admin-form-error"></p>
+    </section>` : "";
+
   openUserManageModal(`
     <h3>👤 ${escapeHTML(info.name || "ログイン情報だけのアカウント")}</h3>
     <dl class="um-detail">${rows.map(([k, v]) => `<dt>${escapeHTML(k)}</dt><dd>${escapeHTML(v)}</dd>`).join("")}</dl>
     ${coinHtml}
+    ${assetHtml}
     ${info.isAdmin ? `<p class="um-note">管理者のアカウントは停止・削除できません。</p>` : `<p class="um-note">サブアカウントかどうか確信がないときは、まず「停止」を使ってください（あとで解除できます）。完全削除は取り消せません。</p>`}
     <div class="um-actions">${buttons.join("")}</div>
     <div class="modal-buttons"><button class="modal-secondary" type="button" data-um-close>閉じる</button></div>
@@ -5663,6 +6114,145 @@ function renderUserManageDetail(info) {
   modalEl.querySelector('[data-um-action="delete"]')?.addEventListener("click", () => renderUserManageDelete(info));
   modalEl.querySelector('[data-um-action="deleteAuthOnly"]')?.addEventListener("click", () => renderUserManageDeleteAuthOnly(info));
   modalEl.querySelectorAll("[data-um-coin]").forEach((button) => button.addEventListener("click", () => runUserManageAdjustCoins(info, button.dataset.umCoin)));
+  modalEl.querySelectorAll("[data-um-asset]").forEach((button) => button.addEventListener("click", () => previewUserManageAssets(info, button.dataset.umAsset)));
+  if (assetHtml) loadUserManageAssets(info);
+}
+
+/* ----- 総資産（手持ちコイン + 預金 + 保有株の評価額 − 借入）の内訳・増減 -----
+   内訳と「何がどれだけ減るか」は Worker（previewAssets）が計算したものをそのまま表示し、確認のあと adjustAssets で実行する */
+function umStockLabel(code) {
+  const company = STOCK_COMPANIES.find((c) => c.code === code);
+  return company ? `${company.emoji} ${company.name}（${code}）` : code;
+}
+
+function umAssetBreakdownHtml(b) {
+  const stocks = (b.stocks || []).map((s) => `<li>${escapeHTML(umStockLabel(s.code))}：${s.qty.toLocaleString()}株 × ${formatCoins(s.price)} = ${formatCoins(s.value)}</li>`).join("");
+  return `
+    <dl class="um-assets-list">
+      <dt>手持ちコイン</dt><dd>🪙 ${formatCoins(b.coins)}</dd>
+      <dt>銀行預金</dt><dd>🏦 ${formatCoins(b.deposit)}</dd>
+      <dt>保有株の評価額</dt><dd>📈 ${formatCoins(b.stockValue)}</dd>
+      <dt>借入残高</dt><dd>− ${formatCoins(b.loan)}</dd>
+    </dl>
+    ${stocks ? `<ul class="um-assets-stocks">${stocks}</ul>` : `<p class="um-assets-none">保有株はありません</p>`}`;
+}
+
+function isUserManageAssetsShown(info) {
+  return Boolean(modalEl?.querySelector(`[data-um-assets-uid="${CSS.escape(info.uid)}"]`));
+}
+
+async function loadUserManageAssets(info, notice = "") {
+  try {
+    const result = await callAdminApi("previewAssets", { uid: info.uid });
+    if (!isUserManageAssetsShown(info)) return;
+    document.getElementById("umAssetTotal").textContent = `💰 ${formatCoins(result.breakdown.total)}`;
+    document.getElementById("umAssetBreakdown").innerHTML = umAssetBreakdownHtml(result.breakdown);
+    if (notice) showError(document.getElementById("umAssetError"), notice);
+  } catch (error) {
+    if (!isUserManageAssetsShown(info)) return;
+    console.error("総資産の内訳の読み込みエラー:", error.code || error.message);
+    document.getElementById("umAssetBreakdown").textContent = "内訳を読み込めませんでした。";
+    showError(document.getElementById("umAssetError"), describeAdminError(error));
+  }
+}
+
+function describeAssetError(error) {
+  if (error?.code === "insufficient_assets" && Number.isSafeInteger(error.detail?.max)) {
+    return `${ADMIN_ERROR_MESSAGES.insufficient_assets}（今回収できるのは最大 ${formatCoins(error.detail.max)}）`;
+  }
+  return describeAdminError(error);
+}
+
+/* 金額を確かめ、Worker に「何がどれだけ変わるか」を計算してもらい、確認の画面を出す */
+async function previewUserManageAssets(info, direction) {
+  if (userManageBusy) return;
+  const input = document.getElementById("umAssetAmount");
+  const errorEl = document.getElementById("umAssetError");
+  showError(errorEl, "");
+  const text = (input?.value || "").trim();
+  const amount = /^[0-9]{1,8}$/.test(text) ? Number(text) : NaN;
+  if (!Number.isSafeInteger(amount) || amount < 1 || amount > ADMIN_ASSET_ADJUST_MAX) {
+    return showError(errorEl, `金額は1〜${ADMIN_ASSET_ADJUST_MAX.toLocaleString()}の整数で入力してください。`);
+  }
+  userManageBusy = true;
+  modalEl.querySelectorAll("[data-um-asset]").forEach((b) => { b.disabled = true; });
+  try {
+    const result = await callAdminApi("previewAssets", { uid: info.uid, direction, amount });
+    userManageBusy = false;
+    renderUserManageAssetConfirm(info, result);
+  } catch (error) {
+    userManageBusy = false;
+    console.error("総資産の増減の確認エラー:", error.code || error.message);
+    if (!isUserManageAssetsShown(info)) return;
+    showError(errorEl, describeAssetError(error));
+    modalEl.querySelectorAll("[data-um-asset]").forEach((b) => { b.disabled = false; });
+  }
+}
+
+function renderUserManageAssetConfirm(info, preview) {
+  const { breakdown: b, plan } = preview;
+  const increase = plan.direction === "increase";
+  const changes = increase
+    ? [`銀行預金 +${formatCoins(plan.amount)}（${formatCoins(b.deposit)} → ${formatCoins(plan.depositAfter)}）`]
+    : [
+      ...(plan.fromDeposit > 0 ? [`銀行預金から ${formatCoins(plan.fromDeposit)} を回収`] : []),
+      ...plan.removed.map((r) => `${umStockLabel(r.code)}：${r.qty.toLocaleString()}株を回収（${r.qtyBefore.toLocaleString()} → ${r.qtyAfter.toLocaleString()}株・1株 ${formatCoins(r.price)}・評価額 ${formatCoins(r.value)}）`),
+      ...(plan.change > 0 ? [`株の端数の調整：${formatCoins(plan.change)} を銀行預金に戻す`] : []),
+      `銀行預金：${formatCoins(b.deposit)} → ${formatCoins(plan.depositAfter)}`
+    ];
+  openUserManageModal(`
+    <h3>💰 総資産を${increase ? "増やす" : "減らす（回収）"}（${escapeHTML(preview.name)}）</h3>
+    <p class="um-note">対象：${escapeHTML(preview.name)}（uid ${escapeHTML(info.uid)}）</p>
+    <div class="um-coins um-assets">
+      <div class="um-coins-balance">今の総資産 <b>💰 ${formatCoins(b.total)}</b></div>
+      ${umAssetBreakdownHtml(b)}
+    </div>
+    <div class="um-assets-plan">
+      <div class="um-assets-plan-title">変更する内容</div>
+      <ul>${changes.map((c) => `<li>${escapeHTML(c)}</li>`).join("")}</ul>
+      <div class="um-assets-total-change">総資産：${formatCoins(b.total)} → <b id="umAssetAfter">${formatCoins(plan.totalAfter)}</b>（${increase ? "+" : "−"}${formatCoins(plan.amount)}）</div>
+      <p class="um-note">手持ちコイン・借入は変わりません。${increase ? "" : "回収した株の代金はコインにも預金にも戻しません。"}総資産ランキングのこのユーザーの行と順位も、すぐに更新します。</p>
+    </div>
+    <p id="umAssetConfirmError" class="admin-form-error"></p>
+    <div class="modal-buttons">
+      <button class="modal-secondary" type="button" data-um-asset-back>戻る</button>
+      <button id="umAssetSubmit" class="modal-primary ${increase ? "" : "modal-danger"}" type="button">実行する</button>
+    </div>
+  `);
+  modalEl.querySelector("[data-um-asset-back]").addEventListener("click", () => renderUserManageDetail(info));
+  document.getElementById("umAssetSubmit").addEventListener("click", () => runUserManageAdjustAssets(info, preview));
+}
+
+async function runUserManageAdjustAssets(info, preview) {
+  if (userManageBusy) return;
+  const { breakdown: b, plan } = preview;
+  const submit = document.getElementById("umAssetSubmit");
+  const errorEl = document.getElementById("umAssetConfirmError");
+  userManageBusy = true;
+  if (submit) submit.disabled = true;
+  try {
+    const expected = { deposit: b.deposit, stocks: Object.fromEntries((b.stocks || []).map((s) => [s.code, s.qty])), prices: b.prices };
+    const result = await callAdminApi("adjustAssets", { uid: info.uid, direction: plan.direction, amount: plan.amount, expected });
+    userManageBusy = false;
+    info.user = { ...info.user, coins: result.breakdown.coins };
+    const rankNote = result.ranking ? `・ランキング ${result.ranking.rankBefore ?? "-"}位 → ${result.ranking.rankAfter}位` : "";
+    showAppToast("👤 ユーザー管理", `${result.name}の総資産を${formatCoins(result.amount)}${result.direction === "increase" ? "増やしました" : "減らしました"}（${formatCoins(result.beforeTotal)} → ${formatCoins(result.afterTotal)}${rankNote}）`);
+    rankingCache = null;
+    renderUserManageDetail(info);
+  } catch (error) {
+    userManageBusy = false;
+    console.error("総資産の増減エラー:", error.code || error.message);
+    if (error.code === "assets_changed" || error.code === "insufficient_assets") {
+      renderUserManageDetail(info);
+      const message = describeAssetError(error);
+      setTimeout(() => { const el = document.getElementById("umAssetError"); if (el) showError(el, message); }, 0);
+      return;
+    }
+    showError(errorEl, describeAdminError(error));
+    if (submit) submit.disabled = false;
+  } finally {
+    userManageBusy = false;
+  }
 }
 
 /* ゆうコインを増やす・減らす（確認のあと Worker に頼む。残高の計算・確認は Worker でも必ず行う） */
@@ -5984,6 +6574,7 @@ function listenManualRaces() {
       });
       manualRaces = next;
       renderManualRaceAdminList();
+      refreshMyBetHistoryWindow();
     },
     (error) => console.error("手動レースの読み込みエラー:", error)
   );
@@ -6468,6 +7059,36 @@ function getMaxGamePlayers(type) {
 }
 
 /* =========================================================
+   ゲームの緊急メンテナンス
+   ・DAIFUGO_MAINTENANCE が true の間、大富豪は「新しいルーム作成・参加・ゲーム開始・カードを出す／パス・ルール変更」ができない
+     （画面の表示だけでなく、それぞれの処理の入口でも止める）
+   ・すでにあるルームと対局のデータ・履歴は消さない。参加中の人はルームを開いて「ルームを閉じる」（退出）だけできる
+   ・オセロ・将棋・チャットなど、ほかの機能には影響しない
+   ・メンテナンスを終えるときは DAIFUGO_MAINTENANCE を false にする
+========================================================= */
+
+const DAIFUGO_MAINTENANCE = true;
+
+function isGameUnderMaintenance(type) {
+  return DAIFUGO_MAINTENANCE && type === "daifugo";
+}
+
+const GAME_MAINTENANCE_ALERT = "大富豪は緊急メンテナンス中のため、現在ご利用いただけません。";
+
+function buildGameMaintenanceNotice() {
+  const notice = document.createElement("div");
+  notice.className = "game-maintenance";
+  notice.setAttribute("role", "alert");
+  notice.innerHTML = `
+    <div class="game-maintenance-title">🛠️ 緊急メンテナンス中</div>
+    <p>現在、ゲームルールの修正を行っているため、大富豪を一時的にご利用いただけません。</p>
+    <p>ご利用の皆様にはご迷惑をおかけし、誠に申し訳ございません。</p>
+    <p>お詫びにつきましては、後日改めて報告させていただきます。</p>
+    <p>ご理解とご協力のほど、よろしくお願いいたします。</p>`;
+  return notice;
+}
+
+/* =========================================================
    盤面の保存形式の変換（オセロ・将棋）
    ・Firestoreは「配列の中の配列」を保存できないため、
      保存するときは1次元配列（オセロ64マス / 将棋81マス）にする
@@ -6522,26 +7143,74 @@ gameTypeButtons.forEach((button) => {
 
 let latestGameRooms = [];
 
+function stopGameRoomsSubscription() {
+  if (unsubscribeGameRooms) { unsubscribeGameRooms(); unsubscribeGameRooms = null; }
+}
+
+/* ゲームのルーム一覧（ゲーム画面を開いている間だけ購読する）
+   ・新しいルーム GAME_ROOM_LIST_LIMIT 件（以前は全ルームを購読していた）
+   ・自分が参加しているルーム（memberUids に自分の uid）… 古くても必ず一覧に出す
+   どちらも単一項目の並び替え・条件だけなので、複合インデックスは不要 */
+const GAME_ROOM_LIST_LIMIT = 50;
+
 function loadGameRooms() {
   if (!gameRoomsEl) return;
   if (unsubscribeGameRooms) { unsubscribeGameRooms(); unsubscribeGameRooms = null; }
+  if (!currentUser) return;
 
-  unsubscribeGameRooms = onSnapshot(
-    query(collection(db, "gameRooms"), orderBy("createdAt", "desc")),
-    (snapshot) => {
-      latestGameRooms = snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
-      renderGameRooms(latestGameRooms);
-    },
-    (error) => {
-      console.error("ゲーム部屋監視エラー:", error);
-      gameRoomsEl.innerHTML = `<div class="empty-state">ゲーム部屋を読み込めませんでした</div>`;
-    }
-  );
+  const parts = { recent: null, mine: null };
+  const update = () => {
+    if (!parts.recent || !parts.mine) return;
+    const merged = new Map();
+    [...parts.recent, ...parts.mine].forEach((room) => merged.set(room.id, room));
+    latestGameRooms = [...merged.values()].sort((a, b) => timestampMillis(b.createdAt) - timestampMillis(a.createdAt));
+    renderGameRooms(latestGameRooms);
+  };
+  const onError = (error) => {
+    console.error("ゲーム部屋監視エラー:", error);
+    gameRoomsEl.innerHTML = `<div class="empty-state">ゲーム部屋を読み込めませんでした</div>`;
+  };
+  const toRooms = (snapshot) => snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+
+  const unsubscribers = [
+    onSnapshot(query(collection(db, "gameRooms"), orderBy("createdAt", "desc"), limit(GAME_ROOM_LIST_LIMIT)), (snapshot) => { parts.recent = toRooms(snapshot); update(); }, onError),
+    onSnapshot(query(collection(db, "gameRooms"), where("memberUids", "array-contains", currentUser.uid)), (snapshot) => { parts.mine = toRooms(snapshot); update(); }, onError)
+  ];
+  unsubscribeGameRooms = () => unsubscribers.forEach((u) => u());
 }
 
 function renderGameRooms(allRooms) {
   if (!gameRoomsEl) return;
   gameRoomsEl.innerHTML = "";
+
+  /* 緊急メンテナンス中のゲームは、ルーム一覧の代わりにお知らせを出し、ルーム作成ボタンを止める */
+  const underMaintenance = isGameUnderMaintenance(currentGameType);
+  if (createGameRoomButton) {
+    createGameRoomButton.disabled = underMaintenance;
+    createGameRoomButton.title = underMaintenance ? "緊急メンテナンス中" : "";
+  }
+  if (underMaintenance) {
+    gameRoomsEl.appendChild(buildGameMaintenanceNotice());
+    /* 参加中のルームだけは開ける（お知らせと「ルームを閉じる」だけの画面。対局はできない） */
+    (allRooms || [])
+      .filter((room) => room.gameType === currentGameType && Array.isArray(room.members) && room.members.includes(username))
+      .forEach((room) => {
+        const card = document.createElement("div");
+        card.className = "room-card";
+        card.innerHTML = `
+          <div class="room-title">${escapeHTML(getGameTypeName(room.gameType))}（参加中）</div>
+          <div class="room-owner">作成者：${escapeHTML(room.owner || "不明")}</div>
+          <div class="room-status">メンテナンス中のため、対局はできません</div>`;
+        const openButton = document.createElement("button");
+        openButton.type = "button";
+        openButton.className = "primary-button";
+        openButton.textContent = "開く（退出のみ）";
+        openButton.addEventListener("click", () => joinGameRoom(room));
+        card.appendChild(openButton);
+        gameRoomsEl.appendChild(card);
+      });
+    return;
+  }
 
   /* 現在選択しているゲーム種類の部屋だけ表示する */
   const rooms = (allRooms || []).filter((room) => room.gameType === currentGameType);
@@ -6588,6 +7257,7 @@ createGameRoomButton?.addEventListener("click", async () => {
   if (!currentUser || !username) return alert("ログインしてください。");
 
   const type = currentGameType || "daifugo";
+  if (isGameUnderMaintenance(type)) return alert(GAME_MAINTENANCE_ALERT);
   const gameName = getGameTypeName(type);
   const existing = latestGameRooms.find((room) => isMyOpenRoom(room, type));
   if (existing) {
@@ -6669,6 +7339,12 @@ async function joinGameRoom(room) {
     const members = Array.isArray(data.members) ? [...data.members] : [];
     const memberUids = Array.isArray(data.memberUids) ? [...data.memberUids] : [];
     const maxPlayers = getMaxGamePlayers(data.gameType);
+
+    /* 緊急メンテナンス中：新しく参加はできない（参加中の人は、お知らせと「ルームを閉じる」だけの画面を開ける） */
+    if (isGameUnderMaintenance(data.gameType) && !members.includes(username)) {
+      alert(GAME_MAINTENANCE_ALERT);
+      return false;
+    }
 
     if (!members.includes(username)) {
       if (data.status === "playing") { alert("このゲームはすでに開始されています。"); return false; }
@@ -6775,6 +7451,14 @@ function renderCurrentGame(room) {
   if (statusEl) {
     const members = Array.isArray(room.members) ? room.members : [];
     statusEl.textContent = `参加者 ${members.length}/${getMaxGamePlayers(room.gameType)}人`;
+  }
+
+  if (isGameUnderMaintenance(room.gameType)) {
+    const inviteEl = document.getElementById("currentGameInvite");
+    if (inviteEl) inviteEl.innerHTML = "";
+    boardEl.innerHTML = "";
+    boardEl.appendChild(buildGameMaintenanceNotice());
+    return;
   }
 
   renderGameInvitePanel(room);
@@ -7138,11 +7822,108 @@ function getOthelloWinner(board) {
   return "draw";
 }
 
-function getOthelloResultText(winner) {
-  if (winner === "black") return "黒の勝ち！";
-  if (winner === "white") return "白の勝ち！";
-  if (winner === "draw") return "引き分け";
-  return "";
+function countOthelloStones(board) {
+  let black = 0, white = 0;
+  (Array.isArray(board) ? board : []).forEach((row) => (Array.isArray(row) ? row : []).forEach((cell) => {
+    if (cell === "black") black++;
+    if (cell === "white") white++;
+  }));
+  return { black, white };
+}
+
+/* 対局終了の表示用：勝敗（自分から見て）・最終枚数・何枚差か
+   勝敗そのものは今まで通り保存された state.winner（getOthelloWinner で決めたもの）を使う。ここでは表示を作るだけ */
+function getOthelloResultSummary(state, room, board) {
+  const { black, white } = countOthelloStones(board);
+  const members = Array.isArray(room?.members) ? room.members : [];
+  const names = { black: members[0] || "", white: members[1] || "" };
+  const myColor = getOthelloPlayerColor(room);
+  const winner = state?.winner;
+  const colorText = { black: "黒", white: "白" };
+  const diff = Math.abs(black - white);
+
+  if (winner === "draw") {
+    return {
+      tone: "draw", black, white, names, myColor, winner, diff: 0,
+      headline: "🤝 引き分け",
+      detail: `黒も白も ${black}枚ずつ、同じ枚数でした`
+    };
+  }
+
+  const winnerName = names[winner] ? `（${names[winner]}）` : "";
+  const winnerLabel = `${colorText[winner] || ""}${winnerName}の勝ち`;
+  const margin = diff > 0 ? `・${diff}枚差` : "";
+  if (myColor) {
+    const iWon = myColor === winner;
+    return {
+      tone: iWon ? "win" : "lose", black, white, names, myColor, winner, diff,
+      headline: iWon ? "🎉 あなたの勝ち！" : "😢 相手の勝ち",
+      detail: iWon ? `${winnerLabel}${diff > 0 ? `・${diff}枚差で勝ちました` : ""}` : `${winnerLabel}${diff > 0 ? `・${diff}枚差で負けました` : ""}`
+    };
+  }
+  return {
+    tone: "neutral", black, white, names, myColor, winner, diff,
+    headline: `🏆 ${winnerLabel}！`,
+    detail: `${winnerLabel}${margin}`
+  };
+}
+
+/* 対局終了の結果（勝者を大きく・黒と白の最終枚数・何枚差か・自分の勝ち／負け／引き分け） */
+function buildOthelloResultElement(summary) {
+  const result = document.createElement("div");
+  result.className = `othello-result othello-result--${summary.tone}`;
+  result.setAttribute("role", "status");
+
+  const headline = document.createElement("div");
+  headline.className = "othello-result-headline";
+  headline.textContent = summary.headline;
+  result.appendChild(headline);
+
+  const detail = document.createElement("div");
+  detail.className = "othello-result-detail";
+  detail.textContent = summary.detail;
+  result.appendChild(detail);
+
+  const score = document.createElement("div");
+  score.className = "othello-score";
+  const side = (color) => {
+    const item = document.createElement("div");
+    const isWinner = summary.winner === color;
+    item.className = `othello-score-side ${color}${isWinner ? " is-winner" : ""}${summary.myColor === color ? " is-me" : ""}`;
+    item.dataset.color = color;
+
+    const stone = document.createElement("span");
+    stone.className = `othello-stone ${color} othello-score-stone`;
+    item.appendChild(stone);
+
+    const label = document.createElement("span");
+    label.className = "othello-score-label";
+    const who = summary.names[color] ? ` ${summary.names[color]}` : "";
+    label.textContent = `${color === "black" ? "黒" : "白"}${who}${summary.myColor === color ? "（あなた）" : ""}`;
+    item.appendChild(label);
+
+    const count = document.createElement("span");
+    count.className = "othello-score-count";
+    count.textContent = `${summary[color]}枚`;
+    item.appendChild(count);
+
+    if (isWinner) {
+      const badge = document.createElement("span");
+      badge.className = "othello-score-badge";
+      badge.textContent = "勝ち";
+      item.appendChild(badge);
+    }
+    return item;
+  };
+  score.appendChild(side("black"));
+  const vs = document.createElement("span");
+  vs.className = "othello-score-vs";
+  vs.textContent = summary.winner === "draw" ? "＝" : "対";
+  score.appendChild(vs);
+  score.appendChild(side("white"));
+  result.appendChild(score);
+
+  return result;
 }
 
 function renderOthelloBoard(container, room) {
@@ -7155,14 +7936,14 @@ function renderOthelloBoard(container, room) {
   const wrapper = document.createElement("div");
   wrapper.className = "othello-wrapper";
 
-  const info = document.createElement("div");
-  info.className = "game-info";
   if (state.winner) {
-    info.textContent = getOthelloResultText(state.winner);
+    wrapper.appendChild(buildOthelloResultElement(getOthelloResultSummary(state, room, board)));
   } else {
+    const info = document.createElement("div");
+    info.className = "game-info";
     info.textContent = (state.currentPlayer || "black") === "black" ? "黒の番" : "白の番";
+    wrapper.appendChild(info);
   }
-  wrapper.appendChild(info);
 
   const boardElement = document.createElement("div");
   boardElement.className = "othello-board";
@@ -7812,6 +8593,7 @@ function getDaifugoRuleSummary(rules) {
 
 async function updateDaifugoRule(roomId, key, value) {
   if (!currentUser || !(key in DAIFUGO_DEFAULT_RULES)) return false;
+  if (isGameUnderMaintenance("daifugo")) { alert(GAME_MAINTENANCE_ALERT); return false; }
   const roomRef = doc(db, "gameRooms", roomId);
 
   try {
@@ -7889,6 +8671,7 @@ function dealDaifugoCards(deck, playerCount) {
 
 async function startDaifugoGame(roomId) {
   if (!currentUser) return;
+  if (isGameUnderMaintenance("daifugo")) return alert(GAME_MAINTENANCE_ALERT);
 
   try {
     const roomRef = doc(db, "gameRooms", roomId);
@@ -8287,6 +9070,7 @@ function renderDaifugoGame(container, room) {
 
 async function playDaifugoCards(roomId) {
   if (!currentUser) return;
+  if (isGameUnderMaintenance("daifugo")) return alert(GAME_MAINTENANCE_ALERT);
   if (selectedDaifugoCards.length === 0) return alert("カードを選択してください。");
 
   const roomRef = doc(db, "gameRooms", roomId);
@@ -8382,6 +9166,7 @@ async function playDaifugoCards(roomId) {
 
 async function passDaifugoTurn(roomId) {
   if (!currentUser) return;
+  if (isGameUnderMaintenance("daifugo")) return alert(GAME_MAINTENANCE_ALERT);
   const roomRef = doc(db, "gameRooms", roomId);
 
   try {
@@ -8564,21 +9349,11 @@ async function grantLoginBonusIfNeeded(data) {
   loginBonusInFlight = true;
   const requestedFor = username;
   try {
-    let granted = false;
-    await runTransaction(db, async (transaction) => {
-      const userRef = doc(db, "users", requestedFor);
-      const snap = await transaction.get(userRef);
-      granted = false;
-      if (!snap.exists()) return;
-      const fresh = snap.data();
-      if (typeof fresh.coins !== "number" || fresh.lastLoginBonusDate === today) return;
-      transaction.update(userRef, { coins: fresh.coins + LOGIN_BONUS_COINS, lastLoginBonusDate: today });
-      granted = true;
-    });
+    const result = await callEconomyApi("loginBonus");
     if (requestedFor === username) loginBonusCheckedDate = today;
-    if (granted && requestedFor === username) showAppToast("🎁 ログインボーナス", `今日のログインボーナス +${LOGIN_BONUS_COINS}コイン`);
+    if (result?.granted && requestedFor === username) showAppToast("🎁 ログインボーナス", `今日のログインボーナス +${LOGIN_BONUS_COINS}コイン`);
   } catch (error) {
-    console.warn("ログインボーナスの付与に失敗:", error);
+    console.warn("ログインボーナスの付与に失敗:", error?.economyCode || error);
   } finally {
     loginBonusInFlight = false;
   }
@@ -8589,120 +9364,43 @@ function economyError(code) {
   return Object.assign(new Error(code), { economyCode: code });
 }
 
-async function runMyEconomyTransaction(work, { withMarket = false } = {}) {
-  if (!currentUser || !username) throw economyError("NOT_LOGGED_IN");
-  const userRef = doc(db, "users", username);
-  const marketRef = doc(db, "market", "current");
-  let marketData = null;
-  const outcome = await runTransaction(db, async (transaction) => {
-    const snap = await transaction.get(userRef);
-    const marketSnap = withMarket ? await transaction.get(marketRef) : null;
-    if (!snap.exists()) throw economyError("NO_USER");
-    marketData = marketSnap ? (marketSnap.exists() ? marketSnap.data() : createInitialMarketData()) : null;
-    const result = work(snap.data(), marketData);
-    transaction.update(userRef, result.fields);
-    return result;
-  });
-  /* 売買のときに読んだ株価は、そのまま画面の表示にも使う（読み直さない） */
-  if (marketData && (!marketCache || (marketData.date || "") >= (marketCache.data?.date || ""))) marketCache = { data: marketData, fetchedAt: Date.now() };
-  return outcome;
-}
-
 function parseEconomyAmount(value) {
   const n = Number(String(value ?? "").replace(/[,，\s]/g, ""));
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 async function bankDeposit(amount) {
-  return runMyEconomyTransaction((data) => {
-    const bank = normalizeBankData(data.bank);
-    const coins = Number(data.coins) || 0;
-    if (bank.loan > 0) throw economyError("LOAN_ACTIVE");
-    if (coins < amount) throw economyError("NOT_ENOUGH_COINS");
-    return { fields: { coins: coins - amount, bank: { ...bank, deposit: bank.deposit + amount } } };
-  });
+  return callEconomyApi("bankDeposit", { amount });
 }
 
 async function bankWithdraw(amount) {
-  return runMyEconomyTransaction((data) => {
-    const bank = normalizeBankData(data.bank);
-    const coins = Number(data.coins) || 0;
-    if (bank.deposit < amount) throw economyError("NOT_ENOUGH_DEPOSIT");
-    const deposit = bank.deposit - amount;
-    return { fields: { coins: coins + amount, bank: { ...bank, deposit, interestBase: Math.min(bank.interestBase, deposit) } } };
-  });
+  return callEconomyApi("bankWithdraw", { amount });
 }
 
 async function bankBorrow() {
-  return runMyEconomyTransaction((data) => {
-    const bank = normalizeBankData(data.bank);
-    const coins = Number(data.coins) || 0;
-    if (bank.loan > 0) throw economyError("LOAN_ACTIVE");
-    if (coins > BANK_LOAN_MAX_COINS) throw economyError("TOO_MANY_COINS");
-    const now = derbyNow();
-    return {
-      fields: {
-        coins: coins + BANK_LOAN_AMOUNT,
-        bank: {
-          ...bank,
-          loan: BANK_LOAN_AMOUNT,
-          loanTakenAt: Timestamp.fromDate(now),
-          loanDueAt: Timestamp.fromDate(new Date(now.getTime() + BANK_LOAN_DAYS * 24 * 3600 * 1000)),
-          overdue: false,
-          overdueDate: null,
-          lastAutoRepay: null
-        }
-      }
-    };
-  });
+  return callEconomyApi("bankBorrow");
 }
 
 /* 返済は一括だけ（期限切れの自動返済で一部が返されていれば、残りの全額） */
 async function bankRepay() {
-  return runMyEconomyTransaction((data) => {
-    const bank = normalizeBankData(data.bank);
-    const coins = Number(data.coins) || 0;
-    if (bank.loan <= 0) throw economyError("NO_LOAN");
-    if (coins < bank.loan) throw economyError("NOT_ENOUGH_COINS");
-    return {
-      fields: {
-        coins: coins - bank.loan,
-        bank: { ...bank, loan: 0, loanTakenAt: null, loanDueAt: null, overdue: false, overdueDate: null, lastAutoRepay: null }
-      },
-      repaid: bank.loan
-    };
-  });
+  return callEconomyApi("bankRepay");
 }
 
 async function tradeStock(code, side, qty) {
   const company = STOCK_COMPANIES.find((c) => c.code === code);
   if (!company) throw economyError("NO_COMPANY");
-  return runMyEconomyTransaction((data, market) => {
-    const price = getStockPrice(market, code);
-    const coins = Number(data.coins) || 0;
-    const holding = normalizeStocksData(data.stocks)[code] || { qty: 0, cost: 0 };
-    const amount = price * qty;
-    let next;
-    let nextCoins;
-    if (side === "buy") {
-      if (coins < amount) throw economyError("NOT_ENOUGH_COINS");
-      next = { qty: holding.qty + qty, cost: holding.cost + amount };
-      nextCoins = coins - amount;
-    } else {
-      if (holding.qty < qty) throw economyError("NOT_ENOUGH_STOCK");
-      const costPart = Math.round(holding.cost * (qty / holding.qty));
-      next = { qty: holding.qty - qty, cost: holding.cost - costPart };
-      nextCoins = coins + amount;
-    }
-    return {
-      fields: { coins: nextCoins, [`stocks.${code}`]: next.qty > 0 ? next : deleteField() },
-      price, amount
-    };
-  }, { withMarket: true });
+  return callEconomyApi("stockTrade", { code, side, qty });
 }
 
 const ECONOMY_ERROR_MESSAGES = {
   NOT_ENOUGH_COINS: "手持ちのゆうcoinが足りません。",
+  NETWORK: "サーバーに接続できませんでした。時間をおいてもう一度お試しください。",
+  RACE_CLOSED: "このレースは投票を受け付けていません（締切・発走済みなど）。",
+  invalid_amount: "金額が正しくありません。",
+  invalid_qty: "株数が正しくありません。",
+  invalid_bet_type: "投票の種類が正しくありません。",
+  invalid_horses: "馬の選び方が正しくありません。",
+  busy: "ほかの操作と重なりました。もう一度お試しください。",
   NOT_ENOUGH_DEPOSIT: "預金が足りません。",
   NOT_ENOUGH_STOCK: "保有している株数が足りません。",
   LOAN_ACTIVE: "借入中は、預け入れ・新しい借入はできません。先に返済してください。",
